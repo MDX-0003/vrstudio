@@ -101,7 +101,10 @@ def test_submit_dry_run_prints_argv_without_calling(tmp_path, src_video, monkeyp
     ])
     assert r.exit_code == 0, r.output
     argv_lines = [line.strip() for line in r.output.splitlines()]
-    for token in ("vrgen", "submit", "--job", "e2e", "--input",
+    # 本机 vrstudio.toml 可把 vrgen 覆盖成绝对路径（generate.vrgen），
+    # 所以可执行文件那行断言"包含 vrgen"而不是全等
+    assert "vrgen" in argv_lines[1], f"argv 缺 vrgen 可执行文件：{r.output}"
+    for token in ("submit", "--job", "e2e", "--input",
                   "--template", "360-closure", "--set", "theme=夜晚"):
         assert token in argv_lines, f"argv 缺 {token!r}：{r.output}"
     assert not called                     # dry-run 绝不真调

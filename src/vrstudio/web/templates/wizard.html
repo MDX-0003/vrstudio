@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>{{ name }} · {{ flow }} · vrstudio</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #141414; color: #ddd; margin: 0.8rem; }
+  h1 { font-size: 1.0rem; margin: 0.2rem 0 0.6rem; }
+  h1 .badge { font-size: 0.7rem; border-radius: 4px; padding: 0.05rem 0.4rem; vertical-align: middle; }
+  .badge.patch { background: #2d4a5a; color: #9cf; }
+  .badge.fullredraw { background: #4a3a2d; color: #fc9; }
+  /* 软向导步骤条：随时可点，达成状态用颜色表达 */
+  #steps { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.8rem; }
+  .step-tab { padding: 0.3rem 0.9rem; border-radius: 16px; cursor: pointer;
+              border: 1px solid #444; background: #1c1c1c; font-size: 0.85rem; }
+  .step-tab .n { color: #888; margin-right: 0.3rem; }
+  .step-tab.cur { border-color: #7c7; background: #223122; }
+  .step-tab.done .n::after { content: " ✓"; color: #7c7; }
+  .panel { background: #1c1c1c; border: 1px solid #333; border-radius: 8px;
+           padding: 0.8rem; display: none; }
+  .panel.cur { display: block; }
+  .row { display: flex; gap: 1rem; align-items: flex-start; flex-wrap: wrap; }
+  h3 { font-size: 0.9rem; margin: 0.2rem 0 0.4rem; color: #9c9; }
+  .meta { font-size: 0.78rem; color: #9a9; }
+  img, video { border: 1px solid #444; display: block; background: #000; }
+  img { cursor: crosshair; }
+  #vpWrap { position: relative; display: inline-block; }
+  #innerBox { position: absolute; border: 2px dashed #f33; pointer-events: none; display: none; }
+  #erpWrap { position: relative; display: inline-block; }
+  #vpFoot, #vpCross { position: absolute; pointer-events: none; display: none; }
+  #vpFoot { border: 1px solid #4f4; }
+  #vpCross { width: 18px; height: 18px; margin: -9px 0 0 -9px;
+             background: linear-gradient(#f00,#f00) center / 100% 2px no-repeat,
+                         linear-gradient(#f00,#f00) center / 2px 100% no-repeat; }
+  #scrub { display: flex; gap: 0.3rem; align-items: center; margin-top: 0.3rem; width: 512px; }
+  #frameSlider { flex: 1; min-width: 120px; }
+  button { background: #2d4a2d; color: #ddd; border: 1px solid #4a4; border-radius: 4px;
+           padding: 0.3rem 0.7rem; cursor: pointer; margin: 0.15rem 0.1rem; }
+  button:disabled { background: #222; color: #666; border-color: #444; cursor: not-allowed; }
+  button.big { font-size: 0.95rem; padding: 0.45rem 1.1rem; }
+  select, input { background: #222; color: #ddd; border: 1px solid #444; border-radius: 4px; padding: 0.25rem; }
+  pre { background: #111; border: 1px solid #333; padding: 0.4rem; font-size: 0.72rem;
+        max-height: 220px; overflow-y: auto; margin: 0.3rem 0; white-space: pre-wrap; }
+  .ok { color: #7c7; } .bad { color: #c77; } .dim { color: #777; }
+  #joy { display: grid; grid-template-columns: repeat(3, 34px);
+         grid-auto-rows: 30px; gap: 3px; align-items: center; justify-items: center; }
+  .jb { width: 34px; height: 30px; margin: 0; padding: 0; user-select: none; touch-action: none; }
+  /* 对比：同步播放 + 滑动分割线 */
+  #cmpWrap { position: relative; width: 640px; user-select: none; overflow: hidden; }
+  #cmpA, #cmpB { width: 640px; display: block; }
+  #cmpB { position: absolute; top: 0; left: 0; clip-path: inset(0 0 0 50%); }
+  #cmpBar { position: absolute; top: 0; bottom: 0; width: 3px; background: #7c7;
+            left: 50%; cursor: ew-resize; }
+  #cmpBar::after { content: "◀ ▶"; position: absolute; top: 48%; left: -22px;
+                   color: #7c7; font-size: 0.7rem; }
+  .verline { padding: 0.2rem 0; border-bottom: 1px dashed #2a2a2a; }
+  #browseBox { position: fixed; top: 10%; left: 30%; width: 40%; background: #1c1c1c;
+               border: 1px solid #4a4; border-radius: 6px; padding: 0.7rem; display: none; z-index: 9; }
+  .bitem { padding: 0.15rem 0.3rem; cursor: pointer; }
+  .bitem:hover { background: #262626; }
+</style>
+</head>
+<body data-name="{{ name }}" data-flow="{{ flow }}">
+<h1><span class="badge {{ flow }}">{{ flow }}</span> {{ name }}
+  <a href="/" style="float:right;font-size:0.8rem;color:#9c9">← case 列表</a></h1>
+
+<div id="steps"></div>
+
+<!-- ── patch：pick ─────────────────────────────────────────────────── -->
+<div class="panel" id="pnl-pick">
+  <h3>选区（草稿：只影响预览；运行抽取才冻结成版本）</h3>
+  <div class="meta">全景：拖进度条逐帧查看；点哪里，视口中心就在哪里</div>
+  <div id="erpWrap">
+    <video id="erpVid" style="width:512px" muted preload="auto"></video>
+    <div id="vpFoot"></div><div id="vpCross"></div>
+  </div>
+  <div id="scrub">
+    <button id="btnPlay" style="width:34px" title="播放/暂停">▶</button>
+    <button id="btnPrev" style="width:30px" title="上一帧">◁</button>
+    <button id="btnNext" style="width:30px" title="下一帧">▷</button>
+    <input type="range" id="frameSlider" min="0" max="0" value="0" step="1">
+    <span class="meta" id="frameLabel">0/0</span>
+  </div>
+  <div class="meta">逐帧走查：检查红框（inner）是否始终框住目标——下方视口图跟随当前帧刷新</div>
+  <div class="meta" id="vpMeta">yaw - pitch -</div>
+  <div class="meta">视口：按住拖一个框圈住目标区域，松手保存</div>
+  <div id="vpWrap"><img id="vpImg" style="width:512px" draggable="false"><div id="innerBox"></div></div>
+  <div class="meta" id="inMeta">inner -</div>
+  <div class="row" style="align-items:center">
+    <div id="joy">
+      <span></span><button class="jb" data-dy="0" data-dp="0.1">↑</button><span></span>
+      <button class="jb" data-dy="-0.1" data-dp="0">←</button><span class="meta">•</span><button class="jb" data-dy="0.1" data-dp="0">→</button>
+      <span></span><button class="jb" data-dy="0" data-dp="-0.1">↓</button><span></span>
+    </div>
+    <div class="meta">微调摇杆：按住持续偏移（0.1°/0.1s），yaw 回绕、pitch 到 ±89 停</div>
+    <div>
+      <div class="meta">抽取范围（帧）</div>
+      <input id="fStart" type="number" style="width:70px"> –
+      <input id="fEnd" type="number" style="width:70px">
+      <button onclick="saveFrames()">保存范围</button>
+    </div>
+    <button onclick="resetDraft()">重置选区为最新版本</button>
+  </div>
+</div>
+
+<!-- ── patch：extract ──────────────────────────────────────────────── -->
+<div class="panel" id="pnl-extract">
+  <h3>抽取（冻结草稿 → extracts/&lt;版本&gt;/）</h3>
+  <div class="meta" id="draftGate"></div>
+  <button class="big" id="btnExtract" onclick="runOp('extract')">运行抽取（新建版本）</button>
+  <div id="verList"></div>
+</div>
+
+<!-- ── generate（两条流程共用）─────────────────────────────────────── -->
+<div class="panel" id="pnl-generate">
+  <h3>生成（vrgen：mglc 提交 / 手动注册，同构台账）</h3>
+  <div class="row">
+    <div style="min-width:300px">
+      <h3>手动后端：注册本地返回件</h3>
+      <button onclick="openBrowse()">选择文件注册为一轮</button>
+      <div class="meta">外部工具的产物指认进来，与 mglc 轮次同账</div>
+    </div>
+    <div style="min-width:300px">
+      <h3>mglc 后端：提交 Seedance</h3>
+      <input id="varInput" placeholder="提示词变量 k=v（可多条，逗号分隔）" style="width:280px">
+      <button onclick="runSubmit()">提交（花配额，断点可续）</button>
+    </div>
+  </div>
+  <h3>轮次与采用</h3>
+  <div class="meta">* = 可用（gate 非 error）；采用后结果落 case，[adopt] round 记账</div>
+  <div id="roundList"><span class="meta">还没有轮次</span></div>
+  <div class="meta">台账日志尾部（mglc.log）</div>
+  <pre id="logBox">（空）</pre>
+</div>
+
+<!-- ── patch：merge ────────────────────────────────────────────────── -->
+<div class="panel" id="pnl-merge">
+  <h3>合并（自动 restore 对齐时间契约 + 多频带融合，footprint 外逐位不变）</h3>
+  <div class="meta" id="mergeGate"></div>
+  <button class="big" id="btnMerge" onclick="runOp('merge')">合并出片 → out/</button>
+</div>
+
+<!-- ── fullredraw：pad ─────────────────────────────────────────────── -->
+<div class="panel" id="pnl-pad">
+  <h3>循环冗余画布（21:9 + mask + manifest）</h3>
+  <div class="meta" id="padGate"></div>
+  <button class="big" id="btnPad" onclick="runOp('pad')">生成画布与 mask</button>
+</div>
+
+<!-- ── fullredraw：recompose ───────────────────────────────────────── -->
+<div class="panel" id="pnl-recompose">
+  <h3>重组（整数配准 + smoothstep 混合 + 还源宽 + 闸门）</h3>
+  <div class="meta" id="recomposeGate"></div>
+  <button class="big" id="btnRecompose" onclick="runOp('recompose')">重组成片 → out/</button>
+</div>
+
+<!-- ── compare（两条流程共用）──────────────────────────────────────── -->
+<div class="panel" id="pnl-compare">
+  <h3>对比（同步播放 + 滑动分割线：左源右成）</h3>
+  <div class="meta" id="cmpGate"></div>
+  <div class="meta">选择成片：<select id="outSel" onchange="loadCompare()"></select></div>
+  <div id="cmpWrap">
+    <video id="cmpA" muted controls></video>
+    <video id="cmpB" muted></video>
+    <div id="cmpBar"></div>
+  </div>
+  <div class="meta">拖绿色分割线逐列检查接缝；播放/暂停只控制左源，右侧始终同步</div>
+</div>
+
+<h3>任务队列</h3>
+<pre id="taskBox">（空闲）</pre>
+<div class="meta">重计算一次只跑一个；每次运行同时写 logs/ 下的同名日志</div>
+
+<div id="browseBox">
+  <b>选择返回件视频</b> <button style="float:right" onclick="closeBrowse()">×</button>
+  <div class="meta" id="bPath"></div>
+  <div id="bList" style="max-height:300px;overflow-y:auto"></div>
+</div>
+
+<script src="/static/pick.js?v=1"></script>
+<script src="/static/wizard.js?v=1"></script>
+</body>
+</html>

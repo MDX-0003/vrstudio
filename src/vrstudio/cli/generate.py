@@ -212,11 +212,13 @@ def adopt(
         typer.secho(output.strip(), err=True)
         raise typer.Exit(code)
     resolved = round_key
-    if round_key == "latest":
-        m = _ROUND_IN_OUTPUT.search(output)
-        if not m:
-            _fail(GenError(f"vrgen result 没报轮次 key，无法写 adopt 指针：{output.strip()!r}"))
+    m = _ROUND_IN_OUTPUT.search(output)
+    if m:
+        # vrgen 总会回显 round=<轮次名>；认它而不是调用方传入值——
+        # 调用方可以给 latest / key 前缀 / 轮次目录路径，指针统一记轮次名
         resolved = m.group(1)
+    elif round_key == "latest":
+        _fail(GenError(f"vrgen result 没报轮次 key，无法写 adopt 指针：{output.strip()!r}"))
     case_mod.set_adopt(case.name, resolved, root=cases_dir)
     typer.echo(f"adopt    {resolved}")
     typer.echo(f"result   {out}")

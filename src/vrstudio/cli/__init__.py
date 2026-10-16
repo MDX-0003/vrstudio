@@ -15,7 +15,6 @@ from __future__ import annotations
 import typer
 
 from .. import __version__
-from . import _stubs
 from . import calib as calib_cli
 from . import case as case_cli
 from . import extract as extract_cli
@@ -26,6 +25,7 @@ from . import plan as plan_cli
 from . import recompose as recompose_cli
 from . import restore as restore_cli
 from . import seam_center as seam_center_cli
+from . import serve as serve_cli
 from . import verify as verify_cli
 
 app = typer.Typer(
@@ -60,10 +60,10 @@ app.add_typer(extract_cli.app, name="extract", help=extract_cli.app.info.help)
 app.command(name="merge", help=merge_cli.merge.__doc__)(merge_cli.merge)
 app.command(name="restore", help=restore_cli.restore.__doc__)(restore_cli.restore)
 
-# ── ★ 新增（M3 已落地 case/generate；serve 待 M4）───────────────────────
+# ── ★ 新增（M3 落地 case/generate；M4 落地 serve）───────────────────────
 app.add_typer(case_cli.app, name="case", help=case_cli.app.info.help)
 app.add_typer(generate_cli.app, name="generate", help=generate_cli.app.info.help)
-app.command(name="serve", help=_stubs.serve.__doc__)(_stubs.serve)
+app.command(name="serve", help=serve_cli.serve.__doc__)(serve_cli.serve)
 
 
 if __name__ == "__main__":
