@@ -50,10 +50,11 @@ def _fullredraw_case(tmp_path, src_video) -> case_mod.Case:
 
 def test_resolve_fullredraw_reads_manifest(tmp_path, src_video):
     case = _fullredraw_case(tmp_path, src_video)
-    video, mask, template = gen.resolve_package(case, tmp_path)
+    video, mask, template, canvas, source = gen.resolve_package(case, tmp_path)
     assert video.name == "seedance_input.mp4"
     assert mask is not None and mask.name == "seedance_input_mask.png"
-    assert template == "360-closure"
+    assert template == "360-closure" and canvas == (300, 128)
+    assert source == (256, 128)
 
 
 def test_resolve_rejects_ambiguous_manifest(tmp_path, src_video):
@@ -73,9 +74,18 @@ def test_resolve_patch_reads_extract_pointer(tmp_path, src_video):
     d.mkdir(parents=True)
     (d / "clip.mp4").write_bytes(b"clip")
     (d / "clip_mask.png").write_bytes(b"mask")
-    video, mask, template = gen.resolve_package(case_mod.load("p1", tmp_path), tmp_path)
+    from vrstudio.patch.sidecar import InnerRect, Segment, Sidecar, Viewport, save_sidecar
+    save_sidecar(Sidecar(
+        erp_width=4000, erp_height=2000, fps=30.0, version=1,
+        segments=[Segment(id="s0", frame_start=0, frame_end=239,
+                          viewport=Viewport(yaw_deg=0.0, pitch_deg=0.0, fov_h_deg=90.0,
+                                            width=1470, height=630),
+                          inner=InnerRect(x=400, y=200, width=600, height=500))]),
+                d / "clip.json")
+    video, mask, template, canvas, source = gen.resolve_package(case_mod.load("p1", tmp_path), tmp_path)
     assert video.name == "clip.mp4" and mask is not None
     assert template == "character-repaint"
+    assert canvas == (1470, 630) and source == (1470, 630)   # 来自 clip.json 契约
 
 
 # ── submit --dry-run ─────────────────────────────────────────────────────

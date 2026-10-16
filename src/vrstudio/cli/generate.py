@@ -74,11 +74,14 @@ def _capture(argv: list[str]) -> tuple[int, str]:
 
 
 def resolve_package(case: case_mod.Case,
-                    root: str | Path | None = None) -> tuple[Path, Path | None, str]:
-    """→ (送生成的视频, mask, 模板 id)。
+                    root: str | Path | None = None) -> tuple[Path, Path | None, str,
+                                                             tuple[int, int], tuple[int, int]]:
+    """→ (送生成的视频, mask, 模板 id, canvas 尺寸, source 尺寸)。
 
     fullredraw：manifest 读而不重推导——它记录的是 pad 当时真做了什么
-    （此守卫连同理由一并继承自 vrpad 的 aigc/case.py）。
+    （此守卫连同理由一并继承自 vrpad 的 aigc/case.py）。canvas/source 是 vrgen
+    提示词几何占位符的唯一来源（band = canvas_w - source_w）。
+    patch：无冗余带概念，canvas=source=clip 实际尺寸（探测）。
     """
     if case.flow == "fullredraw":
         manifests = sorted(case.dir(root).glob("*_pad.json"))
@@ -99,6 +102,8 @@ def resolve_package(case: case_mod.Case,
         if man.mask.path:
             candidate = manifests[0].parent / Path(man.mask.path).name
             mask = candidate if candidate.is_file() else None
+        plan = man.to_pad_plan()
+        canvas_size, source_size = plan.canvas_size, plan.source_size
     else:
         if not case.extract_current:
             raise GenError(
@@ -111,9 +116,17 @@ def resolve_package(case: case_mod.Case,
             raise GenError(f"{video} 不存在——重新 extract")
         if not mask.is_file():
             mask = None
+        # clip 尺寸读冻结契约（clip.json 的 viewport），不探测视频：
+        # 契约比 ffprobe 更权威，且不依赖外部二进制。
+        from ..patch.sidecar import load_sidecar
+        sidecar = load_sidecar(d / "clip.json")
+        if len(sidecar.segments) != 1:
+            raise GenError(f"{d / 'clip.json'}：patch 流契约是单段")
+        vp = sidecar.segments[0].viewport
+        canvas_size = source_size = (int(vp.width), int(vp.height))
     if not video.is_file():
         raise GenError(f"输入包的视频不存在：{video}")
-    return video, mask, TEMPLATE_BY_FLOW[case.flow]
+    return video, mask, TEMPLATE_BY_FLOW[case.flow], canvas_size, source_size
 
 
 # ── 命令 ─────────────────────────────────────────────────────────────────
@@ -139,11 +152,13 @@ def submit(
     conf = load_config(overrides=overrides or [])
     case = _load_case(case_name, cases_dir)
     try:
-        video, mask, template = resolve_package(case, cases_dir)
+        video, mask, template, canvas_size, source_size = resolve_package(case, cases_dir)
     except GenError as exc:
         _fail(exc)
     argv = [_vrgen_exe(conf), "submit", "--job", case.name,
-            "--input", str(video), "--template", template]
+            "--input", str(video), "--template", template,
+            "--canvas", f"{canvas_size[0]}x{canvas_size[1]}",
+            "--source", f"{source_size[0]}x{source_size[1]}"]
     if mask:
         argv += ["--mask", str(mask)]
     for item in variables or []:
