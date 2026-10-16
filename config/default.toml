@@ -1,0 +1,82 @@
+# vrstudio 默认配置（← vrpad config/default.toml 迁入，去掉 [aigc] 段——
+# 平台参数归 vrgen 仓库）。
+#
+# 分层加载，优先级从高到低：
+#   CLI --set key=value  >  --config FILE  >  ./vrstudio.toml  >  ~/.config/vrstudio/default.toml  >  本文件（内置默认）
+# --set 支持点号路径覆盖任意键，便于参数扫描。
+
+schema = 1
+
+# ── pad ────────────────────────────────────────────────────────────────
+[pad]
+# 目标画布宽高比。这是唯一的旋钮：P（单侧循环冗余宽度）由它推导。
+#   "21:9"  推荐。2:1 源 -> P = W/12 (8.33%/侧)；16:9 源 -> P = 5W/32 (15.63%/侧)
+#   "16:9"  会重新引入垂直 padding（2:1 源凑 16:9 需每侧 23%），不建议
+#   "auto"  取不小于源比例的下一个标准桶（逃生舱；可能与 AIGC 工具的原生桶不符）
+target_aspect      = "21:9"
+# 源在 pad 之前的预滚动量。"auto" = +P，使 recompose 的输出回到原始朝向。
+# 注意：这一步必须在 pad 阶段做；放到 recompose 阶段会把 wrap 对推走。
+pre_roll           = "auto"
+on_aspect_conflict = "error"     # error | grow_canvas
+even_dimensions    = true        # yuv420p 要求
+
+# pad 的帧处理链（顺序即执行顺序，名字在 pipeline.TRANSFORMS 注册）
+[pad.pipeline]
+transforms = ["pre_roll", "pad_h"]
+
+# ── mask ───────────────────────────────────────────────────────────────
+[mask]
+enabled         = true
+strategy        = "redundant_white"   # redundant_white | content_white | tri_band
+feather_px      = 0                   # 契约要求二值；>0 仅用于实验
+png_compression = 0                   # 无损、无压缩杂色
+path_template   = "{stem}_mask.png"
+
+# ── recompose ──────────────────────────────────────────────────────────
+[recompose]
+registration       = "circular_translate"   # circular_translate | none
+search_pct         = 25.0    # 搜索上限 = round(L * search_pct/100)，占 L 的百分比
+d_star_mode        = "clip_median"          # clip_median | clip_mode | per_frame
+per_frame_ema_alpha = 0.05   # 仅 d_star_mode="per_frame" 用；未平滑的逐帧 d* 必然闪烁
+blend_weight       = "smoothstep"           # smoothstep | linear | cosine
+endpoint_lock_pct  = 2.0     # 每端锁定的纯色宽度，占 L 的百分比（闭合保证）
+restore_interp     = "lanczos4"
+boundary_repair    = "off"                  # off | feather（红蓝 / 绿红过渡）
+boundary_repair_pct = 15.0   # feather 时 T = max(8, round(L * pct/100))
+max_sample_rows    = 256     # 配准粗搜索时纵向降采样到的行数（精度/速度权衡）
+aspect_drift_warn_pct = 2.0  # 工具返回的宽高比与画布差多少就告警（输出仍是 WxH，
+                             # 闭合是横向的，但内容会被拉伸）
+
+# 配准 / 画布假设闸门
+min_band_correlation = 0.80   # 对齐后蓝绿带的相关系数低于此值 -> ERROR 中止。
+                              # 本质检验："两条带是不是同一段内容"。同内容 >= 0.95，
+                              # 无关内容 ~0。对整体亮度梯度免疫（梯度只改均值）。
+warn_quality         = 1.15   # 代价曲线过平（mae_second/mae_min 低于此值）-> WARN：
+                              # d* 可能是巧合匹配
+
+# ── verify ─────────────────────────────────────────────────────────────
+[verify]
+interior_band       = [0.25, 0.75]   # 取中间这段宽度当"正常"基线，避开边缘
+max_wrap_percentile = 95     # wrap 百分位高于此值判坏
+worst_interior_tol  = 1.0    # worst_interior 不得超过 before 的最差值 × (1+容忍)
+
+# ── 输出视频 ────────────────────────────────────────────────────────────
+[video]
+encoder  = "libx264"
+crf      = 0          # 0 = 无损。8K 建议 12–14 + pix_fmt yuv444p10le
+preset   = "veryfast"
+pix_fmt  = "yuv444p"  # 混合是逐像素加权，必须 4:4:4
+audio    = "copy"     # copy | none
+metadata = "copy"
+
+# ── manifest ───────────────────────────────────────────────────────────
+[manifest]
+path_template = "{stem}_pad.json"
+write_hash    = true
+
+# ── 外部二进制 ──────────────────────────────────────────────────────────
+[bin]
+dir                 = "bin"          # 相对仓库根
+ffmpeg              = "ffmpeg.exe"
+ffprobe             = "ffprobe.exe"
+allow_path_fallback = false          # 分发版必须命中 bin/；开发期可设 true

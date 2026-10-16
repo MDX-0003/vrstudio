@@ -6,7 +6,8 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "typer>=0.12",
-    # M2 迁入几何/像素库时追加：numpy, opencv-python
+    "numpy",
+    "opencv-python",
     # M4 迁入 web 时追加 optional-dependencies: web = [starlette, uvicorn, jinja2]
 ]
 
@@ -36,3 +37,24 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
+
+# 迁入代码（← vrpad / vrpatch）按"原样搬运、行为零变化"原则豁免风格项；
+# 新写代码（case/generate/media 合并层等）保持全量检查。
+[tool.ruff.lint.per-file-ignores]
+"src/vrstudio/redraw/**" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
+"src/vrstudio/patch/**" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
+"src/vrstudio/media/videoio.py" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
+"src/vrstudio/media/binres.py" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
+"src/vrstudio/media/ffmpeg.py" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
+"src/vrstudio/progress.py" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
+"src/vrstudio/config.py" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
+"src/vrstudio/cli/pad.py" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
+"src/vrstudio/cli/recompose.py" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
+"src/vrstudio/cli/plan.py" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
+"src/vrstudio/cli/verify.py" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
+"src/vrstudio/cli/calib.py" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
+"src/vrstudio/cli/seam_center.py" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
+"src/vrstudio/cli/extract.py" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
+"src/vrstudio/cli/merge.py" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
+"src/vrstudio/cli/restore.py" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
+"tests/**" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
