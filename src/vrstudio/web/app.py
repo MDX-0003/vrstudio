@@ -147,7 +147,7 @@ def _workdir() -> Path:
 
 _ROUND_LINE = re.compile(
     r"^\s+(?P<mark>[*x])\s+(?P<round>\S+)\s+(?P<backend>\S+)\s+(?P<stage>\S+)\s+"
-    r"gate=(?P<gate>\S+)\s+(?P<updated>\S+)")
+    r"gate=(?P<gate>\S+)\s+result=(?P<result>yes|no)\s+(?P<updated>\S+)")
 
 
 def _rounds(name: str) -> dict:
@@ -239,7 +239,7 @@ def _gates(case: case_mod.Case, extracts: list[dict]) -> dict:
             "generate": {"ok": extracted and (adopted or any(
                 e["has_result"] for e in extracts)),
                 "reason": "" if extracted else "抽取之后才能送生成",
-                "evidence": (f"在 {cur}\\result.mp4 检测到已采用的结果（来自生成记录 {case.adopt_round}）"
+                "evidence": (f"在 {cur}\\result.mp4 检测到已选用的结果（来自 Session {case.adopt_round}）"
                              if adopted else f"在 {cur}\\result.mp4 检测到结果"),
                 "ready": extracted},
             "merge": {"ok": has_out, "ready": extracted and adopted,
@@ -256,8 +256,8 @@ def _gates(case: case_mod.Case, extracts: list[dict]) -> dict:
                                  f"再点一次按钮会重新扩充并覆盖它")},
             "generate": {"ok": result_file, "ready": padded,
                          "reason": "" if result_file else "先送生成，并采用一次结果",
-                         "evidence": (f"在 {cdir}\\result.mp4 检测到已采用的结果"
-                                      f"（来自生成记录 {case.adopt_round}）；想换一轮，回到上面点别的「采用」"
+                         "evidence": (f"在 {cdir}\\result.mp4 检测到已选用的结果"
+                                      f"（来自 Session {case.adopt_round}）；想换一个，回到上面点别的「选用」"
                                       if result_file else "")},
             "recompose": {"ok": has_out, "ready": result_file,
                           "reason": "" if has_out else "采用结果后才能裁回原尺寸",

@@ -21,7 +21,7 @@ let vpFrame = null;         // 当前逐帧查看的帧号（null = 第 0 帧）
 // 任务类型 → 页面上的说法（op id 是内部标识，不出现在页面上）
 const KIND_LABEL = {
   extract: "抽取", pad: "扩充两侧画面", register: "登记外部视频",
-  submit: "提交生成", adopt: "采用结果", merge: "合并", recompose: "裁回原尺寸",
+  submit: "提交生成", adopt: "拷贝选中的视频到 case", merge: "合并", recompose: "裁回原尺寸",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -183,19 +183,21 @@ function renderGenerate() {
   const from = { mglc: "Seedance", manual: "外部视频" };
   // 轮次路径含反斜杠，拼进 HTML 属性会被转义吞掉——按钮只带序号，
   // 路径从 info 里按序号取（2026-10-16 反复失败事故的原因）
-  rounds.forEach((r, i) => {
+  rounds.forEach((r) => {
     const mine = r.round === info.adopt_round;
+    const usable = r.result === "yes";
     const div = document.createElement("div");
     div.className = "verline";
     const b = document.createElement("b");
     if (mine) b.className = "ok";
-    b.textContent = `${r.mark === "*" ? "✓" : "✗"} ${r.round}${mine ? " · 已采用" : ""}`;
+    b.textContent = `${usable ? "✓" : "✗"} ${r.round}${mine ? " · 已选用" : ""}`;
     const span = document.createElement("span");
     span.className = "meta";
     span.textContent = ` ${from[r.backend] || r.backend} 生成 · ` +
-      (r.mark === "*" ? "结果可用" : "结果有问题，不能用");
+      (usable ? "视频已生成，可选用" : "未生成视频，无法被后续流程使用");
     const btn = document.createElement("button");
-    btn.textContent = "采用";
+    btn.textContent = "选用";
+    btn.disabled = !usable;
     btn.onclick = () => run("adopt", { round: r.round_dir });
     div.append(b, span, btn);
     el.appendChild(div);
