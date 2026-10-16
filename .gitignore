@@ -1,0 +1,30 @@
+# 数据不进 git（AGENTS.md 硬规则 7）
+cases/
+sources/
+logs/
+
+# 机器本地外部二进制（ffmpeg/rife，见 bin/README.md）
+# 不写 bin/ 是为了保留 bin/README.md（与旧仓库 vrpad 同款做法）
+bin/*
+!bin/README.md
+
+# 派生媒体产物
+*.mp4
+*.avi
+*_mask.png
+*_pad.json
+*_recompose.json
+*_merge.json
+
+# 机器本地配置覆盖（默认值在 config/default.toml）
+vrstudio.toml
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# 系统
+Thumbs.db

@@ -1,0 +1,38 @@
+[project]
+name = "vrstudio"
+version = "0.1.0"
+description = "360° 视频流程仓库：局部重绘（patch）与全景重绘（fullredraw）两条流程 + web 控制台"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.12",
+    # M2 迁入几何/像素库时追加：numpy, opencv-python
+    # M4 迁入 web 时追加 optional-dependencies: web = [starlette, uvicorn, jinja2]
+]
+
+[project.scripts]
+vrstudio = "vrstudio.cli:app"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vrstudio"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
