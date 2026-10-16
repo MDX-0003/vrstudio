@@ -13,6 +13,7 @@ from starlette.testclient import TestClient
 
 from vrstudio import case as case_mod
 from vrstudio.web import app as web_app
+from vrstudio.web import tasks as tasks_mod
 
 VIEWPORT = {"yaw_deg": 10.0, "pitch_deg": -5.0, "fov_h_deg": 90.0,
             "width": 320, "height": 180}
@@ -165,3 +166,76 @@ def test_gates_progress_with_extract_and_result(client, patch_case, tmp_path):
         assert info["gates"][step]["ok"] is True
     assert info["gates"]["merge"]["ready"] is True
     assert info["extracts"][0]["version"] == "v1" and info["extracts"][0]["has_result"]
+
+
+# ── 提示词模板与变量（决策 18；vrgen 侧用假 JSON 通道替身）────────────────
+
+
+def test_case_info_prompt_survives_missing_vrgen(client, patch_case):
+    info = client.get("/api/case/p1").json()
+    assert "error" in info["prompt"]          # vrgen 缺席 → 提示文案，不是 500
+
+
+def test_case_info_ok_for_fresh_fullredraw(client, tmp_path):
+    # 回归：pad 步骤的 evidence 曾在没 manifest 时无条件取 [0]，全新
+    # fullredraw case 一打开向导就 500（2026-10-16 浏览器验收发现）
+    src = tmp_path / "s.mp4"
+    src.write_bytes(b"x")
+    case_mod.create("f1", "fullredraw", src, root=tmp_path)
+    r = client.get("/api/case/f1")
+    assert r.status_code == 200
+    gates = r.json()["gates"]
+    assert gates["pad"]["ok"] is False and "扩充" in gates["pad"]["reason"]
+
+
+def test_prompt_save_passes_through_to_vrgen(client, patch_case, monkeypatch):
+    calls = []
+
+    def fake_vrgen_json(argv):
+        calls.append(argv)
+        return {"template": "character-repaint", "vars": {"theme": "黄昏"}}
+
+    monkeypatch.setattr(web_app, "_vrgen_json", fake_vrgen_json)
+    r = client.post("/api/case/p1/prompt", json={"set": "theme", "value": "黄昏"})
+    assert r.status_code == 200
+    info = r.json()
+    assert info["prompt"]["vars"]["theme"] == "黄昏"      # 回显进完整 info
+    assert calls[0][:3] == ["prompt", "save", "--job"]
+    assert "--set" in calls[0] and "theme=黄昏" in calls[0]
+
+    assert client.post("/api/case/p1/prompt",
+                       json={"unset": "theme"}).status_code == 200
+    assert "--unset" in calls[1] and "theme" in calls[1]
+
+    r = client.post("/api/case/p1/prompt", json={})
+    assert r.status_code == 400 and "没有要改" in r.text
+
+
+def test_prompt_save_propagates_vrgen_error(client, patch_case, monkeypatch):
+    monkeypatch.setattr(web_app, "_vrgen_json",
+                        lambda argv: {"error": "变量 ['theme'] 被模板正文引用，不能删除"})
+    r = client.post("/api/case/p1/prompt", json={"unset": "theme"})
+    assert r.status_code == 400 and "不能删除" in r.text
+
+
+# ── 任务队列状态（tasks.py：提交时间 + 最近 10 条）────────────────────────
+
+
+def _done_task(kind: str, case: str, state: str = "done") -> tasks_mod.Task:
+    t = tasks_mod.Task(kind, case, ["echo"])
+    t.state = state
+    t.returncode = 0 if state == "done" else 1
+    return t
+
+
+def test_task_status_carries_submit_time_and_ten_history():
+    q = tasks_mod.TaskQueue()
+    q.history = [_done_task("merge", f"c{i:02d}") for i in range(12)]
+    s = q.status()
+    assert len(s["last"]) == 10                          # 窗口从 3 条扩到 10 条
+    assert s["last"][-1]["case"] == "c11"                # 末尾是最新的（前端再反转展示）
+    assert all(t["submitted"] for t in s["last"])
+
+    t = tasks_mod.Task("extract", "cx", ["echo"])
+    q.pending = [t]
+    assert q.status()["queued"][0]["submitted"] == t.submitted

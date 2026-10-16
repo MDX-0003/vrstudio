@@ -58,6 +58,7 @@ async function loadInfo() {
   renderPick();
   renderExtract();
   renderGenerate();
+  renderPrompt();
   renderFinish();
   renderCompare();
 }
@@ -207,9 +208,9 @@ function renderGenerate() {
 }
 
 async function runSubmit() {
-  const raw = $("varInput").value.trim();
-  const vars = raw ? raw.split(/[,，]/).map(s => s.trim()).filter(Boolean) : [];
-  await run("submit", { vars });
+  // 变量值以「提示词」区保存的草稿为准（vrgen submit 自己读 prompt-vars.toml），
+  // 这里不再传临时 --set，避免出现两份说不清谁生效的值。
+  await run("submit", {});
 }
 
 // ── merge / pad / recompose ─────────────────────────────────────────────
@@ -283,21 +284,92 @@ async function pollTasks() {
     const lines = [];
     const label = (k) => KIND_LABEL[k] || k;
     if (s.current) {
-      lines.push(`▶ 正在执行 [${s.current.case}] ${label(s.current.kind)}…`);
+      lines.push(`▶ 正在执行（${s.current.submitted} 提交）[${s.current.case}] ${label(s.current.kind)}…`);
       if (s.current.log) lines.push(`完整记录：${s.current.log}`);
       lines.push(...s.current.tail);
-    } else lines.push("（当前没有任务）");
-    for (const q of s.queued) lines.push(`… 排队等候 [${q.case}] ${label(q.kind)}`);
-    for (const h of s.last) {
-      lines.push(`${h.state === "done" ? "✓ 完成" : "✗ 失败"}：[${h.case}] 上一次 ${label(h.kind)}` +
-                 (h.log ? `（完整记录：${h.log}）` : ""));
-      if (h.state !== "done") lines.push(...(h.tail || []));   // 失败时把出错原因端上来
+    } else lines.push("（当前没有任务在跑）");
+    if (s.queued.length) {
+      lines.push("── 排队等候（早提交的先跑）──");
+      for (const q of s.queued) lines.push(`${q.submitted}  [${q.case}] ${label(q.kind)}`);
+    }
+    if (s.last.length) {
+      lines.push("── 最近完成（新→旧，最多 10 条，行首是提交时间）──");
+      for (const h of [...s.last].reverse()) {
+        lines.push(`${h.submitted}  ${h.state === "done" ? "✓ 完成" : "✗ 失败"}：[${h.case}] ${label(h.kind)}` +
+                   (h.log ? `（完整记录：${h.log}）` : ""));
+        if (h.state !== "done") lines.push(...(h.tail || []));   // 失败时把出错原因端上来
+      }
     }
     $("taskBox").textContent = lines.join("\n");
     const busy = !!(s.current || s.queued.length);
     if (wasRunning && !busy) loadInfo();      // 任务收尾 → 刷新门控与列表
     wasRunning = busy;
   } catch (_) { /* 服务重启间隙忽略 */ }
+}
+
+// ── 提示词（模板只读 + 变量编辑，决策 18）────────────────────────────────
+// 数据来自 info.prompt（只在 loadInfo 与保存应答里带，post() 的应答没有这段，
+// 所以提示词面板只在页面加载与保存动作时重画）。
+
+function renderPrompt() {
+  const p = info.prompt;
+  const box = $("promptBox"), list = $("varList"), meta = $("promptMeta");
+  if (!p || p.error) {
+    box.textContent = (p && p.error) || "（提示词信息还没有加载）";
+    list.innerHTML = "";
+    meta.textContent = "";
+    return;
+  }
+  box.textContent = p.template_text || "（还没有选定模板）";
+  meta.textContent = p.template
+    ? `模板 ${p.template}。正文里其余 ${p.geometry_keys.length} 个花括号占位是画布尺寸、` +
+      "冗余带列号这类几何数值，提交时自动算好填入，不用手动改。"
+    : "";
+  const declared = (p.placeholders || []).filter(k => !p.geometry_keys.includes(k));
+  const keys = [...new Set([...declared, ...Object.keys(p.vars || {})])];
+  list.innerHTML = "";
+  for (const k of keys) {
+    const row = document.createElement("div");
+    row.className = "varline";
+    const name = document.createElement("b");
+    name.textContent = k;
+    const input = document.createElement("input");
+    input.style.width = "340px";
+    input.value = (p.vars || {})[k] ?? "";
+    input.placeholder = "（还没填）";
+    input.onchange = () => savePrompt({ set: k, value: input.value });
+    row.append(name, input);
+    if (!declared.includes(k)) {
+      const del = document.createElement("button");
+      del.textContent = "删除";
+      del.onclick = () => savePrompt({ unset: k });
+      row.append(del);
+    } else {
+      const lock = document.createElement("span");
+      lock.className = "meta";
+      lock.textContent = "模板自带，只能改值";
+      row.append(lock);
+    }
+    list.appendChild(row);
+  }
+}
+
+async function savePrompt(body) {
+  const r = await fetch(`/api/case/${encodeURIComponent(CASE)}/prompt`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const d = await r.json();
+  if (!r.ok) { alert(d.error || r.statusText); return; }
+  info = d;                        // 应答是完整 info，prompt 段就是保存后的状态
+  renderPrompt();
+}
+
+function addVar() {
+  const k = $("newVarKey").value.trim(), v = $("newVarVal").value;
+  if (!k) { alert("先填变量名"); return; }
+  savePrompt({ set: k, value: v })
+    .then(() => { $("newVarKey").value = ""; $("newVarVal").value = ""; });
 }
 
 // ── register 文件浏览器 ─────────────────────────────────────────────────

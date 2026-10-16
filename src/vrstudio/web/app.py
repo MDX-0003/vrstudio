@@ -27,6 +27,7 @@ from starlette.staticfiles import StaticFiles
 from .. import case as case_mod
 from .. import config as config_mod
 from ..case import CaseError
+from ..cli.generate import TEMPLATE_BY_FLOW
 from .render import PreviewStore
 from .tasks import QUEUE, vrstudio_argv
 
@@ -172,6 +173,29 @@ def _rounds(name: str) -> dict:
             "hint": "" if rounds else (r.stdout or r.stderr or "").strip()}
 
 
+def _vrgen_json(argv: list[str]) -> dict:
+    """跑一条 vrgen 短命令并解析 JSON 输出（prompt show/save）。
+    vrgen 不在（未装/路径未配）不炸页面——回 {"error": …} 给面板显示提示。"""
+    try:
+        r = subprocess.run([_vrgen_exe(), *argv], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"error": f"生成服务（vrgen）没有找到，提示词暂时显示不了：{e}"}
+    if r.returncode != 0:
+        return {"error": (r.stderr or r.stdout or "").strip() or "vrgen 命令失败"}
+    try:
+        return json.loads(r.stdout or "")
+    except ValueError:
+        return {"error": "vrgen 的返回不是合法 JSON"}
+
+
+def _prompt(name: str, flow: str) -> dict:
+    """提示词模板 + 变量草稿（决策 18；契约 case-model.md §4）。"""
+    return _vrgen_json(["prompt", "show", "--job", name,
+                        "--template", TEMPLATE_BY_FLOW[flow],
+                        "--workdir", str(_workdir())])
+
+
 def _log_tail(name: str, round_key: str | None, lines: int = 24) -> list[str]:
     """vrgen 台账里的调用日志尾部（决策 15：generate 页日志 tail）。
     台账文件是两仓库的对外接口（case-model.md），读它不越契约。"""
@@ -249,11 +273,14 @@ def _gates(case: case_mod.Case, extracts: list[dict]) -> dict:
                         "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}"},
         }
     else:
+        # evidence 只在 ok 时被页面读到，但仍须防御求值——全新 case 没有
+        # manifest，无条件取 [0] 会让整个 /api/case 500（2026-10-16 验收发现）
         steps = {
             "pad": {"ok": padded,
                     "reason": "" if padded else "先把两侧画面扩充好，再送生成",
-                    "evidence": (f"在 {pad_manifests[0]} 检测到扩充画面的记录文件，这一步已完成；"
-                                 f"再点一次按钮会重新扩充并覆盖它")},
+                    "evidence": (f"在 {pad_manifests[0]} 检测到扩充画面的记录文件，"
+                                 f"这一步已完成；再点一次按钮会重新扩充并覆盖它"
+                                 ) if padded else ""},
             "generate": {"ok": result_file, "ready": padded,
                          "reason": "" if result_file else "先送生成，并采用一次结果",
                          "evidence": (f"在 {cdir}\\result.mp4 检测到已选用的结果"
@@ -348,9 +375,37 @@ def _brief(name: str) -> dict | None:
 
 
 async def api_case(request):
-    info = await asyncio.to_thread(_case_info, request.path_params["name"])
+    name = request.path_params["name"]
+    info = await asyncio.to_thread(_case_info, name)
     if info is None:
         return JSONResponse({"error": "no such case"}, status_code=404)
+    # prompt 只挂在这一个读端点上：draft/nudge 等高频路径不多 spawn 一个子进程
+    info["prompt"] = await asyncio.to_thread(_prompt, name, info["flow"])
+    return JSONResponse(info)
+
+
+async def api_prompt(request):
+    """提示词变量草稿的保存（决策 18：实时保存，草稿权威在 vrgen 侧）。
+    body：{"set": key, "value": …} 新增/覆盖；{"unset": key} 删除。"""
+    name = request.path_params["name"]
+    try:
+        case = case_mod.load(name, _ctx["cases_root"])
+    except CaseError:
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    body = await request.json()
+    argv = ["prompt", "save", "--job", name,
+            "--template", TEMPLATE_BY_FLOW[case.flow], "--workdir", str(_workdir())]
+    if body.get("unset"):
+        argv += ["--unset", str(body["unset"])]
+    elif body.get("set"):
+        argv += ["--set", f"{body['set']}={body.get('value', '')}"]
+    else:
+        return JSONResponse({"error": "没有要改的内容"}, status_code=400)
+    payload = await asyncio.to_thread(_vrgen_json, argv)
+    if "error" in payload:
+        return JSONResponse(payload, status_code=400)
+    info = await asyncio.to_thread(_case_info, name)
+    info["prompt"] = payload          # save 的回显就是保存后的状态，不再多问一次
     return JSONResponse(info)
 
 
@@ -535,6 +590,7 @@ routes = [
     Route("/api/cases", api_cases, methods=["GET", "POST"]),
     Route("/api/case/{name}", api_case),
     Route("/api/case/{name}/draft", api_draft, methods=["POST"]),
+    Route("/api/case/{name}/prompt", api_prompt, methods=["POST"]),
     Route("/api/case/{name}/viewport", api_viewport, methods=["POST"]),
     Route("/api/case/{name}/inner", api_inner, methods=["POST"]),
     Route("/api/case/{name}/nudge", api_nudge, methods=["POST"]),

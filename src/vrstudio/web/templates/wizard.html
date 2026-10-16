@@ -58,6 +58,9 @@
   #cmpBar::after { content: "◀ ▶"; position: absolute; top: 48%; left: -22px;
                    color: #5a7d4a; font-size: 0.7rem; }
   .verline { padding: 0.2rem 0; border-bottom: 1px dashed #ece4d4; }
+  .varline { display: flex; gap: 0.5rem; align-items: center; padding: 0.25rem 0;
+             border-bottom: 1px dashed #ece4d4; }
+  .varline b { min-width: 90px; color: #5a4a30; }
   #browseBox { position: fixed; top: 10%; left: 30%; width: 40%; background: #ffffff;
                border: 1px solid #c2a066; border-radius: 6px; padding: 0.7rem; display: none;
                z-index: 9; box-shadow: 0 4px 16px rgba(90,74,48,.15); }
@@ -122,8 +125,7 @@
   <div class="row">
     <div style="min-width:300px">
       <h3>用 Seedance 生成</h3>
-      <input id="varInput" placeholder="补充提示词（k=v，可多条；编辑界面改进中）" style="width:280px">
-      <button onclick="runSubmit()">提交生成</button>
+      <button class="big" onclick="runSubmit()">提交生成（用下面保存的提示词）</button>
       <div class="meta">提交会消耗平台配额；中途断了重新提交会接着上次的进度走，不会重复扣</div>
     </div>
     <div style="min-width:300px">
@@ -132,6 +134,18 @@
       <div class="meta">从电脑里挑一个已经在别处生成好的视频文件，交给后面的步骤用</div>
     </div>
   </div>
+  <h3>提示词（这次发给 Seedance 的完整内容）</h3>
+  <div class="meta">下面的模板正文是固定不动的部分，照原样发出去；「风格」段落里的变量
+    在输入框里改，改动立即保存，下次打开这个 case 还在。模板自带的变量只能改值，
+    自己添加的变量可以删除。</div>
+  <pre id="promptBox">（加载中）</pre>
+  <div id="varList"></div>
+  <div class="row" style="align-items:center">
+    <input id="newVarKey" placeholder="新变量名（英文）" style="width:170px">
+    <input id="newVarVal" placeholder="新变量的值" style="width:300px">
+    <button onclick="addVar()">添加变量</button>
+  </div>
+  <div class="meta" id="promptMeta"></div>
   <h3>Session 列表与选用</h3>
   <div class="meta">✓ 表示这个 Session 里的视频已生成、可以选用；「选用」= 把选中的
     Session 里的视频拷贝到 case 文件夹，供后续步骤使用。✗ 表示未生成视频，无法被后续流程使用。</div>
@@ -181,7 +195,8 @@
 
 <h3>任务</h3>
 <pre id="taskBox">（空闲）</pre>
-<div class="meta">一次只跑一个任务，跑完自动开始下一个；每一步的完整过程记录都在 logs/ 文件夹里</div>
+<div class="meta">一次只跑一个任务，跑完自动开始下一个；每个任务行首是它的提交时间，
+  最近完成的收在最后一节（新的在上）；每一步的完整过程记录都在 logs/ 文件夹里</div>
 
 <div id="browseBox">
   <b>选择做好的视频</b> <button style="float:right" onclick="closeBrowse()">×</button>
@@ -189,7 +204,7 @@
   <div id="bList" style="max-height:300px;overflow-y:auto"></div>
 </div>
 
-<script src="/static/pick.js?v=2"></script>
-<script src="/static/wizard.js?v=2"></script>
+<script src="/static/pick.js?v=3"></script>
+<script src="/static/wizard.js?v=3"></script>
 </body>
 </html>

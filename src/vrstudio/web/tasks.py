@@ -30,6 +30,7 @@ class Task:
         self.argv = argv
         self.state = "queued"     # queued -> running -> done | failed
         self.returncode: int | None = None
+        self.submitted = time.strftime("%m-%d %H:%M:%S")   # 用户点按钮的时刻
         self.started = 0.0
         self.out_path: Path | None = None
         self.proc: subprocess.Popen | None = None
@@ -92,14 +93,16 @@ class TaskQueue:
             return {
                 "current": None if cur is None else {
                     "kind": cur.kind, "case": cur.case, "state": cur.state,
+                    "submitted": cur.submitted,
                     "tail": cur.tail(),
                     "log": str(cur.out_path) if cur.out_path else None,
                 },
-                "queued": [{"kind": t.kind, "case": t.case} for t in self.pending],
+                "queued": [{"kind": t.kind, "case": t.case,
+                            "submitted": t.submitted} for t in self.pending],
                 "last": ([{"kind": t.kind, "case": t.case, "state": t.state,
-                           "returncode": t.returncode,
+                           "returncode": t.returncode, "submitted": t.submitted,
                            "log": str(t.out_path) if t.out_path else None,
-                           "tail": t.tail(5)} for t in self.history[-3:]]),
+                           "tail": t.tail(5)} for t in self.history[-10:]]),
             }
 
 
