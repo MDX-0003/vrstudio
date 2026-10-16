@@ -15,6 +15,7 @@ from . import __version__
 app = typer.Typer(
     help="360° 视频流程仓库：patch（局部重绘）/ fullredraw（全景重绘）。",
     no_args_is_help=True,
+    invoke_without_command=True,   # 允许 `vrstudio --version` 这类不带子命令的调用
 )
 
 _NOT_IMPLEMENTED = "尚未实现（M2–M4 落地）。架构见 E:\\VRAIGC\\docs\\architecture.md。"
