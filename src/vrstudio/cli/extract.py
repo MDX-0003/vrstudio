@@ -25,6 +25,7 @@ from ..patch.case import Case, load_case, set_extract_version
 from ..patch.sidecar import Sidecar, Segment, Viewport, InnerRect, save_sidecar
 from ..patch.extract import extract_viewport_frame, open_writer, make_mask_image
 from ..progress import PhaseLog as Log, PhaseRateMeter as RateMeter, open_log_file
+from .. import case as case_mod
 
 app = typer.Typer(add_completion=False, help=__doc__)
 
@@ -103,6 +104,62 @@ def from_case(
         geometry_sha = _sha256_file(vdir / "clip.json")
         set_extract_version(case_file, version)
         derived = case_file.parent / "derived"
+        derived.mkdir(parents=True, exist_ok=True)
+        for f in ("clip.mp4", "clip.json", "clip_mask.png"):
+            shutil.copyfile(vdir / f, derived / f)
+        log.phase(f"extract version: {version} (geometry sha {geometry_sha[:12]}…)")
+        log.phase(f"log -> {log_path}")
+    finally:
+        fh.close()
+
+
+@app.command("name")
+def from_case_name(
+    case_name: str = typer.Option(..., "--case", help="统一 case 名（cases/ 下目录）"),
+    cases_dir: Path = typer.Option(None, help="default: <repo>/cases"),
+):
+    """Extract by unified case name: 草稿（viewport/inner/frames）冻结进 extracts/<版本>。
+
+    与 ``case`` 命令（vrpatch 老式 case.toml）的区别只在入口：源路径/哈希守卫/
+    草稿都来自统一 case 模型（src/vrstudio/case.py），extracts 版本目录结构与
+    clip.json 契约两者完全一致。
+    """
+    case = case_mod.load(case_name, cases_dir)
+    if case.flow != "patch":
+        typer.secho(f"extract: case {case_name} 是 {case.flow} 流（extract 是 patch 专属步骤）",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
+    missing = case_mod.draft_ready(case)
+    if missing:
+        typer.secho(f"extract: pick 草稿未定（缺 [{missing}]）——先在 web pick 或"
+                    f" case.toml 里补齐 viewport/inner/frames", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
+    src = case_mod.check_source(case, cases_dir)
+
+    fh, log_path = open_log_file(f"extract_{case.name}")
+    log = Log(fh=fh)
+    try:
+        log.phase(f"case: {case.name} (source sha256 verified)")
+        cap = cv2.VideoCapture(str(src))
+        if not cap.isOpened():
+            raise typer.Exit(f"cannot open video: {src}")
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        erp_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        erp_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        seg = Segment(id="seg_0", frame_start=int(case.frames["start"]),
+                      frame_end=int(case.frames["end"]),
+                      viewport=Viewport(**case.viewport), inner=InnerRect(**case.inner))
+        if not cap.set(cv2.CAP_PROP_POS_FRAMES, seg.frame_start):
+            log.info("WARNING: could not seek; decoding from the start instead.")
+        version = time.strftime("%Y%m%d-%H%M%S")
+        vdir = case.dir(cases_dir) / "extracts" / version
+        vdir.mkdir(parents=True, exist_ok=True)
+        _stream_extract(cap, fps, seg, vdir / "clip.mp4", vdir / "clip.json",
+                        vdir / "clip_mask.png", (erp_w, erp_h), log)
+        cap.release()
+        geometry_sha = _sha256_file(vdir / "clip.json")
+        case_mod.set_extract_current(case.name, version, root=cases_dir)
+        derived = case.dir(cases_dir) / "derived"
         derived.mkdir(parents=True, exist_ok=True)
         for f in ("clip.mp4", "clip.json", "clip_mask.png"):
             shutil.copyfile(vdir / f, derived / f)

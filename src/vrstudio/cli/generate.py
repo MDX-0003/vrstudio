@@ -227,7 +227,4 @@ def adopt(
                    f"--in {out} --manifest {manifest} "
                    f"--out {case.dir(cases_dir) / 'out' / (resolved + '.mp4')}")
     else:
-        d = case.dir(cases_dir) / "extracts" / (case.extract_current or "")
-        typer.echo("next     vrstudio merge "
-                   f"--input {case.source_path} --ai {d / 'result.mp4'} "
-                   f"--sidecar {d / 'clip.json'}")
+        typer.echo("next     vrstudio merge --case " + case.name)

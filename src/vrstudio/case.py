@@ -146,6 +146,34 @@ def set_adopt(name: str, round_key: str, root: str | Path | None = None) -> Case
     return save(case, root)
 
 
+def set_draft(name: str, *, viewport: dict | None = None, inner: dict | None = None,
+              frames: dict | None = None, root: str | Path | None = None) -> Case:
+    """pick 草稿写入（web pick / CLI 都是调用方；唯一权威在 case 模型）。
+
+    只更新传入的段，未传的段保持原样——pick 是迭代动作，逐字段收敛。
+    """
+    case = load(name, root)
+    if case.flow != "patch":
+        raise CaseError(f"case {name} 是 {case.flow} 流，没有 pick 草稿")
+    if viewport is not None:
+        case.viewport = dict(viewport)
+    if inner is not None:
+        case.inner = dict(inner)
+    if frames is not None:
+        case.frames = dict(frames)
+    return save(case, root)
+
+
+def draft_ready(case: Case) -> str | None:
+    """草稿是否齐到可以 extract：缺哪段返回哪段名，齐了返回 None。"""
+    if case.flow != "patch":
+        return None
+    for section in ("viewport", "inner", "frames"):
+        if not getattr(case, section if section != "frames" else "frames"):
+            return section
+    return None
+
+
 def set_extract_current(name: str, version: str, root: str | Path | None = None) -> Case:
     case = load(name, root)
     if case.flow != "patch":

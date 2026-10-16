@@ -27,8 +27,37 @@ from ..media.ffmpeg import FfmpegSink, ffmpeg_path, has_audio
 from ..progress import PhaseLog as Log, PhaseRateMeter as RateMeter, format_duration, open_log_file
 from ..patch.restore import resolve_ai_clip
 from ..patch import scalefit
+from .. import case as case_mod
 
 app = typer.Typer(add_completion=False, help=__doc__)
+
+
+def resolve_case_inputs(case_name: str, cases_dir) -> dict:
+    """统一 case 模型 → merge 的四元组（input/ai/sidecar/output）。
+
+    纯路径解析，无 ffmpeg / 无解码——web 与单测共用。output 缺省落
+    ``out/<extract 版本>.mp4``；返回件在 extracts/<current>/result.mp4（generate
+    adopt 的落点），不在时明确报"先 adopt"而不是让下游报打不开文件。
+    """
+    case = case_mod.load(case_name, cases_dir)
+    if case.flow != "patch":
+        raise typer.Exit(f"merge --case: case {case_name} 是 {case.flow} 流"
+                         f"（patch 流专用入口；fullredraw 用 recompose）")
+    if not case.extract_current:
+        raise typer.Exit(f"merge --case: case {case_name} 没有抽取版本"
+                         f"（[extract] current 未定，先 `vrstudio extract name`）")
+    d = case.dir(cases_dir) / "extracts" / case.extract_current
+    ai = d / "result.mp4"
+    if not ai.is_file():
+        raise typer.Exit(f"merge --case: 没有采用的结果（{ai} 不存在）——"
+                         f"先 `vrstudio generate adopt --case {case_name}`")
+    src = case_mod.check_source(case, cases_dir)
+    out_dir = case.dir(cases_dir) / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        "input": Path(src), "ai": ai, "sidecar": d / "clip.json",
+        "output": out_dir / f"{case.extract_current}.mp4",
+    }
 
 
 class AiFrameSource:
@@ -94,10 +123,14 @@ class AiFrameSource:
 
 @app.command()
 def merge(
-    input_video: Path = typer.Option(..., "--input", help="source ERP (360) video"),
-    ai: Path = typer.Option(..., help="AI-regenerated viewport clip"),
-    sidecar: Path = typer.Option(..., help="clip.json (single segment)"),
-    output: Path = typer.Option(..., help="output ERP mp4"),
+    case_name: str = typer.Option(None, "--case",
+                                  help="统一 case 名：input/ai/sidecar/output 全部"
+                                       "自动定位（源哈希守卫 + extracts/<current> + out/）"),
+    cases_dir: Path = typer.Option(None, help="default: <repo>/cases"),
+    input_video: Path = typer.Option(None, "--input", help="source ERP (360) video"),
+    ai: Path = typer.Option(None, help="AI-regenerated viewport clip"),
+    sidecar: Path = typer.Option(None, help="clip.json (single segment)"),
+    output: Path = typer.Option(None, help="output ERP mp4"),
     inner: str = typer.Option(None, metavar="X,Y,W,H",
                               help="override the sidecar inner rect"),
     scale_fit: str = typer.Option("off", metavar="OFF|AUTO|JSON",
@@ -120,6 +153,15 @@ def merge(
     progress_every: int = typer.Option(0),
     quiet: bool = typer.Option(False, "-q"),
 ):
+    if case_name:
+        if input_video or ai or sidecar or output:
+            raise typer.Exit("merge: --case 与 --input/--ai/--sidecar/--output 互斥"
+                             "（--case 模式四者全部自动定位）")
+        resolved = resolve_case_inputs(case_name, cases_dir)
+        input_video, ai, sidecar, output = (resolved["input"], resolved["ai"],
+                                            resolved["sidecar"], resolved["output"])
+    elif not (input_video and ai and sidecar and output):
+        raise typer.Exit("merge: 需要 --case，或完整的 --input/--ai/--sidecar/--output")
     t_start = time.time()
     fh, log_path = open_log_file(f"merge_{output.stem}")
     log = Log(every=progress_every, quiet=quiet, fh=fh)
