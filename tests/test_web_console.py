@@ -60,6 +60,8 @@ def test_index_page(client):
 def test_wizard_page_renders_flow(client, patch_case):
     r = client.get("/case/p1")
     assert r.status_code == 200 and "patch" in r.text and "p1" in r.text
+    # 对比页的 360° 画布与统一播放控制（原生 controls 已移除）
+    assert "cmpCanvas" in r.text and "cmpSeek" in r.text and "controls" not in r.text
 
 
 def test_wizard_page_404_for_unknown(client):

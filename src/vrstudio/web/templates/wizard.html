@@ -49,14 +49,16 @@
   #joy { display: grid; grid-template-columns: repeat(3, 34px);
          grid-auto-rows: 30px; gap: 3px; align-items: center; justify-items: center; }
   .jb { width: 34px; height: 30px; margin: 0; padding: 0; user-select: none; touch-action: none; }
-  /* 对比：同步播放 + 滑动分割线 */
-  #cmpWrap { position: relative; width: 640px; user-select: none; overflow: hidden; }
-  #cmpA, #cmpB { width: 640px; display: block; }
-  #cmpB { position: absolute; top: 0; left: 0; clip-path: inset(0 0 0 50%); }
+  /* 对比：360° 全景同步观看（erp360.js）+ 滑动分割线 + 统一播放控制 */
+  #cmpWrap { position: relative; width: 800px; user-select: none; }
+  #cmpCanvas { width: 800px; height: 450px; display: block; border: 1px solid #d8cbb4;
+               background: #000; touch-action: none; cursor: grab; }
   #cmpBar { position: absolute; top: 0; bottom: 0; width: 3px; background: #5a7d4a;
             left: 50%; cursor: ew-resize; }
   #cmpBar::after { content: "◀ ▶"; position: absolute; top: 48%; left: -22px;
                    color: #5a7d4a; font-size: 0.7rem; }
+  #cmpCtl { display: flex; gap: 0.4rem; align-items: center; width: 800px; margin-top: 0.3rem; }
+  #cmpSeek { flex: 1; }
   .verline { padding: 0.2rem 0; border-bottom: 1px dashed #ece4d4; }
   .varline { display: flex; gap: 0.5rem; align-items: center; padding: 0.25rem 0;
              border-bottom: 1px dashed #ece4d4; }
@@ -182,15 +184,25 @@
 <!-- ── compare（两条流程共用）──────────────────────────────────────── -->
 <div class="panel" id="pnl-compare">
   <h3>对比成片</h3>
-  <div class="meta">左边是原视频、右边是成片，两边同步播放；拖动中间的竖线，
-    逐列看接缝处接得上接不上。</div>
+  <div class="meta">这是 360° 全景：在画面上按住拖动就能转头看不同方向，滚轮缩放，
+    「回正视角」一键复位。左边是原视频、右边是成片，两路视角始终一致；
+    拖动中间的竖线只改变左右占比——逐列检查接缝时，两边看的是同一个方向。</div>
   <div class="meta" id="cmpGate"></div>
   <div class="meta">选择成片：<select id="outSel" onchange="loadCompare()"></select></div>
   <div id="cmpWrap">
-    <video id="cmpA" muted controls></video>
-    <video id="cmpB" muted></video>
+    <canvas id="cmpCanvas"></canvas>
     <div id="cmpBar"></div>
   </div>
+  <div id="cmpCtl">
+    <button id="cmpPlay" style="width:38px">▶</button>
+    <input type="range" id="cmpSeek" min="0" max="0" value="0" step="0.05">
+    <span class="meta" id="cmpTime">加载中…</span>
+    <button id="cmpHome">回正视角</button>
+  </div>
+  <div class="meta">进度条与播放按钮同时控制两份视频；成片跟着原片的时间走，偏差超过
+    0.05 秒会自动对齐。</div>
+  <video id="cmpA" muted preload="auto" style="display:none"></video>
+  <video id="cmpB" muted preload="auto" style="display:none"></video>
 </div>
 
 <h3>任务</h3>
@@ -204,7 +216,8 @@
   <div id="bList" style="max-height:300px;overflow-y:auto"></div>
 </div>
 
-<script src="/static/pick.js?v=3"></script>
-<script src="/static/wizard.js?v=3"></script>
+<script src="/static/pick.js?v=4"></script>
+<script src="/static/erp360.js?v=4"></script>
+<script src="/static/wizard.js?v=4"></script>
 </body>
 </html>

@@ -245,33 +245,62 @@ function loadCompare() {
   const f = $("outSel").value;
   const out = info.outputs.find(o => o.file === f);
   if (!out) return;
-  $("cmpA").src = info.source_url;
-  $("cmpB").src = out.url;
+  const a = $("cmpA"), b = $("cmpB");
+  // src 没变就不重挂——重挂会让视频回到 0:00
+  if (a.dataset.src !== info.source_url) { a.src = info.source_url; a.dataset.src = info.source_url; }
+  if (b.dataset.src !== out.url) { b.src = out.url; b.dataset.src = out.url; }
 }
+
+function _fmtTime(s) {
+  return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+}
+
+let cmpViewer = null;
 
 function setupCompare() {
   const a = $("cmpA"), b = $("cmpB");
+  cmpViewer = new Erp360Compare($("cmpCanvas"), a, b);
+  // 成片跟着原片走：A 是时钟主，状态与进度偏差都从 A 的事件里对齐
   const sync = () => { if (Math.abs(b.currentTime - a.currentTime) > 0.05) b.currentTime = a.currentTime; };
-  a.addEventListener("timeupdate", sync);
-  a.addEventListener("seeked", sync);
-  a.addEventListener("play", () => b.play());
-  a.addEventListener("pause", () => b.pause());
+  const refresh = () => {
+    if (!isFinite(a.duration)) { $("cmpTime").textContent = "加载中…"; return; }
+    if (!scrubbing) $("cmpSeek").value = a.currentTime;
+    $("cmpTime").textContent = `${_fmtTime(a.currentTime)} / ${_fmtTime(a.duration)}`;
+  };
+  a.addEventListener("timeupdate", () => { sync(); refresh(); });
+  a.addEventListener("seeked", () => { sync(); refresh(); });
+  a.addEventListener("loadedmetadata", () => { $("cmpSeek").max = a.duration || 0; refresh(); });
+  a.addEventListener("play", () => { b.play(); $("cmpPlay").textContent = "⏸"; });
+  a.addEventListener("pause", () => { b.pause(); $("cmpPlay").textContent = "▶"; });
   a.addEventListener("ratechange", () => { b.playbackRate = a.playbackRate; });
-  // 滑动分割线：改右片的 clip-path 左沿
+
+  // 统一传输控制：一套按钮/进度条同时驱动两份视频（A 的原生 controls 已移除）
+  $("cmpPlay").onclick = () => { a.paused ? (a.play(), b.play()) : (b.pause(), a.pause()); };
+  const seek = $("cmpSeek");
+  let scrubbing = false;
+  seek.addEventListener("input", () => {
+    scrubbing = true;
+    if (isFinite(a.duration)) { a.currentTime = +seek.value; b.currentTime = +seek.value; }
+  });
+  window.addEventListener("pointerup", () => { scrubbing = false; });
+  $("cmpHome").onclick = () => cmpViewer && cmpViewer.resetView();
+
+  // 分割线只改左右占比；视角拖动在画布上，erp360.js 自己接
   const wrap = $("cmpWrap"), bar = $("cmpBar");
   const setSplit = (fx) => {
     bar.style.left = (fx * 100) + "%";
-    $("cmpB").style.clipPath = `inset(0 0 0 ${fx * 100}%)`;
+    cmpViewer.setSplit(fx);
   };
   const move = (e) => {
     const r = wrap.getBoundingClientRect();
-    setSplit(Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)));
+    setSplit(Math.min(0.98, Math.max(0.02, (e.clientX - r.left) / r.width)));
   };
-  bar.addEventListener("mousedown", (e) => {
+  bar.addEventListener("pointerdown", (e) => {
     e.preventDefault();
+    e.stopPropagation();
     const mm = (ev) => move(ev);
-    const mu = () => { removeEventListener("mousemove", mm); removeEventListener("mouseup", mu); };
-    addEventListener("mousemove", mm); addEventListener("mouseup", mu);
+    const mu = () => { removeEventListener("pointermove", mm); removeEventListener("pointerup", mu); };
+    addEventListener("pointermove", mm); addEventListener("pointerup", mu);
   });
 }
 
