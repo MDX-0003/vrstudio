@@ -159,7 +159,7 @@ def _rounds(name: str) -> dict:
                            capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=30)
     except (OSError, subprocess.TimeoutExpired) as e:
-        return {"rounds": [], "hint": f"vrgen 不可用（{e}）"}
+        return {"rounds": [], "hint": f"生成服务（vrgen）没有找到，生成记录暂时显示不了：{e}"}
     rounds = []
     for line in (r.stdout or "").splitlines():
         m = _ROUND_LINE.match(line)
@@ -233,12 +233,14 @@ def _gates(case: case_mod.Case, extracts: list[dict]) -> dict:
         }
     else:
         steps = {
-            "pad": {"ok": padded, "reason": "" if padded else "先做循环冗余画布"},
+            "pad": {"ok": padded,
+                    "reason": "" if padded else "先把两侧画面扩充好，再送生成"},
             "generate": {"ok": result_file, "ready": padded,
-                         "reason": "" if result_file else "送生成并采用一轮结果"},
+                         "reason": "" if result_file else "先送生成，并采用一次结果"},
             "recompose": {"ok": has_out, "ready": result_file,
-                          "reason": "" if has_out else "采用结果后重组成片"},
-            "compare": {"ok": has_out, "reason": "" if has_out else "重组成片后可对比"},
+                          "reason": "" if has_out else "采用结果后才能裁回原尺寸"},
+            "compare": {"ok": has_out,
+                        "reason": "" if has_out else "裁回原尺寸出片后，在这里对比"},
         }
     return steps
 
@@ -450,10 +452,10 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
     if op == "recompose":
         manifests = sorted(cdir.glob("*_pad.json"))
         if not manifests:
-            raise CaseError("没有 *_pad.json——先跑 pad")
+            raise CaseError("还没有扩充两侧画面——先做第一步")
         result = cdir / "result.mp4"
         if not result.is_file():
-            raise CaseError("没有采用的结果（result.mp4）——先 adopt")
+            raise CaseError("还没有采用的结果——先在「生成」里采用一轮")
         out = cdir / "out" / (case.adopt_round or "result")
         return vrstudio_argv("recompose", "--in", str(result),
                              "--manifest", str(manifests[0]),

@@ -11,12 +11,18 @@ const CASE = document.body.dataset.name;
 const FLOW = document.body.dataset.flow;
 const STEPS = FLOW === "patch"
   ? [["pick", "选区"], ["extract", "抽取"], ["generate", "生成"], ["merge", "合并"], ["compare", "对比"]]
-  : [["pad", "画布"], ["generate", "生成"], ["recompose", "重组"], ["compare", "对比"]];
+  : [["pad", "扩充画面"], ["generate", "生成"], ["recompose", "裁回原尺寸"], ["compare", "对比"]];
 
 let info = null;            // 最近一次 /api/case 的应答
 let curStep = null;         // 当前显示的步骤 id
 let wasRunning = false;     // 任务从忙到闲时刷新一次 info
 let vpFrame = null;         // 当前逐帧查看的帧号（null = 第 0 帧）
+
+// 任务类型 → 页面上的说法（op id 是内部标识，不出现在页面上）
+const KIND_LABEL = {
+  extract: "抽取", pad: "扩充两侧画面", register: "登记外部视频",
+  submit: "提交生成", adopt: "采用结果", merge: "合并", recompose: "裁回原尺寸",
+};
 
 const $ = (id) => document.getElementById(id);
 
@@ -60,7 +66,7 @@ function gateText(id, elId) {
   const g = info.gates[id] || {};
   const el = $(elId);
   if (!el) return;
-  el.textContent = g.ok ? "✓ 已达成" : (g.reason || "未达成");
+  el.textContent = g.ok ? "✓ 这一步已完成" : (g.reason || "这一步还没完成");
   el.className = "meta " + (g.ok ? "ok" : "bad");
 }
 
@@ -172,12 +178,14 @@ function renderExtract() {
 function renderGenerate() {
   const rounds = info.rounds.rounds || [];
   const el = $("roundList");
-  el.innerHTML = rounds.length ? "" : `<span class="meta">${info.rounds.hint || "还没有轮次"}</span>`;
+  el.innerHTML = rounds.length ? "" : `<span class="meta">${info.rounds.hint || "还没有生成记录"}</span>`;
+  const from = { mglc: "Seedance", manual: "外部视频" };
   for (const r of rounds) {
     const mine = r.round === info.adopt_round;
     el.innerHTML += `<div class="verline"><b class="${mine ? "ok" : ""}">` +
       `${r.mark === "*" ? "✓" : "✗"} ${r.round}${mine ? " · 已采用" : ""}</b>` +
-      ` <span class="meta">${r.backend} · ${r.stage} · gate=${r.gate}</span>` +
+      ` <span class="meta">${from[r.backend] || r.backend} 生成 · ` +
+      `${r.mark === "*" ? "结果可用" : "结果有问题，不能用"}</span>` +
       ` <button onclick="runOp('adopt',{round:'${r.round_dir}'})">采用</button></div>`;
   }
   $("logBox").textContent = (info.log_tail && info.log_tail.length)
@@ -257,11 +265,13 @@ async function pollTasks() {
     const r = await fetch("/api/task");
     const s = await r.json();
     const lines = [];
-    if (s.current) lines.push(`▶ 运行中 [${s.current.case}] ${s.current.kind}（${s.current.state}）`,
+    const label = (k) => KIND_LABEL[k] || k;
+    if (s.current) lines.push(`▶ 正在执行 [${s.current.case}] ${label(s.current.kind)}…`,
                               ...s.current.tail);
-    else lines.push("（空闲）");
-    for (const q of s.queued) lines.push(`… 排队 [${q.case}] ${q.kind}`);
-    for (const h of s.last) lines.push(`${h.state === "done" ? "✓" : "✗"} 上次 [${h.case}] ${h.kind} rc=${h.returncode}`);
+    else lines.push("（当前没有任务）");
+    for (const q of s.queued) lines.push(`… 排队等候 [${q.case}] ${label(q.kind)}`);
+    for (const h of s.last) lines.push(
+      `${h.state === "done" ? "✓ 完成" : "✗ 失败"}：[${h.case}] 上一次 ${label(h.kind)}`);
     $("taskBox").textContent = lines.join("\n");
     const busy = !!(s.current || s.queued.length);
     if (wasRunning && !busy) loadInfo();      // 任务收尾 → 刷新门控与列表

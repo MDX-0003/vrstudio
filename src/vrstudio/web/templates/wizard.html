@@ -4,44 +4,48 @@
 <meta charset="utf-8">
 <title>{{ name }} · {{ flow }} · vrstudio</title>
 <style>
-  body { font-family: system-ui, sans-serif; background: #141414; color: #ddd; margin: 0.8rem; }
-  h1 { font-size: 1.0rem; margin: 0.2rem 0 0.6rem; }
+  /* 暖白主题：底色米白，面板纯白，强调色取暖棕与橄榄绿 */
+  body { font-family: system-ui, sans-serif; background: #faf6ef; color: #3d362c; margin: 0.8rem; }
+  h1 { font-size: 1.0rem; margin: 0.2rem 0 0.6rem; color: #5a4a30; }
   h1 .badge { font-size: 0.7rem; border-radius: 4px; padding: 0.05rem 0.4rem; vertical-align: middle; }
-  .badge.patch { background: #2d4a5a; color: #9cf; }
-  .badge.fullredraw { background: #4a3a2d; color: #fc9; }
+  .badge.patch { background: #e3edf3; color: #3f6f92; }
+  .badge.fullredraw { background: #f6e8d2; color: #a06b2c; }
   /* 软向导步骤条：随时可点，达成状态用颜色表达 */
   #steps { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.8rem; }
   .step-tab { padding: 0.3rem 0.9rem; border-radius: 16px; cursor: pointer;
-              border: 1px solid #444; background: #1c1c1c; font-size: 0.85rem; }
-  .step-tab .n { color: #888; margin-right: 0.3rem; }
-  .step-tab.cur { border-color: #7c7; background: #223122; }
-  .step-tab.done .n::after { content: " ✓"; color: #7c7; }
-  .panel { background: #1c1c1c; border: 1px solid #333; border-radius: 8px;
+              border: 1px solid #d8cbb4; background: #fffdf8; font-size: 0.85rem;
+              color: #6b5d48; }
+  .step-tab .n { margin-right: 0.3rem; }
+  .step-tab.cur { border-color: #b07d3a; background: #f6ead4; color: #5a4a30; font-weight: 600; }
+  .step-tab.done .n::after { content: " ✓"; color: #5a7d4a; }
+  .panel { background: #ffffff; border: 1px solid #e7ddcc; border-radius: 8px;
            padding: 0.8rem; display: none; }
   .panel.cur { display: block; }
   .row { display: flex; gap: 1rem; align-items: flex-start; flex-wrap: wrap; }
-  h3 { font-size: 0.9rem; margin: 0.2rem 0 0.4rem; color: #9c9; }
-  .meta { font-size: 0.78rem; color: #9a9; }
-  img, video { border: 1px solid #444; display: block; background: #000; }
+  h3 { font-size: 0.9rem; margin: 0.2rem 0 0.4rem; color: #7a5c33; }
+  .meta { font-size: 0.78rem; color: #8a7c66; }
+  img, video { border: 1px solid #d8cbb4; display: block; background: #000; }
   img { cursor: crosshair; }
   #vpWrap { position: relative; display: inline-block; }
-  #innerBox { position: absolute; border: 2px dashed #f33; pointer-events: none; display: none; }
+  #innerBox { position: absolute; border: 2px dashed #d33; pointer-events: none; display: none; }
   #erpWrap { position: relative; display: inline-block; }
   #vpFoot, #vpCross { position: absolute; pointer-events: none; display: none; }
-  #vpFoot { border: 1px solid #4f4; }
+  #vpFoot { border: 1px solid #4a4; }
   #vpCross { width: 18px; height: 18px; margin: -9px 0 0 -9px;
-             background: linear-gradient(#f00,#f00) center / 100% 2px no-repeat,
-                         linear-gradient(#f00,#f00) center / 2px 100% no-repeat; }
+             background: linear-gradient(#d33,#d33) center / 100% 2px no-repeat,
+                         linear-gradient(#d33,#d33) center / 2px 100% no-repeat; }
   #scrub { display: flex; gap: 0.3rem; align-items: center; margin-top: 0.3rem; width: 512px; }
   #frameSlider { flex: 1; min-width: 120px; }
-  button { background: #2d4a2d; color: #ddd; border: 1px solid #4a4; border-radius: 4px;
+  button { background: #ead9b8; color: #3d362c; border: 1px solid #c2a066; border-radius: 4px;
            padding: 0.3rem 0.7rem; cursor: pointer; margin: 0.15rem 0.1rem; }
-  button:disabled { background: #222; color: #666; border-color: #444; cursor: not-allowed; }
+  button:hover:not(:disabled) { background: #e0c99c; }
+  button:disabled { background: #f1ece3; color: #b3a992; border-color: #ddd3c0; cursor: not-allowed; }
   button.big { font-size: 0.95rem; padding: 0.45rem 1.1rem; }
-  select, input { background: #222; color: #ddd; border: 1px solid #444; border-radius: 4px; padding: 0.25rem; }
-  pre { background: #111; border: 1px solid #333; padding: 0.4rem; font-size: 0.72rem;
-        max-height: 220px; overflow-y: auto; margin: 0.3rem 0; white-space: pre-wrap; }
-  .ok { color: #7c7; } .bad { color: #c77; } .dim { color: #777; }
+  select, input { background: #fffdf8; color: #3d362c; border: 1px solid #d8cbb4;
+                  border-radius: 4px; padding: 0.25rem; }
+  pre { background: #f6f1e7; border: 1px solid #e0d6c4; padding: 0.4rem; font-size: 0.72rem;
+        color: #4a4238; max-height: 220px; overflow-y: auto; margin: 0.3rem 0; white-space: pre-wrap; }
+  .ok { color: #5a7d4a; } .bad { color: #b5533c; } .dim { color: #a89a82; }
   #joy { display: grid; grid-template-columns: repeat(3, 34px);
          grid-auto-rows: 30px; gap: 3px; align-items: center; justify-items: center; }
   .jb { width: 34px; height: 30px; margin: 0; padding: 0; user-select: none; touch-action: none; }
@@ -49,20 +53,21 @@
   #cmpWrap { position: relative; width: 640px; user-select: none; overflow: hidden; }
   #cmpA, #cmpB { width: 640px; display: block; }
   #cmpB { position: absolute; top: 0; left: 0; clip-path: inset(0 0 0 50%); }
-  #cmpBar { position: absolute; top: 0; bottom: 0; width: 3px; background: #7c7;
+  #cmpBar { position: absolute; top: 0; bottom: 0; width: 3px; background: #5a7d4a;
             left: 50%; cursor: ew-resize; }
   #cmpBar::after { content: "◀ ▶"; position: absolute; top: 48%; left: -22px;
-                   color: #7c7; font-size: 0.7rem; }
-  .verline { padding: 0.2rem 0; border-bottom: 1px dashed #2a2a2a; }
-  #browseBox { position: fixed; top: 10%; left: 30%; width: 40%; background: #1c1c1c;
-               border: 1px solid #4a4; border-radius: 6px; padding: 0.7rem; display: none; z-index: 9; }
+                   color: #5a7d4a; font-size: 0.7rem; }
+  .verline { padding: 0.2rem 0; border-bottom: 1px dashed #ece4d4; }
+  #browseBox { position: fixed; top: 10%; left: 30%; width: 40%; background: #ffffff;
+               border: 1px solid #c2a066; border-radius: 6px; padding: 0.7rem; display: none;
+               z-index: 9; box-shadow: 0 4px 16px rgba(90,74,48,.15); }
   .bitem { padding: 0.15rem 0.3rem; cursor: pointer; }
-  .bitem:hover { background: #262626; }
+  .bitem:hover { background: #f6f1e7; }
 </style>
 </head>
 <body data-name="{{ name }}" data-flow="{{ flow }}">
 <h1><span class="badge {{ flow }}">{{ flow }}</span> {{ name }}
-  <a href="/" style="float:right;font-size:0.8rem;color:#9c9">← case 列表</a></h1>
+  <a href="/" style="float:right;font-size:0.8rem;color:#7a5c33">← case 列表</a></h1>
 
 <div id="steps"></div>
 
@@ -111,25 +116,26 @@
   <div id="verList"></div>
 </div>
 
-<!-- ── generate（两条流程共用）─────────────────────────────────────── -->
+<!-- ── 生成（两条流程共用）─────────────────────────────────────────── -->
 <div class="panel" id="pnl-generate">
-  <h3>生成（vrgen：mglc 提交 / 手动注册，同构台账）</h3>
+  <h3>生成画面</h3>
   <div class="row">
     <div style="min-width:300px">
-      <h3>手动后端：注册本地返回件</h3>
-      <button onclick="openBrowse()">选择文件注册为一轮</button>
-      <div class="meta">外部工具的产物指认进来，与 mglc 轮次同账</div>
+      <h3>用 Seedance 生成</h3>
+      <input id="varInput" placeholder="补充提示词（k=v，可多条；编辑界面改进中）" style="width:280px">
+      <button onclick="runSubmit()">提交生成</button>
+      <div class="meta">提交会消耗平台配额；中途断了重新提交会接着上次的进度走，不会重复扣</div>
     </div>
     <div style="min-width:300px">
-      <h3>mglc 后端：提交 Seedance</h3>
-      <input id="varInput" placeholder="提示词变量 k=v（可多条，逗号分隔）" style="width:280px">
-      <button onclick="runSubmit()">提交（花配额，断点可续）</button>
+      <h3>用别的工具做好的视频</h3>
+      <button onclick="openBrowse()">选用非 Seedance 生成的视频执行后续步骤</button>
+      <div class="meta">从电脑里挑一个已经在别处生成好的视频文件，交给后面的步骤用</div>
     </div>
   </div>
-  <h3>轮次与采用</h3>
-  <div class="meta">* = 可用（gate 非 error）；采用后结果落 case，[adopt] round 记账</div>
-  <div id="roundList"><span class="meta">还没有轮次</span></div>
-  <div class="meta">台账日志尾部（mglc.log）</div>
+  <h3>生成记录与选用</h3>
+  <div class="meta">✓ 表示这一轮结果可用；点「采用」把结果带回这个 case，后面的步骤都用它</div>
+  <div id="roundList"><span class="meta">还没有生成记录</span></div>
+  <div class="meta">最近一次生成的过程记录（末尾）</div>
   <pre id="logBox">（空）</pre>
 </div>
 
@@ -142,21 +148,27 @@
 
 <!-- ── fullredraw：pad ─────────────────────────────────────────────── -->
 <div class="panel" id="pnl-pad">
-  <h3>循环冗余画布（21:9 + mask + manifest）</h3>
+  <h3>扩充原视频两侧画面</h3>
+  <div class="meta">把原视频加宽成 21:9 的宽幅：左右各接上一段和原画面边缘相连的内容，
+    生成时接缝处才能画出连续的景色。这一步会同时准备好送给生成工具的视频和标注图。</div>
   <div class="meta" id="padGate"></div>
-  <button class="big" id="btnPad" onclick="runOp('pad')">生成画布与 mask</button>
+  <button class="big" id="btnPad" onclick="runOp('pad')">开始扩充两侧画面</button>
 </div>
 
 <!-- ── fullredraw：recompose ───────────────────────────────────────── -->
 <div class="panel" id="pnl-recompose">
-  <h3>重组（整数配准 + smoothstep 混合 + 还源宽 + 闸门）</h3>
+  <h3>裁回原尺寸出片</h3>
+  <div class="meta">生成的宽幅视频两侧多出来的部分会被去掉，画面重新拼成一体并逐帧对齐
+    原视频，得到和原视频一样大小的成片。</div>
   <div class="meta" id="recomposeGate"></div>
-  <button class="big" id="btnRecompose" onclick="runOp('recompose')">重组成片 → out/</button>
+  <button class="big" id="btnRecompose" onclick="runOp('recompose')">开始裁回原尺寸</button>
 </div>
 
 <!-- ── compare（两条流程共用）──────────────────────────────────────── -->
 <div class="panel" id="pnl-compare">
-  <h3>对比（同步播放 + 滑动分割线：左源右成）</h3>
+  <h3>对比成片</h3>
+  <div class="meta">左边是原视频、右边是成片，两边同步播放；拖动中间的竖线，
+    逐列看接缝处接得上接不上。</div>
   <div class="meta" id="cmpGate"></div>
   <div class="meta">选择成片：<select id="outSel" onchange="loadCompare()"></select></div>
   <div id="cmpWrap">
@@ -164,20 +176,19 @@
     <video id="cmpB" muted></video>
     <div id="cmpBar"></div>
   </div>
-  <div class="meta">拖绿色分割线逐列检查接缝；播放/暂停只控制左源，右侧始终同步</div>
 </div>
 
-<h3>任务队列</h3>
+<h3>任务</h3>
 <pre id="taskBox">（空闲）</pre>
-<div class="meta">重计算一次只跑一个；每次运行同时写 logs/ 下的同名日志</div>
+<div class="meta">一次只跑一个任务，跑完自动开始下一个；每一步的完整过程记录都在 logs/ 文件夹里</div>
 
 <div id="browseBox">
-  <b>选择返回件视频</b> <button style="float:right" onclick="closeBrowse()">×</button>
+  <b>选择做好的视频</b> <button style="float:right" onclick="closeBrowse()">×</button>
   <div class="meta" id="bPath"></div>
   <div id="bList" style="max-height:300px;overflow-y:auto"></div>
 </div>
 
-<script src="/static/pick.js?v=1"></script>
-<script src="/static/wizard.js?v=1"></script>
+<script src="/static/pick.js?v=2"></script>
+<script src="/static/wizard.js?v=2"></script>
 </body>
 </html>

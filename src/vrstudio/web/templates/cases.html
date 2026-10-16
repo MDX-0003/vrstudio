@@ -4,29 +4,31 @@
 <meta charset="utf-8">
 <title>vrstudio 控制台</title>
 <style>
-  body { font-family: system-ui, sans-serif; background: #141414; color: #ddd; margin: 1rem; }
-  h1 { font-size: 1.1rem; margin: 0.2rem 0 0.8rem; }
+  /* 暖白主题（与向导页同一套色板） */
+  body { font-family: system-ui, sans-serif; background: #faf6ef; color: #3d362c; margin: 1rem; }
+  h1 { font-size: 1.1rem; margin: 0.2rem 0 0.8rem; color: #5a4a30; }
   .row { display: flex; gap: 1.2rem; align-items: flex-start; flex-wrap: wrap; }
-  .col { background: #1c1c1c; border: 1px solid #333; border-radius: 8px; padding: 0.8rem; }
-  h2 { font-size: 0.9rem; margin: 0.2rem 0 0.5rem; color: #9c9; }
+  .col { background: #ffffff; border: 1px solid #e7ddcc; border-radius: 8px; padding: 0.8rem; }
+  h2 { font-size: 0.9rem; margin: 0.2rem 0 0.5rem; color: #7a5c33; }
   .case { display: flex; align-items: baseline; gap: 0.6rem; padding: 0.35rem 0.6rem;
           border-radius: 6px; cursor: pointer; }
-  .case:hover { background: #262626; }
+  .case:hover { background: #f6f1e7; }
   .badge { font-size: 0.7rem; border-radius: 4px; padding: 0.05rem 0.4rem; }
-  .badge.patch { background: #2d4a5a; color: #9cf; }
-  .badge.fullredraw { background: #4a3a2d; color: #fc9; }
+  .badge.patch { background: #e3edf3; color: #3f6f92; }
+  .badge.fullredraw { background: #f6e8d2; color: #a06b2c; }
   .case .name { font-weight: 600; }
-  .case .st { font-size: 0.72rem; color: #888; }
-  select, input { background: #222; color: #ddd; border: 1px solid #444;
+  .case .st { font-size: 0.72rem; color: #8a7c66; }
+  select, input { background: #fffdf8; color: #3d362c; border: 1px solid #d8cbb4;
                   border-radius: 4px; padding: 0.3rem; }
-  button { background: #2d4a2d; color: #ddd; border: 1px solid #4a4; border-radius: 4px;
+  button { background: #ead9b8; color: #3d362c; border: 1px solid #c2a066; border-radius: 4px;
            padding: 0.35rem 0.8rem; cursor: pointer; margin-top: 0.4rem; }
-  button:disabled { background: #222; color: #666; border-color: #444; cursor: not-allowed; }
-  .meta { font-size: 0.78rem; color: #9a9; }
+  button:hover:not(:disabled) { background: #e0c99c; }
+  button:disabled { background: #f1ece3; color: #b3a992; border-color: #ddd3c0; cursor: not-allowed; }
+  .meta { font-size: 0.78rem; color: #8a7c66; }
   #newCase { width: 320px; }
-  #newCase label { display: block; font-size: 0.78rem; color: #9a9; margin-top: 0.5rem; }
+  #newCase label { display: block; font-size: 0.78rem; color: #8a7c66; margin-top: 0.5rem; }
   #newCase input, #newCase select { width: 100%; box-sizing: border-box; }
-  .ok { color: #7c7; } .bad { color: #c77; }
+  .ok { color: #5a7d4a; } .bad { color: #b5533c; }
 </style>
 </head>
 <body>

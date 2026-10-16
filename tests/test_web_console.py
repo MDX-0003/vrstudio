@@ -141,7 +141,7 @@ def test_run_recompose_needs_manifest(client, tmp_path):
     src.write_bytes(b"x")
     case_mod.create("f1", "fullredraw", src, root=tmp_path)
     r = client.post("/api/case/f1/run", json={"op": "recompose"})
-    assert r.status_code == 400 and "pad" in r.text
+    assert r.status_code == 400 and "扩充两侧画面" in r.text
 
 
 def test_run_submits_to_queue(client, patch_case, monkeypatch):
