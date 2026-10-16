@@ -66,7 +66,8 @@ function gateText(id, elId) {
   const g = info.gates[id] || {};
   const el = $(elId);
   if (!el) return;
-  el.textContent = g.ok ? "✓ 这一步已完成" : (g.reason || "这一步还没完成");
+  el.textContent = g.ok ? ("✓ " + (g.evidence || "这一步已完成"))
+                        : (g.reason || "这一步还没完成");
   el.className = "meta " + (g.ok ? "ok" : "bad");
 }
 
@@ -180,14 +181,25 @@ function renderGenerate() {
   const el = $("roundList");
   el.innerHTML = rounds.length ? "" : `<span class="meta">${info.rounds.hint || "还没有生成记录"}</span>`;
   const from = { mglc: "Seedance", manual: "外部视频" };
-  for (const r of rounds) {
+  // 轮次路径含反斜杠，拼进 HTML 属性会被转义吞掉——按钮只带序号，
+  // 路径从 info 里按序号取（2026-10-16 反复失败事故的原因）
+  rounds.forEach((r, i) => {
     const mine = r.round === info.adopt_round;
-    el.innerHTML += `<div class="verline"><b class="${mine ? "ok" : ""}">` +
-      `${r.mark === "*" ? "✓" : "✗"} ${r.round}${mine ? " · 已采用" : ""}</b>` +
-      ` <span class="meta">${from[r.backend] || r.backend} 生成 · ` +
-      `${r.mark === "*" ? "结果可用" : "结果有问题，不能用"}</span>` +
-      ` <button onclick="runOp('adopt',{round:'${r.round_dir}'})">采用</button></div>`;
-  }
+    const div = document.createElement("div");
+    div.className = "verline";
+    const b = document.createElement("b");
+    if (mine) b.className = "ok";
+    b.textContent = `${r.mark === "*" ? "✓" : "✗"} ${r.round}${mine ? " · 已采用" : ""}`;
+    const span = document.createElement("span");
+    span.className = "meta";
+    span.textContent = ` ${from[r.backend] || r.backend} 生成 · ` +
+      (r.mark === "*" ? "结果可用" : "结果有问题，不能用");
+    const btn = document.createElement("button");
+    btn.textContent = "采用";
+    btn.onclick = () => run("adopt", { round: r.round_dir });
+    div.append(b, span, btn);
+    el.appendChild(div);
+  });
   $("logBox").textContent = (info.log_tail && info.log_tail.length)
     ? info.log_tail.join("\n") : "（空）";
 }
@@ -201,12 +213,14 @@ async function runSubmit() {
 // ── merge / pad / recompose ─────────────────────────────────────────────
 
 function renderFinish() {
+  // 完成后的按钮统一保持可点（重跑会覆盖，证据文案里写明了这一点）；
+  // 置灰只表达"前置条件还没凑齐"。
   if (FLOW === "patch") {
     gateText("merge", "mergeGate");
     $("btnMerge").disabled = !(info.gates.merge || {}).ready;
   } else {
     gateText("pad", "padGate");
-    $("btnPad").disabled = (info.gates.pad || {}).ok;      // 已有 manifest 就不必重跑
+    $("btnPad").disabled = false;
     gateText("recompose", "recomposeGate");
     $("btnRecompose").disabled = !(info.gates.recompose || {}).ready;
   }
@@ -266,12 +280,17 @@ async function pollTasks() {
     const s = await r.json();
     const lines = [];
     const label = (k) => KIND_LABEL[k] || k;
-    if (s.current) lines.push(`▶ 正在执行 [${s.current.case}] ${label(s.current.kind)}…`,
-                              ...s.current.tail);
-    else lines.push("（当前没有任务）");
+    if (s.current) {
+      lines.push(`▶ 正在执行 [${s.current.case}] ${label(s.current.kind)}…`);
+      if (s.current.log) lines.push(`完整记录：${s.current.log}`);
+      lines.push(...s.current.tail);
+    } else lines.push("（当前没有任务）");
     for (const q of s.queued) lines.push(`… 排队等候 [${q.case}] ${label(q.kind)}`);
-    for (const h of s.last) lines.push(
-      `${h.state === "done" ? "✓ 完成" : "✗ 失败"}：[${h.case}] 上一次 ${label(h.kind)}`);
+    for (const h of s.last) {
+      lines.push(`${h.state === "done" ? "✓ 完成" : "✗ 失败"}：[${h.case}] 上一次 ${label(h.kind)}` +
+                 (h.log ? `（完整记录：${h.log}）` : ""));
+      if (h.state !== "done") lines.push(...(h.tail || []));   // 失败时把出错原因端上来
+    }
     $("taskBox").textContent = lines.join("\n");
     const busy = !!(s.current || s.queued.length);
     if (wasRunning && !busy) loadInfo();      // 任务收尾 → 刷新门控与列表

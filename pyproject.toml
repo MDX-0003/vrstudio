@@ -55,6 +55,8 @@ ignore = ["B008"]
 "src/vrstudio/media/ffmpeg.py" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
 "src/vrstudio/progress.py" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
 "src/vrstudio/config.py" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
+# web 层的中文证据文案整句较长，豁免行宽（其余项全量检查）
+"src/vrstudio/web/app.py" = ["E501"]
 "src/vrstudio/cli/pad.py" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
 "src/vrstudio/cli/recompose.py" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]
 "src/vrstudio/cli/plan.py" = ["I", "E501", "E702", "E731", "B008", "B904", "B905", "B007", "B017", "F401", "F541", "F841", "UP"]

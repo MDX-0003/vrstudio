@@ -93,10 +93,13 @@ class TaskQueue:
                 "current": None if cur is None else {
                     "kind": cur.kind, "case": cur.case, "state": cur.state,
                     "tail": cur.tail(),
+                    "log": str(cur.out_path) if cur.out_path else None,
                 },
                 "queued": [{"kind": t.kind, "case": t.case} for t in self.pending],
                 "last": ([{"kind": t.kind, "case": t.case, "state": t.state,
-                           "returncode": t.returncode} for t in self.history[-3:]]),
+                           "returncode": t.returncode,
+                           "log": str(t.out_path) if t.out_path else None,
+                           "tail": t.tail(5)} for t in self.history[-3:]]),
             }
 
 

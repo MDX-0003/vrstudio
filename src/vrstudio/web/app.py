@@ -210,37 +210,61 @@ def _outputs(case: case_mod.Case) -> list[dict]:
 
 
 def _gates(case: case_mod.Case, extracts: list[dict]) -> dict:
-    """软向导的门控判据（服务端唯一权威，前端只渲染结果）。"""
+    """软向导的门控判据与证据（服务端唯一权威，前端只渲染结果）。
+
+    每一步带两段文字：没完成时 reason 说差什么；完成时 evidence 说"在哪个
+    绝对路径检测到了什么文件、所以认为完成、想重跑怎么办"——页面上每一次
+    置灰/放行都可以对照文件复查。
+    """
+    cdir = case.dir(_ctx["cases_root"])
     missing = case_mod.draft_ready(case)
     extracted = bool(case.extract_current) and any(
         e["version"] == case.extract_current and e["extracted"] for e in extracts)
     adopted = bool(case.adopt_round)
-    result_file = (case.flow == "fullredraw"
-                   and (case.dir(_ctx["cases_root"]) / "result.mp4").is_file())
-    padded = bool(list(case.dir(_ctx["cases_root"]).glob("*_pad.json")))
-    has_out = bool(_outputs(case))
+    result_file = (case.flow == "fullredraw" and (cdir / "result.mp4").is_file())
+    pad_manifests = sorted(cdir.glob("*_pad.json"))
+    padded = bool(pad_manifests)
+    outs = _outputs(case)
+    has_out = bool(outs)
+    out_names = "、".join(o["file"] for o in outs)
     if case.flow == "patch":
+        cur = cdir / "extracts" / (case.extract_current or "")
         steps = {
-            "pick": {"ok": missing is None, "reason": f"缺 [{missing}] 草稿" if missing else ""},
-            "extract": {"ok": extracted, "reason": "" if extracted else "先完成 pick 并运行抽取"},
+            "pick": {"ok": missing is None,
+                     "reason": f"case.toml 里缺 [{missing}] 段，补齐后才能抽取" if missing else "",
+                     "evidence": f"草稿三段（viewport/inner/frames）都在 {case_mod.case_toml(case.name, _ctx['cases_root'])} 里"},
+            "extract": {"ok": extracted,
+                        "reason": "" if extracted else "先完成选区并运行抽取",
+                        "evidence": f"在 {cur}\\ 检测到 clip.json / clip.mp4 / clip_mask.png，当前抽取版本是 {case.extract_current}；想重新抽取，调好选区后再点一次按钮（会生成新版本，旧版本不动）"},
             "generate": {"ok": extracted and (adopted or any(
                 e["has_result"] for e in extracts)),
-                "reason": "" if extracted else "抽取后才能送生成",
+                "reason": "" if extracted else "抽取之后才能送生成",
+                "evidence": (f"在 {cur}\\result.mp4 检测到已采用的结果（来自生成记录 {case.adopt_round}）"
+                             if adopted else f"在 {cur}\\result.mp4 检测到结果"),
                 "ready": extracted},
             "merge": {"ok": has_out, "ready": extracted and adopted,
-                      "reason": "" if has_out else "采用一轮结果后合并出片"},
-            "compare": {"ok": has_out, "reason": "" if has_out else "合并出片后可对比"},
+                      "reason": "" if has_out else "采用一次生成结果后，才能合并出片",
+                      "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}；每次合并都会覆盖同名文件"},
+            "compare": {"ok": has_out, "reason": "" if has_out else "合并出片后可以在这里对比",
+                        "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}"},
         }
     else:
         steps = {
             "pad": {"ok": padded,
-                    "reason": "" if padded else "先把两侧画面扩充好，再送生成"},
+                    "reason": "" if padded else "先把两侧画面扩充好，再送生成",
+                    "evidence": (f"在 {pad_manifests[0]} 检测到扩充画面的记录文件，这一步已完成；"
+                                 f"再点一次按钮会重新扩充并覆盖它")},
             "generate": {"ok": result_file, "ready": padded,
-                         "reason": "" if result_file else "先送生成，并采用一次结果"},
+                         "reason": "" if result_file else "先送生成，并采用一次结果",
+                         "evidence": (f"在 {cdir}\\result.mp4 检测到已采用的结果"
+                                      f"（来自生成记录 {case.adopt_round}）；想换一轮，回到上面点别的「采用」"
+                                      if result_file else "")},
             "recompose": {"ok": has_out, "ready": result_file,
-                          "reason": "" if has_out else "采用结果后才能裁回原尺寸"},
+                          "reason": "" if has_out else "采用结果后才能裁回原尺寸",
+                          "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}；每次裁回都会覆盖同名文件"},
             "compare": {"ok": has_out,
-                        "reason": "" if has_out else "裁回原尺寸出片后，在这里对比"},
+                        "reason": "" if has_out else "裁回原尺寸出片后，在这里对比",
+                        "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}"},
         }
     return steps
 
