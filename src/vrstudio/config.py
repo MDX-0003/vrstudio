@@ -70,6 +70,10 @@ _FALLBACK: dict = {
         "metadata": "copy",
     },
     "manifest": {"path_template": "{stem}_pad.json", "write_hash": True},
+    "generate": {
+        "vrgen": "vrgen",        # vrgen CLI 的可执行文件（跨仓库 CLI 契约，绝对路径最稳）
+        "workdir": "vrgen_runs",  # vrgen 台账根，相对仓库根（gitignore）
+    },
     # [aigc] 段不迁 vrstudio：平台参数归 vrgen 仓库（E:\VRAIGC\vrgen），
     # 见 docs/architecture.md §2。
     "bin": {
@@ -281,4 +285,10 @@ def _validate(data: dict) -> None:
         raise ConfigError("recompose.per_frame_ema_alpha must be in (0, 1]")
     if _number(data, "verify.max_wrap_percentile") > 100.0:
         raise ConfigError("verify.max_wrap_percentile must be <= 100")
+
+    gen = data["generate"]
+    if not str(gen["vrgen"]).strip():
+        raise ConfigError("generate.vrgen must not be empty")
+    if not str(gen["workdir"]).strip():
+        raise ConfigError("generate.workdir must not be empty")
 

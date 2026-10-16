@@ -13,10 +13,11 @@ runner = CliRunner()
 MIGRATED_COMMANDS = {
     "pad", "recompose", "plan", "verify", "calib", "seam-center",   # ← vrpad
     "extract", "merge", "restore",                                   # ← vrpatch
+    "case", "generate",                                              # ★ M3 新增
 }
 
 STUB_COMMANDS = {
-    "case", "generate", "serve",                                     # ★ M3/M4
+    "serve",                                                          # ★ M4
 }
 
 

@@ -2,6 +2,7 @@
 cases/
 sources/
 logs/
+vrgen_runs/
 
 # 机器本地外部二进制（ffmpeg/rife，见 bin/README.md）
 # 不写 bin/ 是为了保留 bin/README.md（与旧仓库 vrpad 同款做法）

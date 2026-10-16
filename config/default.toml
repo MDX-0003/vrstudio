@@ -74,6 +74,15 @@ metadata = "copy"
 path_template = "{stem}_pad.json"
 write_hash    = true
 
+# ── generate（跨仓库接缝：vrstudio → vrgen CLI 子进程）──────────────────
+[generate]
+# vrgen CLI 的可执行文件。跨仓库只走 CLI 契约（AGENTS.md 硬规则 1）。
+# 同机开发最稳的写法是绝对路径，例如 "E:/VRAIGC/vrgen/.venv/Scripts/vrgen.exe"；
+# 也支持本机 vrstudio.toml 覆盖或 --set generate.vrgen=...
+vrgen    = "vrgen"
+# vrgen 的台账根（runs/<job>/<轮次>/），相对仓库根。gitignore，不进 git。
+workdir  = "vrgen_runs"
+
 # ── 外部二进制 ──────────────────────────────────────────────────────────
 [bin]
 dir                 = "bin"          # 相对仓库根
