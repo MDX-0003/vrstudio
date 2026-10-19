@@ -65,10 +65,11 @@
   .varline b { min-width: 90px; color: #5a4a30; }
   .fgroup { margin: 0.35rem 0; }
   .fgroup > b { display: inline-block; min-width: 2.2rem; color: #5a4a30; vertical-align: top; }
+  .fstage { margin: 0.55rem 0 0.15rem; font-weight: 600; color: #5a4a30; font-size: 0.8rem; }
   .fileline { display: flex; gap: 0.7rem; padding: 0.08rem 0 0.08rem 2.8rem;
               font-size: 0.78rem; }
-  .fileline .fname { color: #4a4238; }
-  .fileline .fmeta { color: #8a7a62; font-variant-numeric: tabular-nums; }
+  .fileline .fname { color: #4a4238; overflow-wrap: anywhere; }
+  .fileline .fmeta { color: #8a7a62; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .fileline.bad .fname, .fileline.bad .fmeta { color: #b5533c; }
   #browseBox { position: fixed; top: 10%; left: 30%; width: 40%; background: #ffffff;
                border: 1px solid #c2a066; border-radius: 6px; padding: 0.7rem; display: none;

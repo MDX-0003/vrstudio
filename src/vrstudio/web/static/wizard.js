@@ -254,7 +254,8 @@ function _fileRow(f) {
   row.title = f.path;
   const name = document.createElement("span");
   name.className = "fname";
-  name.textContent = f.name;
+  // 仓库内的文件显示相对 E:\VRAIGC\vrstudio 的路径；仓库外才退回绝对路径。
+  name.textContent = f.rel || f.path;
   const meta = document.createElement("span");
   meta.className = "fmeta";
   meta.textContent = f.exists
@@ -264,6 +265,16 @@ function _fileRow(f) {
   return row;
 }
 
+function _appendFileGroup(box, label, files) {
+  const group = document.createElement("div");
+  group.className = "fgroup";
+  const tag = document.createElement("b");
+  tag.textContent = label;
+  group.appendChild(tag);
+  for (const f of files) group.appendChild(_fileRow(f));
+  box.appendChild(group);
+}
+
 function renderStepFiles() {
   const sf = (info && info.step_files) || {};
   for (const step of Object.keys(sf)) {
@@ -271,16 +282,21 @@ function renderStepFiles() {
     if (!box) continue;
     box.textContent = "";
     let any = false;
-    for (const [label, files] of [["输入", sf[step].inputs], ["输出", sf[step].outputs]]) {
-      if (!files || !files.length) continue;
-      any = true;
-      const group = document.createElement("div");
-      group.className = "fgroup";
-      const tag = document.createElement("b");
-      tag.textContent = label;
-      group.appendChild(tag);
-      for (const f of files) group.appendChild(_fileRow(f));
-      box.appendChild(group);
+    // 普通步骤是 {inputs, outputs}；生成步骤是两组 {label, inputs, outputs}。
+    const spec = sf[step] || {};
+    const stages = spec.groups || [{ label: null, inputs: spec.inputs, outputs: spec.outputs }];
+    for (const stage of stages) {
+      if (stage.label) {
+        const title = document.createElement("div");
+        title.className = "fstage";
+        title.textContent = stage.label;
+        box.appendChild(title);
+      }
+      for (const [label, files] of [["输入", stage.inputs], ["输出", stage.outputs]]) {
+        if (!files || !files.length) continue;
+        any = true;
+        _appendFileGroup(box, label, files);
+      }
     }
     if (!any) {
       const empty = document.createElement("span");

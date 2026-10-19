@@ -14,6 +14,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from vrstudio import case as case_mod
+from vrstudio import config as config_mod
 from vrstudio.redraw.geometry import PadSpec, plan_pad
 from vrstudio.redraw.manifest import VideoSettings, from_plan
 from vrstudio.web import app as web_app
@@ -54,7 +55,7 @@ def _mk_extract(case: str, tmp_path, version: str, with_result: bool = False):
 
 
 @pytest.fixture
-def fullredraw_case(tmp_path) -> str:
+def fullredraw_case(tmp_path, monkeypatch) -> str:
     src = tmp_path / "ue.mp4"
     src.write_bytes(b"fake ue bytes")
     case_mod.create("f1", "fullredraw", src, root=tmp_path)
@@ -72,7 +73,14 @@ def fullredraw_case(tmp_path) -> str:
     man.save(cdir / "seedance_input_pad.json")
     (cdir / "seedance_input.mp4").write_bytes(b"padded")
     (cdir / "seedance_input_mask.png").write_bytes(b"mask")
+    (cdir / "result.mp4").write_bytes(b"adopted")
     case_mod.set_adopt("f1", "round-1", root=tmp_path)
+    runs = tmp_path / "vrgen_runs" / "f1" / "round-1"
+    runs.mkdir(parents=True)
+    (runs / "result.mp4").write_bytes(b"raw")
+    (runs / "run.json").write_text(
+        json.dumps({"result": str(runs / "result.mp4")}), encoding="utf-8")
+    monkeypatch.setattr(web_app, "_workdir", lambda: tmp_path / "vrgen_runs")
     outdir = cdir / "out"
     outdir.mkdir()
     (outdir / "round-1.mp4").write_bytes(b"out")
@@ -287,7 +295,7 @@ def test_step_files_are_flow_specific(client, patch_case, fullredraw_case):
     assert "extract" not in full and "merge" not in full
 
 
-def test_step_files_fullredraw_reports_names_and_times(client, fullredraw_case):
+def test_step_files_fullredraw_reports_names_and_times(client, fullredraw_case, tmp_path):
     sf = client.get("/api/case/f1").json()["step_files"]
     pad = sf["pad"]
     assert pad["inputs"][0]["name"] == "ue.mp4"
@@ -296,6 +304,15 @@ def test_step_files_fullredraw_reports_names_and_times(client, fullredraw_case):
     assert all(f["exists"] for f in pad["outputs"])
     assert all(isinstance(f["mtime"], (int, float)) for f in pad["outputs"])
     assert all(f["size"] > 0 for f in pad["outputs"])
+
+    gen = sf["generate"]
+    assert [g["label"] for g in gen["groups"]] == ["生成", "采用"]
+    assert [f["name"] for f in gen["groups"][0]["outputs"]] == ["result.mp4", "run.json"]
+    assert gen["groups"][0]["outputs"][0]["exists"] is True     # vrgen 轮次目录里的原始件
+    assert gen["groups"][1]["inputs"][0]["exists"] is True
+    assert gen["groups"][1]["outputs"][0]["path"] == str(
+        case_mod.case_dir("f1", tmp_path) / "result.mp4")        # adopt 拷进 case 的副本
+
     assert [f["name"] for f in sf["recompose"]["outputs"]] == [
         "round-1.mp4", "round-1_recompose.json"]
 
@@ -324,5 +341,16 @@ def test_step_files_patch_uses_extract_version(client, patch_case, tmp_path):
     sf = client.get("/api/case/p1").json()["step_files"]
     assert [f["name"] for f in sf["extract"]["outputs"]] == [
         "clip.mp4", "clip_mask.png", "clip.json"]
-    assert [f["name"] for f in sf["generate"]["outputs"]] == ["result.mp4"]
+    # 还没 adopt：生成组只有输入，不猜 vrgen 轮次目录
+    gen = sf["generate"]["groups"][0]
+    assert [f["name"] for f in gen["inputs"]] == ["clip.mp4", "clip_mask.png", "clip.json"]
+    assert gen["outputs"] == []
     assert [f["name"] for f in sf["merge"]["outputs"]] == ["v1.mp4"]
+
+
+def test_file_info_uses_repo_relative_path():
+    p = config_mod.REPO_ROOT / "cases" / "_rel_test" / "x.mp4"
+    info = web_app._file_info(p)
+    assert info["exists"] is False
+    assert info["rel"] == os.path.join("cases", "_rel_test", "x.mp4")
+    assert info["path"].endswith(os.path.join("cases", "_rel_test", "x.mp4"))

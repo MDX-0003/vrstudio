@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -238,15 +239,69 @@ def _outputs(case: case_mod.Case) -> list[dict]:
 
 
 def _file_info(path: Path) -> dict:
-    """文件的名词/位置/修改时间/大小；不存在也是可展示的事实，不是错误。"""
+    """文件的名词/位置/修改时间/大小；不存在也是可展示的事实，不是错误。
+
+    ``rel`` 是相对仓库根（E:\\VRAIGC\\vrstudio）的路径，页面优先显示它；
+    仓库外的文件（例如外部源视频）为 None，页面改显示绝对路径。
+    """
     p = Path(path)
+    try:
+        rel = os.path.relpath(p, config_mod.REPO_ROOT)
+        if rel.startswith(".."):
+            rel = None
+    except ValueError:                     # 不同盘符
+        rel = None
     try:
         st = p.stat()
     except OSError:
-        return {"name": p.name, "path": str(p), "exists": False,
+        return {"name": p.name, "path": str(p), "rel": rel, "exists": False,
                 "mtime": None, "size": None}
-    return {"name": p.name, "path": str(p), "exists": True,
+    return {"name": p.name, "path": str(p), "rel": rel, "exists": True,
             "mtime": st.st_mtime, "size": st.st_size}
+
+
+def _round_dir(case: case_mod.Case) -> Path | None:
+    """被采用轮次的目录。adopt_round 可能是轮次 key，也可能是历史写法里的
+    绝对路径（web_demo 就是后者），两种都认。"""
+    raw = case.adopt_round
+    if not raw:
+        return None
+    p = Path(raw)
+    if p.is_absolute() or p.parent != Path("."):
+        return p
+    return _workdir() / case.name / raw
+
+
+def _generation_groups(case: case_mod.Case, inputs: list[dict],
+                       adopted: Path) -> dict:
+    """生成步骤拆两组：vrgen 轮次目录里的原始结果，以及 adopt 拷进 case 的副本。
+
+    原始结果路径读 round/run.json 的 ``result`` 字段（vrgen 台账契约），读不到
+    时退回 round/result.mp4；没有 adopt 指针时只显示生成输入，不猜输出。
+    """
+    round_dir = _round_dir(case)
+    raw = run_json = None
+    if round_dir is not None:
+        run_json = round_dir / "run.json"
+        try:
+            recorded = json.loads(run_json.read_text(encoding="utf-8")).get("result")
+        except (OSError, ValueError):
+            recorded = None
+        raw = Path(recorded) if recorded else round_dir / "result.mp4"
+
+    groups = [{
+        "label": "生成",
+        "inputs": inputs,
+        "outputs": ([_file_info(raw)] if raw is not None else []) +
+                   ([_file_info(run_json)] if run_json is not None else []),
+    }]
+    if raw is not None:
+        groups.append({
+            "label": "采用",
+            "inputs": [_file_info(raw)],
+            "outputs": [_file_info(adopted)],
+        })
+    return {"groups": groups}
 
 
 def _fullredraw_step_files(case: case_mod.Case, cdir: Path) -> dict:
@@ -280,10 +335,9 @@ def _fullredraw_step_files(case: case_mod.Case, cdir: Path) -> dict:
             "inputs": [_file_info(source)],
             "outputs": [_file_info(padded), _file_info(mask), _file_info(manifest)],
         },
-        "generate": {
-            "inputs": [_file_info(padded), _file_info(mask), _file_info(manifest)],
-            "outputs": [_file_info(result)],
-        },
+        "generate": _generation_groups(
+            case, [_file_info(padded), _file_info(mask), _file_info(manifest)],
+            result),
         "recompose": {
             "inputs": [_file_info(result), _file_info(manifest)],
             "outputs": [_file_info(p) for p in outputs],
@@ -312,10 +366,8 @@ def _patch_step_files(case: case_mod.Case, cdir: Path) -> dict:
         "inputs": [_file_info(source)],
         "outputs": [_file_info(clip), _file_info(mask), _file_info(sidecar)],
     }
-    steps["generate"] = {
-        "inputs": [_file_info(clip), _file_info(mask), _file_info(sidecar)],
-        "outputs": [_file_info(ai)],
-    }
+    steps["generate"] = _generation_groups(
+        case, [_file_info(clip), _file_info(mask), _file_info(sidecar)], ai)
     steps["merge"] = {
         "inputs": [_file_info(source), _file_info(ai),
                    _file_info(sidecar), _file_info(clip)],
