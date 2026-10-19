@@ -7,11 +7,15 @@
 from __future__ import annotations
 
 import json
+import os
+from fractions import Fraction
 
 import pytest
 from starlette.testclient import TestClient
 
 from vrstudio import case as case_mod
+from vrstudio.redraw.geometry import PadSpec, plan_pad
+from vrstudio.redraw.manifest import VideoSettings, from_plan
 from vrstudio.web import app as web_app
 from vrstudio.web import tasks as tasks_mod
 
@@ -47,6 +51,33 @@ def _mk_extract(case: str, tmp_path, version: str, with_result: bool = False):
     if with_result:
         (d / "result.mp4").write_bytes(b"r")
     return d
+
+
+@pytest.fixture
+def fullredraw_case(tmp_path) -> str:
+    src = tmp_path / "ue.mp4"
+    src.write_bytes(b"fake ue bytes")
+    case_mod.create("f1", "fullredraw", src, root=tmp_path)
+    cdir = case_mod.case_dir("f1", tmp_path)
+    plan = plan_pad(PadSpec((64, 32), Fraction(21, 9)))
+    man = from_plan(
+        plan, source_path=src, source_frames=6, source_fps="30/1",
+        source_pix_fmt="yuv420p", has_audio=False, write_hash=False,
+        padded_name="seedance_input.mp4", mask_path="seedance_input_mask.png",
+        mask_strategy="redundant_white", mask_feather_px=0,
+        mask_png_compression=0, restore_interp="lanczos4",
+        video=VideoSettings("libx264", 18, "veryfast", "yuv420p", "copy", "copy"),
+        tool_version="0.1.0",
+    )
+    man.save(cdir / "seedance_input_pad.json")
+    (cdir / "seedance_input.mp4").write_bytes(b"padded")
+    (cdir / "seedance_input_mask.png").write_bytes(b"mask")
+    case_mod.set_adopt("f1", "round-1", root=tmp_path)
+    outdir = cdir / "out"
+    outdir.mkdir()
+    (outdir / "round-1.mp4").write_bytes(b"out")
+    (outdir / "round-1_recompose.json").write_text("{}", encoding="utf-8")
+    return "f1"
 
 
 # ── 页面与列表 ────────────────────────────────────────────────────────────
@@ -241,3 +272,57 @@ def test_task_status_carries_submit_time_and_ten_history():
     t = tasks_mod.Task("extract", "cx", ["echo"])
     q.pending = [t]
     assert q.status()["queued"][0]["submitted"] == t.submitted
+
+
+# ── step_files：两套 flow 的文件规范必须分流 ─────────────────────────────
+
+
+def test_step_files_are_flow_specific(client, patch_case, fullredraw_case):
+    patch = client.get("/api/case/p1").json()["step_files"]
+    assert set(patch) == {"extract", "generate", "merge"}
+    assert "pad" not in patch and "recompose" not in patch
+
+    full = client.get("/api/case/f1").json()["step_files"]
+    assert set(full) == {"pad", "generate", "recompose"}
+    assert "extract" not in full and "merge" not in full
+
+
+def test_step_files_fullredraw_reports_names_and_times(client, fullredraw_case):
+    sf = client.get("/api/case/f1").json()["step_files"]
+    pad = sf["pad"]
+    assert pad["inputs"][0]["name"] == "ue.mp4"
+    assert [f["name"] for f in pad["outputs"]] == [
+        "seedance_input.mp4", "seedance_input_mask.png", "seedance_input_pad.json"]
+    assert all(f["exists"] for f in pad["outputs"])
+    assert all(isinstance(f["mtime"], (int, float)) for f in pad["outputs"])
+    assert all(f["size"] > 0 for f in pad["outputs"])
+    assert [f["name"] for f in sf["recompose"]["outputs"]] == [
+        "round-1.mp4", "round-1_recompose.json"]
+
+
+def test_step_files_mtime_changes_when_the_step_reruns(client, fullredraw_case, tmp_path):
+    cdir = case_mod.case_dir("f1", tmp_path)
+    padded = cdir / "seedance_input.mp4"
+    os.utime(padded, (1_000, 1_000))
+    first = client.get("/api/case/f1").json()["step_files"]["pad"]["outputs"][0]["mtime"]
+    os.utime(padded, (2_000, 2_000))
+    second = client.get("/api/case/f1").json()["step_files"]["pad"]["outputs"][0]["mtime"]
+    assert first == 1_000 and second == 2_000
+
+
+def test_step_files_marks_a_missing_file(client, fullredraw_case, tmp_path):
+    (case_mod.case_dir("f1", tmp_path) / "seedance_input_mask.png").unlink()
+    mask = client.get("/api/case/f1").json()["step_files"]["pad"]["outputs"][1]
+    assert mask["exists"] is False and mask["mtime"] is None and mask["size"] is None
+
+
+def test_step_files_patch_uses_extract_version(client, patch_case, tmp_path):
+    d = _mk_extract("p1", tmp_path, "v1", with_result=True)
+    (d / "clip.mp4").write_bytes(b"c")
+    (d / "clip_mask.png").write_bytes(b"m")
+    case_mod.set_extract_current("p1", "v1", root=tmp_path)
+    sf = client.get("/api/case/p1").json()["step_files"]
+    assert [f["name"] for f in sf["extract"]["outputs"]] == [
+        "clip.mp4", "clip_mask.png", "clip.json"]
+    assert [f["name"] for f in sf["generate"]["outputs"]] == ["result.mp4"]
+    assert [f["name"] for f in sf["merge"]["outputs"]] == ["v1.mp4"]

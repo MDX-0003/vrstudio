@@ -28,6 +28,7 @@ from .. import case as case_mod
 from .. import config as config_mod
 from ..case import CaseError
 from ..cli.generate import TEMPLATE_BY_FLOW
+from ..redraw.manifest import Manifest
 from .render import PreviewStore
 from .tasks import QUEUE, vrstudio_argv
 
@@ -233,6 +234,106 @@ def _outputs(case: case_mod.Case) -> list[dict]:
     return out
 
 
+# ── 每步的输入/输出文件（按 flow 分流，两套规范不混用）──────────────────
+
+
+def _file_info(path: Path) -> dict:
+    """文件的名词/位置/修改时间/大小；不存在也是可展示的事实，不是错误。"""
+    p = Path(path)
+    try:
+        st = p.stat()
+    except OSError:
+        return {"name": p.name, "path": str(p), "exists": False,
+                "mtime": None, "size": None}
+    return {"name": p.name, "path": str(p), "exists": True,
+            "mtime": st.st_mtime, "size": st.st_size}
+
+
+def _fullredraw_step_files(case: case_mod.Case, cdir: Path) -> dict:
+    """fullredraw：源 → 扩宽件 → 采用结果 → 还原成片。
+
+    pad 的产物名以 manifest 为准（它记录的是 pad 真做了什么）；manifest 还没
+    生成时退回 web `pad` op 的固定输出名，让页面能显示"这一步会写到哪"。
+    """
+    padded = cdir / "seedance_input.mp4"
+    mask = cdir / "seedance_input_mask.png"
+    manifests = sorted(cdir.glob("*_pad.json"))
+    manifest = manifests[0] if manifests else cdir / "seedance_input_pad.json"
+    if manifests:
+        try:
+            man = Manifest.load(manifests[0])
+        except (OSError, ValueError):
+            man = None
+        if man is not None:
+            if man.padded:
+                padded = cdir / man.padded
+            if man.mask.path:
+                mask = cdir / Path(man.mask.path).name
+    source = Path(case.source_path)
+    result = cdir / "result.mp4"
+    outputs = []
+    if case.adopt_round:
+        out = cdir / "out" / f"{case.adopt_round}.mp4"
+        outputs = [out, out.with_name(out.stem + "_recompose.json")]
+    return {
+        "pad": {
+            "inputs": [_file_info(source)],
+            "outputs": [_file_info(padded), _file_info(mask), _file_info(manifest)],
+        },
+        "generate": {
+            "inputs": [_file_info(padded), _file_info(mask), _file_info(manifest)],
+            "outputs": [_file_info(result)],
+        },
+        "recompose": {
+            "inputs": [_file_info(result), _file_info(manifest)],
+            "outputs": [_file_info(p) for p in outputs],
+        },
+    }
+
+
+def _patch_step_files(case: case_mod.Case, cdir: Path) -> dict:
+    """patch：源 → 选区片段 → 采用结果 → 贴回成片。没有 extract 指针时
+    只显示已知的源，不猜版本目录。"""
+    source = Path(case.source_path)
+    steps = {
+        "extract": {"inputs": [_file_info(source)], "outputs": []},
+        "generate": {"inputs": [], "outputs": []},
+        "merge": {"inputs": [_file_info(source)], "outputs": []},
+    }
+    if not case.extract_current:
+        return steps
+    d = cdir / "extracts" / case.extract_current
+    clip = d / "clip.mp4"
+    mask = d / "clip_mask.png"
+    sidecar = d / "clip.json"
+    ai = d / "result.mp4"
+    out = cdir / "out" / f"{case.extract_current}.mp4"
+    steps["extract"] = {
+        "inputs": [_file_info(source)],
+        "outputs": [_file_info(clip), _file_info(mask), _file_info(sidecar)],
+    }
+    steps["generate"] = {
+        "inputs": [_file_info(clip), _file_info(mask), _file_info(sidecar)],
+        "outputs": [_file_info(ai)],
+    }
+    steps["merge"] = {
+        "inputs": [_file_info(source), _file_info(ai),
+                   _file_info(sidecar), _file_info(clip)],
+        "outputs": [_file_info(out)],
+    }
+    return steps
+
+
+def _step_files(case: case_mod.Case) -> dict:
+    """两个 flow 的文件规范完全不同，这里显式分流，禁止共用一张表。"""
+    cdir = case.dir(_ctx["cases_root"])
+    if case.flow == "fullredraw":
+        return _fullredraw_step_files(case, cdir)
+    if case.flow == "patch":
+        return _patch_step_files(case, cdir)
+    return {}
+
+
 def _gates(case: case_mod.Case, extracts: list[dict]) -> dict:
     """软向导的门控判据与证据（服务端唯一权威，前端只渲染结果）。
 
@@ -314,6 +415,7 @@ def _case_info(name: str) -> dict | None:
         "adopt_round": case.adopt_round,
         "extracts": extracts,
         "outputs": _outputs(case),
+        "step_files": _step_files(case),
         "gates": _gates(case, extracts),
         "previews": {"vp": f"/img/{case.name}/vp.png?k={store.key}"} if store else {},
         "rounds": _rounds(case.name),

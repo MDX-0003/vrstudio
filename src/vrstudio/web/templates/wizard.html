@@ -63,6 +63,13 @@
   .varline { display: flex; gap: 0.5rem; align-items: center; padding: 0.25rem 0;
              border-bottom: 1px dashed #ece4d4; }
   .varline b { min-width: 90px; color: #5a4a30; }
+  .fgroup { margin: 0.35rem 0; }
+  .fgroup > b { display: inline-block; min-width: 2.2rem; color: #5a4a30; vertical-align: top; }
+  .fileline { display: flex; gap: 0.7rem; padding: 0.08rem 0 0.08rem 2.8rem;
+              font-size: 0.78rem; }
+  .fileline .fname { color: #4a4238; }
+  .fileline .fmeta { color: #8a7a62; font-variant-numeric: tabular-nums; }
+  .fileline.bad .fname, .fileline.bad .fmeta { color: #b5533c; }
   #browseBox { position: fixed; top: 10%; left: 30%; width: 40%; background: #ffffff;
                border: 1px solid #c2a066; border-radius: 6px; padding: 0.7rem; display: none;
                z-index: 9; box-shadow: 0 4px 16px rgba(90,74,48,.15); }
@@ -118,6 +125,7 @@
   <h3>抽取（冻结草稿 → extracts/&lt;版本&gt;/）</h3>
   <div class="meta" id="draftGate"></div>
   <button class="big" id="btnExtract" onclick="runOp('extract')">运行抽取（新建版本）</button>
+  <div class="files" id="files-extract"></div>
   <div id="verList"></div>
 </div>
 
@@ -136,6 +144,7 @@
       <div class="meta">从电脑里挑一个已经在别处生成好的视频文件，交给后面的步骤用</div>
     </div>
   </div>
+  <div class="files" id="files-generate"></div>
   <h3>提示词（这次发给 Seedance 的完整内容）</h3>
   <div class="meta">下面的模板正文是固定不动的部分，照原样发出去；「风格」段落里的变量
     在输入框里改，改动立即保存，下次打开这个 case 还在。模板自带的变量只能改值，
@@ -161,6 +170,7 @@
   <h3>合并（自动 restore 对齐时间契约 + 多频带融合，footprint 外逐位不变）</h3>
   <div class="meta" id="mergeGate"></div>
   <button class="big" id="btnMerge" onclick="runOp('merge')">合并出片 → out/</button>
+  <div class="files" id="files-merge"></div>
 </div>
 
 <!-- ── fullredraw：pad ─────────────────────────────────────────────── -->
@@ -170,6 +180,7 @@
     生成时接缝处才能画出连续的景色。这一步会同时准备好送给生成工具的视频和标注图。</div>
   <div class="meta" id="padGate"></div>
   <button class="big" id="btnPad" onclick="runOp('pad')">开始扩充两侧画面</button>
+  <div class="files" id="files-pad"></div>
 </div>
 
 <!-- ── fullredraw：recompose ───────────────────────────────────────── -->
@@ -179,6 +190,7 @@
     原视频，得到和原视频一样大小的成片。</div>
   <div class="meta" id="recomposeGate"></div>
   <button class="big" id="btnRecompose" onclick="runOp('recompose')">开始裁回原尺寸</button>
+  <div class="files" id="files-recompose"></div>
 </div>
 
 <!-- ── compare（两条流程共用）──────────────────────────────────────── -->

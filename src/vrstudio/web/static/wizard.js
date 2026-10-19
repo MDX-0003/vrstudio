@@ -60,6 +60,7 @@ async function loadInfo() {
   renderGenerate();
   renderPrompt();
   renderFinish();
+  renderStepFiles();
   renderCompare();
 }
 
@@ -226,6 +227,67 @@ function renderFinish() {
     $("btnPad").disabled = false;
     gateText("recompose", "recomposeGate");
     $("btnRecompose").disabled = !(info.gates.recompose || {}).ready;
+  }
+}
+
+// ── 每步的输入/输出文件（服务端已按 flow 分流，前端只渲染）──────────────
+
+function _fmtBytes(n) {
+  if (n == null) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let v = n, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return (i === 0 ? v.toFixed(0) : v.toFixed(v >= 100 ? 0 : 1)) + " " + units[i];
+}
+
+function _fmtMtime(sec) {
+  if (sec == null) return "—";
+  const d = new Date(sec * 1000);
+  const p = (x) => String(x).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+         `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+function _fileRow(f) {
+  const row = document.createElement("div");
+  row.className = "fileline" + (f.exists ? "" : " bad");
+  row.title = f.path;
+  const name = document.createElement("span");
+  name.className = "fname";
+  name.textContent = f.name;
+  const meta = document.createElement("span");
+  meta.className = "fmeta";
+  meta.textContent = f.exists
+    ? `${_fmtMtime(f.mtime)}　${_fmtBytes(f.size)}`
+    : "不存在";
+  row.append(name, meta);
+  return row;
+}
+
+function renderStepFiles() {
+  const sf = (info && info.step_files) || {};
+  for (const step of Object.keys(sf)) {
+    const box = $("files-" + step);
+    if (!box) continue;
+    box.textContent = "";
+    let any = false;
+    for (const [label, files] of [["输入", sf[step].inputs], ["输出", sf[step].outputs]]) {
+      if (!files || !files.length) continue;
+      any = true;
+      const group = document.createElement("div");
+      group.className = "fgroup";
+      const tag = document.createElement("b");
+      tag.textContent = label;
+      group.appendChild(tag);
+      for (const f of files) group.appendChild(_fileRow(f));
+      box.appendChild(group);
+    }
+    if (!any) {
+      const empty = document.createElement("span");
+      empty.className = "meta";
+      empty.textContent = "这一步还没有可显示的文件";
+      box.appendChild(empty);
+    }
   }
 }
 
@@ -454,7 +516,8 @@ async function post(path, body) {
   const d = await r.json();
   if (!r.ok) { alert(d.error || r.statusText); return null; }
   info = d;                                   // 这些端点都回新 info
-  renderSteps(); renderPick(); renderExtract(); renderGenerate(); renderFinish(); renderCompare();
+  renderSteps(); renderPick(); renderExtract(); renderGenerate(); renderFinish();
+  renderStepFiles(); renderCompare();
   return d;
 }
 
