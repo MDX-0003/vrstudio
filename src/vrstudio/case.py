@@ -17,7 +17,7 @@ from pathlib import Path
 from .config import REPO_ROOT
 
 SCHEMA = 1
-FLOWS = ("patch", "fullredraw")
+FLOWS = ("patch", "fullredraw", "gen")
 
 #: 与 vrgen 的 job 名同一套约束：case 名是 cases/ 下的目录名。
 _CASE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -66,6 +66,8 @@ class Case:
     inner: dict | None = None
     frames: dict | None = None
     extract_current: str | None = None
+    # ── 仅 flow = gen：参考图功能预留字段（当前不参与生成）──
+    reference_images: list[str] | None = None
     # ── adopt 指针：vrgen 台账里被采用的轮次 ──
     adopt_round: str | None = None
 
@@ -85,8 +87,9 @@ def create(name: str, flow: str, source: str | Path,
     if target.is_file():
         raise CaseError(f"case 已存在：{target}")
     # patch 的 merge 要重读源视频贴回，源变了就静默错片——创建时就把身份钉死；
-    # fullredraw 在 pad 之后源不再被读（manifest 已含源身份），哈希可选。
-    sha = file_sha256(src) if (compute_hash and flow == "patch") else None
+    # gen 每次 submit 都重读源并上传，同样钉死；fullredraw 在 pad 之后源不再被读
+    # （manifest 已含源身份），哈希可选。
+    sha = file_sha256(src) if (compute_hash and flow in ("patch", "gen")) else None
     case = Case(name=name, flow=flow, source_path=str(src), sha256=sha)
     return save(case, root)
 
@@ -102,20 +105,30 @@ def load(name: str, root: str | Path | None = None) -> Case:
     if flow not in FLOWS:
         raise CaseError(f"{path}: flow 必须是 {' 或 '.join(FLOWS)}")
     source = raw.get("source", {})
+    gen = raw.get("gen", {})
+    if not isinstance(gen, dict):
+        raise CaseError(f"{path}: [gen] 必须是表")
+    references = gen.get("reference_images")
+    if references is not None and not (
+            isinstance(references, list) and all(isinstance(r, str) for r in references)):
+        raise CaseError(f"{path}: [gen] reference_images 必须是字符串数组")
     case = Case(
         name=name, flow=flow,
         source_path=str(source.get("path", "")),
         sha256=source.get("sha256"),
         viewport=raw.get("viewport"), inner=raw.get("inner"),
         frames=raw.get("frames"), extract_current=raw.get("extract", {}).get("current"),
+        reference_images=list(references) if references else None,
         adopt_round=raw.get("adopt", {}).get("round"),
     )
     if not case.source_path:
         raise CaseError(f"{path}: [source] 缺 path")
-    if flow == "fullredraw":
+    if flow != "patch":
         for section in _PATCH_SECTIONS:
             if raw.get(section) is not None:
-                raise CaseError(f"{path}: flow=fullredraw 不该有 [{section}]（patch 专属段）")
+                raise CaseError(f"{path}: flow={flow} 不该有 [{section}]（patch 专属段）")
+    if flow != "gen" and raw.get("gen") is not None:
+        raise CaseError(f"{path}: [gen] 只属于 flow=gen")
     return case
 
 
@@ -132,6 +145,10 @@ def save(case: Case, root: str | Path | None = None) -> Case:
                 lines += [_kv(k, v) for k, v in value.items()]
         if case.extract_current:
             lines += ["", "[extract]", f"current = {_s(case.extract_current)}"]
+    if case.flow == "gen" and case.reference_images:
+        lines += ["", "[gen]",
+                  "reference_images = " + json.dumps(case.reference_images,
+                                                     ensure_ascii=False)]
     if case.adopt_round:
         lines += ["", "[adopt]", f"round = {_s(case.adopt_round)}"]
     path = case_toml(case.name, root)
@@ -183,7 +200,7 @@ def set_extract_current(name: str, version: str, root: str | Path | None = None)
 
 
 def check_source(case: Case, root: str | Path | None = None) -> Path:
-    """patch 流的守卫：merge/extract 前确认源视频还是创建时的那份。"""
+    """patch / gen 流的守卫：生成或合并前确认源视频还是创建时的那份。"""
     src = Path(case.source_path)
     if not src.is_file():
         raise CaseError(f"源视频不在了：{src}（case.toml 记录的路径）")

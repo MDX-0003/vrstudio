@@ -25,12 +25,12 @@ def _fail(exc: CaseError) -> None:
 @app.command("new")
 def new(
     name: str = typer.Argument(..., help="case 名（= cases/ 下的目录名 = vrgen 的 job 名）。"),
-    flow: str = typer.Option(..., "--flow", help="patch | fullredraw"),
+    flow: str = typer.Option(..., "--flow", help="patch | fullredraw | gen"),
     source: Path = typer.Option(..., "--source", exists=True, dir_okay=False,
                                 help="源视频。不要预先裁切或缩放。"),
     cases_dir: Path = typer.Option(None, "--cases-dir", help="覆盖 cases 根（测试用）。"),
 ) -> None:
-    """新建 case：写最小 case.toml（patch 流顺带钉死源 sha256）。"""
+    """新建 case：写最小 case.toml（patch/gen 流顺带钉死源 sha256）。"""
     try:
         case = case_mod.create(name, flow, source, root=cases_dir)
     except CaseError as exc:
@@ -38,6 +38,8 @@ def new(
     typer.echo(f"case     {case.dir(cases_dir)}")
     if case.flow == "patch":
         tycho = "下一步：web pick 选区（M4），或手填 case.toml 的 [viewport]/[inner]/[frames]"
+    elif case.flow == "gen":
+        tycho = "下一步：web 生成页填提示词并提交，或 vrstudio generate submit --case " + name
     else:
         tycho = "下一步：vrstudio pad --in <源> --out <case>/seedance_input.mp4"
     typer.echo(tycho)

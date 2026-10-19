@@ -11,7 +11,9 @@ const CASE = document.body.dataset.name;
 const FLOW = document.body.dataset.flow;
 const STEPS = FLOW === "patch"
   ? [["pick", "选区"], ["extract", "抽取"], ["generate", "生成"], ["merge", "合并"], ["compare", "对比"]]
-  : [["pad", "扩充画面"], ["generate", "生成"], ["recompose", "裁回原尺寸"], ["compare", "对比"]];
+  : FLOW === "gen"
+    ? [["generate", "生成"]]
+    : [["pad", "扩充画面"], ["generate", "生成"], ["recompose", "裁回原尺寸"], ["compare", "对比"]];
 
 let info = null;            // 最近一次 /api/case 的应答
 let curStep = null;         // 当前显示的步骤 id
@@ -227,7 +229,7 @@ function renderFinish() {
   if (FLOW === "patch") {
     gateText("merge", "mergeGate");
     $("btnMerge").disabled = !(info.gates.merge || {}).ready;
-  } else {
+  } else if (FLOW === "fullredraw") {
     gateText("pad", "padGate");
     $("btnPad").disabled = false;
     gateText("recompose", "recomposeGate");
@@ -267,8 +269,9 @@ function renderGenParams() {
   if (wanted && !wanted.disabled) scaleSel.value = cur.scale;
   else scaleSel.value = ((gp.input || []).find(o => o.ok !== false) || {}).value || "auto";
   const f = gp.fixed || {};
+  const ratio = f.aspect_ratio === "auto" ? "跟随输入" : f.aspect_ratio;
   fixed.textContent =
-    `模型 ${f.model_id}（Seedance 2.5）· 模式 ${f.mode} · 比例 ${f.aspect_ratio}` +
+    `模型 ${f.model_id}（Seedance 2.5）· 模式 ${f.mode} · 比例 ${ratio}` +
     ` · 时长 ${f.duration_s}s（按输入自动）· 数量 ${f.num}`;
 }
 
@@ -357,6 +360,7 @@ function renderStepFiles() {
 // ── compare ─────────────────────────────────────────────────────────────
 
 function renderCompare() {
+  if (FLOW === "gen") return;          // gen 只有生成一步，没有对比面板
   gateText("compare", "cmpGate");
   const sel = $("outSel");
   const files = info.outputs.map(o => o.file);
@@ -383,6 +387,7 @@ function _fmtTime(s) {
 let cmpViewer = null;
 
 function setupCompare() {
+  if (FLOW === "gen") return;          // 普通视频不走 360° ERP 投影
   const a = $("cmpA"), b = $("cmpB");
   cmpViewer = new Erp360Compare($("cmpCanvas"), a, b);
   // 成片跟着原片走：A 是时钟主，状态与进度偏差都从 A 的事件里对齐

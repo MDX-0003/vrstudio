@@ -31,6 +31,34 @@ def test_create_fullredraw_hash_optional(tmp_path, src_video):
     assert case.sha256 is None            # pad 之后源不再被读（决策：哈希可选）
 
 
+def test_create_gen_pins_hash_and_reserves_reference_images(tmp_path, src_video):
+    case = case_mod.create("simple", "gen", src_video, root=tmp_path)
+    assert case.flow == "gen"
+    assert case.sha256 == case_mod.file_sha256(src_video)   # 每次 submit 重读源
+    case.reference_images = ["ref/character.png"]
+    case_mod.save(case, tmp_path)
+    back = case_mod.load("simple", tmp_path)
+    assert back.reference_images == ["ref/character.png"]
+    text = case_mod.case_toml("simple", tmp_path).read_text(encoding="utf-8")
+    assert "[gen]" in text and "reference_images" in text
+
+
+def test_gen_rejects_patch_sections_and_other_flows_reject_gen_section(tmp_path, src_video):
+    case_mod.create("simple", "gen", src_video, root=tmp_path)
+    p = case_mod.case_toml("simple", tmp_path)
+    p.write_text(p.read_text(encoding="utf-8") + '\n[viewport]\nyaw_deg = 0.0\n',
+                 encoding="utf-8")
+    with pytest.raises(CaseError, match="patch 专属段"):
+        case_mod.load("simple", tmp_path)
+
+    case_mod.create("pano", "fullredraw", src_video, root=tmp_path)
+    p2 = case_mod.case_toml("pano", tmp_path)
+    p2.write_text(p2.read_text(encoding="utf-8") + '\n[gen]\nreference_images = ["x.png"]\n',
+                  encoding="utf-8")
+    with pytest.raises(CaseError, match=r"\[gen\] 只属于"):
+        case_mod.load("pano", tmp_path)
+
+
 def test_fullredraw_rejects_patch_sections(tmp_path, src_video):
     case_mod.create("pano", "fullredraw", src_video, root=tmp_path)
     p = case_mod.case_toml("pano", tmp_path)

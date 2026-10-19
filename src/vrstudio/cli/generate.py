@@ -23,13 +23,15 @@ from .. import case as case_mod
 from ..case import CaseError
 from ..config import REPO_ROOT
 from ..config import load as load_config
+from ..media.videoio import VideoIOError, probe
 from ..redraw.manifest import Manifest
 
 app = typer.Typer(add_completion=False, no_args_is_help=True,
                   help="组装输入包 → 调 vrgen 生成/注册 → adopt 结果落 case")
 
 #: 每个 flow 首轮 submit 用的模板 id（模板本体在 vrgen templates/）。
-TEMPLATE_BY_FLOW = {"fullredraw": "360-closure", "patch": "character-repaint"}
+TEMPLATE_BY_FLOW = {"fullredraw": "360-closure", "patch": "character-repaint",
+                    "gen": "gen-edit"}
 
 _ROUND_IN_OUTPUT = re.compile(r"round=([A-Za-z0-9._-]+)")
 
@@ -82,7 +84,20 @@ def resolve_package(case: case_mod.Case,
     （此守卫连同理由一并继承自 vrpad 的 aigc/case.py）。canvas/source 是 vrgen
     提示词几何占位符的唯一来源（band = canvas_w - source_w）。
     patch：无冗余带概念，canvas=source=clip 实际尺寸（探测）。
+    gen：源视频直接上传，canvas=source=源实际尺寸（探测），无 mask。
     """
+    if case.flow == "gen":
+        if case.reference_images:
+            raise GenError(
+                "[gen] reference_images 非空：参考图功能还没接入生成，"
+                "先清空 case.toml 里的这个列表")
+        try:
+            video = case_mod.check_source(case, root)
+            info = probe(video)
+        except (CaseError, VideoIOError) as exc:
+            raise GenError(str(exc)) from exc
+        canvas_size = source_size = (info.width, info.height)
+        return video, None, TEMPLATE_BY_FLOW["gen"], canvas_size, source_size
     if case.flow == "fullredraw":
         manifests = sorted(case.dir(root).glob("*_pad.json"))
         if not manifests:
@@ -189,6 +204,9 @@ def submit(
         argv += ["--num", str(num)]
     if aspect_ratio is not None:
         argv += ["--aspect-ratio", aspect_ratio]
+    elif case.flow == "gen":
+        # videoEdit 的输出比例跟随输入，页面不提供比例下拉；auto 让 vrgen 不传该 flag。
+        argv += ["--aspect-ratio", "auto"]
     if scale is not None:
         argv += ["--scale", scale]
     argv += ["--workdir", str(_workdir(conf))]
@@ -227,7 +245,7 @@ def adopt(
     """采用一轮结果：拷进 case + 写 [adopt] round + 打印下一步命令。"""
     conf = load_config(overrides=overrides or [])
     case = _load_case(case_name, cases_dir)
-    if case.flow == "fullredraw":
+    if case.flow in ("fullredraw", "gen"):
         out = case.dir(cases_dir) / "result.mp4"
     else:
         if not case.extract_current:
@@ -256,5 +274,7 @@ def adopt(
         typer.echo("next     vrstudio recompose "
                    f"--in {out} --manifest {manifest} "
                    f"--out {case.dir(cases_dir) / 'out' / (resolved + '.mp4')}")
+    elif case.flow == "gen":
+        typer.echo("next     结果已经拷进 case/result.mp4，可以直接播放或交给外部工具")
     else:
         typer.echo("next     vrstudio merge --case " + case.name)

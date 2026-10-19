@@ -16,6 +16,7 @@
   .badge { font-size: 0.7rem; border-radius: 4px; padding: 0.05rem 0.4rem; }
   .badge.patch { background: #e3edf3; color: #3f6f92; }
   .badge.fullredraw { background: #f6e8d2; color: #a06b2c; }
+  .badge.gen { background: #e8f0e4; color: #4f7343; }
   .case .name { font-weight: 600; }
   .case .st { font-size: 0.72rem; color: #8a7c66; }
   select, input { background: #fffdf8; color: #3d362c; border: 1px solid #d8cbb4;
@@ -45,6 +46,7 @@
     <select id="srcSel"></select>
     <label>流程</label>
     <select id="flowSel">
+      <option value="gen">gen · 只做生成（不加前后流程）</option>
       <option value="patch">patch · 局部重绘</option>
       <option value="fullredraw">fullredraw · 全景重绘</option>
     </select>

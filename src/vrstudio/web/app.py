@@ -206,11 +206,14 @@ def _generation_params(name: str) -> dict:
             case, _ctx["cases_root"])
     except (CaseError, GenError, KeyError, ValueError, OSError) as e:
         return {"error": str(e)}
-    return _vrgen_json(["params", "show", "--job", name,
-                        "--input", str(video),
-                        "--canvas", f"{canvas[0]}x{canvas[1]}",
-                        "--source", f"{source[0]}x{source[1]}",
-                        "--workdir", str(_workdir())])
+    argv = ["params", "show", "--job", name,
+            "--input", str(video),
+            "--canvas", f"{canvas[0]}x{canvas[1]}",
+            "--source", f"{source[0]}x{source[1]}",
+            "--workdir", str(_workdir())]
+    if case.flow == "gen":
+        argv += ["--aspect-ratio", "auto"]      # videoEdit 跟随输入，不显示 21:9
+    return _vrgen_json(argv)
 
 
 def _log_tail(name: str, round_key: str | None, lines: int = 24) -> list[str]:
@@ -391,13 +394,23 @@ def _patch_step_files(case: case_mod.Case, cdir: Path) -> dict:
     return steps
 
 
+def _gen_step_files(case: case_mod.Case, cdir: Path) -> dict:
+    """gen：源视频直接上传；采用后的副本落在 case/result.mp4。"""
+    return {
+        "generate": _generation_groups(
+            case, [_file_info(Path(case.source_path))], cdir / "result.mp4"),
+    }
+
+
 def _step_files(case: case_mod.Case) -> dict:
-    """两个 flow 的文件规范完全不同，这里显式分流，禁止共用一张表。"""
+    """三条 flow 的文件规范完全不同，这里显式分流，禁止共用一张表。"""
     cdir = case.dir(_ctx["cases_root"])
     if case.flow == "fullredraw":
         return _fullredraw_step_files(case, cdir)
     if case.flow == "patch":
         return _patch_step_files(case, cdir)
+    if case.flow == "gen":
+        return _gen_step_files(case, cdir)
     return {}
 
 
@@ -413,7 +426,7 @@ def _gates(case: case_mod.Case, extracts: list[dict]) -> dict:
     extracted = bool(case.extract_current) and any(
         e["version"] == case.extract_current and e["extracted"] for e in extracts)
     adopted = bool(case.adopt_round)
-    result_file = (case.flow == "fullredraw" and (cdir / "result.mp4").is_file())
+    result_file = (case.flow in ("fullredraw", "gen") and (cdir / "result.mp4").is_file())
     pad_manifests = sorted(cdir.glob("*_pad.json"))
     padded = bool(pad_manifests)
     outs = _outputs(case)
@@ -421,8 +434,7 @@ def _gates(case: case_mod.Case, extracts: list[dict]) -> dict:
     out_names = "、".join(o["file"] for o in outs)
     if case.flow == "patch":
         cur = cdir / "extracts" / (case.extract_current or "")
-        steps = {
-            "pick": {"ok": missing is None,
+        steps = {            "pick": {"ok": missing is None,
                      "reason": f"case.toml 里缺 [{missing}] 段，补齐后才能抽取" if missing else "",
                      "evidence": f"草稿三段（viewport/inner/frames）都在 {case_mod.case_toml(case.name, _ctx['cases_root'])} 里"},
             "extract": {"ok": extracted,
@@ -440,7 +452,7 @@ def _gates(case: case_mod.Case, extracts: list[dict]) -> dict:
             "compare": {"ok": has_out, "reason": "" if has_out else "合并出片后可以在这里对比",
                         "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}"},
         }
-    else:
+    elif case.flow == "fullredraw":
         # evidence 只在 ok 时被页面读到，但仍须防御求值——全新 case 没有
         # manifest，无条件取 [0] 会让整个 /api/case 500（2026-10-16 验收发现）
         steps = {
@@ -460,6 +472,14 @@ def _gates(case: case_mod.Case, extracts: list[dict]) -> dict:
             "compare": {"ok": has_out,
                         "reason": "" if has_out else "裁回原尺寸出片后，在这里对比",
                         "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}"},
+        }
+    else:
+        steps = {
+            "generate": {"ok": result_file, "ready": True,
+                         "reason": "" if result_file else "填好提示词和分辨率后提交生成，并采用一轮结果",
+                         "evidence": (f"在 {cdir}\\result.mp4 检测到已选用的结果"
+                                      f"（来自 Session {case.adopt_round}）；想换一个，回到上面点别的「选用」"
+                                      if result_file else "")},
         }
     return steps
 

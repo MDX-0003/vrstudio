@@ -89,6 +89,14 @@ def fullredraw_case(tmp_path, monkeypatch) -> str:
     return "f1"
 
 
+@pytest.fixture
+def gen_case(tmp_path) -> str:
+    src = tmp_path / "simple.mp4"
+    src.write_bytes(b"fake simple bytes")
+    case_mod.create("g1", "gen", src, root=tmp_path)
+    return "g1"
+
+
 # ── 页面与列表 ────────────────────────────────────────────────────────────
 
 
@@ -106,6 +114,27 @@ def test_wizard_page_renders_flow(client, patch_case):
 
 def test_wizard_page_404_for_unknown(client):
     assert client.get("/case/nope").status_code == 404
+
+
+def test_gen_wizard_page_and_single_step(client, gen_case):
+    r = client.get("/case/g1")
+    assert r.status_code == 200
+    assert 'data-flow="gen"' in r.text
+    info = client.get("/api/case/g1").json()
+    assert set(info["gates"]) == {"generate"}          # gen 只有生成一步
+    assert info["gates"]["generate"]["ok"] is False
+    assert "提交生成" in info["gates"]["generate"]["reason"]
+    sf = info["step_files"]
+    assert set(sf) == {"generate"}
+    assert sf["generate"]["groups"][0]["inputs"][0]["name"] == "simple.mp4"
+
+
+def test_gen_generate_gate_unlocks_after_adopt(client, gen_case, tmp_path):
+    (case_mod.case_dir("g1", tmp_path) / "result.mp4").write_bytes(b"r")
+    case_mod.set_adopt("g1", "manual-aaaa1111", root=tmp_path)
+    info = client.get("/api/case/g1").json()
+    assert info["gates"]["generate"]["ok"] is True
+    assert "result.mp4" in info["gates"]["generate"]["evidence"]
 
 
 def test_cases_list_has_gates(client, patch_case):
@@ -356,7 +385,7 @@ def test_task_status_carries_submit_time_and_ten_history():
 # ── step_files：两套 flow 的文件规范必须分流 ─────────────────────────────
 
 
-def test_step_files_are_flow_specific(client, patch_case, fullredraw_case):
+def test_step_files_are_flow_specific(client, patch_case, fullredraw_case, gen_case):
     patch = client.get("/api/case/p1").json()["step_files"]
     assert set(patch) == {"extract", "generate", "merge"}
     assert "pad" not in patch and "recompose" not in patch
@@ -364,6 +393,9 @@ def test_step_files_are_flow_specific(client, patch_case, fullredraw_case):
     full = client.get("/api/case/f1").json()["step_files"]
     assert set(full) == {"pad", "generate", "recompose"}
     assert "extract" not in full and "merge" not in full
+
+    gen = client.get("/api/case/g1").json()["step_files"]
+    assert set(gen) == {"generate"}
 
 
 def test_step_files_fullredraw_reports_names_and_times(client, fullredraw_case, tmp_path):

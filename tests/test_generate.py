@@ -14,6 +14,7 @@ from typer.testing import CliRunner
 
 from vrstudio import case as case_mod
 from vrstudio.cli import generate as gen
+from vrstudio.media.videoio import VideoInfo
 from vrstudio.redraw.geometry import PadSpec, plan_pad
 from vrstudio.redraw.manifest import VideoSettings, from_plan
 
@@ -86,6 +87,47 @@ def test_resolve_patch_reads_extract_pointer(tmp_path, src_video):
     assert video.name == "clip.mp4" and mask is not None
     assert template == "character-repaint"
     assert canvas == (1470, 630) and source == (1470, 630)   # 来自 clip.json 契约
+
+
+# ── gen：源视频直接上传 ─────────────────────────────────────────────────
+
+
+def _gen_info() -> VideoInfo:
+    return VideoInfo(path="src.mp4", size=(1920, 1052), fps="30/1",
+                     fps_float=30.0, frames=367, pix_fmt="yuv420p",
+                     codec="h264", has_audio=True, duration_s=12.23)
+
+
+def test_resolve_gen_uses_source_and_probes_size(tmp_path, src_video, monkeypatch):
+    case = case_mod.create("g1", "gen", src_video, root=tmp_path)
+    monkeypatch.setattr(gen, "probe", lambda path: _gen_info())
+    video, mask, template, canvas, source = gen.resolve_package(case, tmp_path)
+    assert video == src_video and mask is None
+    assert template == "gen-edit"
+    assert canvas == source == (1920, 1052)
+
+
+def test_resolve_gen_rejects_reference_images_until_wired(tmp_path, src_video, monkeypatch):
+    case = case_mod.create("g1", "gen", src_video, root=tmp_path)
+    case.reference_images = ["ref.png"]
+    case_mod.save(case, tmp_path)
+    monkeypatch.setattr(gen, "probe", lambda path: _gen_info())
+    with pytest.raises(gen.GenError, match="参考图功能还没接入"):
+        gen.resolve_package(case_mod.load("g1", tmp_path), tmp_path)
+
+
+def test_submit_dry_run_gen_omits_aspect_ratio(tmp_path, src_video, monkeypatch):
+    case_mod.create("g1", "gen", src_video, root=tmp_path)
+    monkeypatch.setattr(gen, "probe", lambda path: _gen_info())
+    r = runner.invoke(gen.app, ["submit", "--case", "g1", "--dry-run",
+                                "--resolution", "1080p", "--scale", "auto",
+                                "--cases-dir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    lines = [line.strip() for line in r.output.splitlines()]
+    assert "--template" in lines and "gen-edit" in lines
+    assert "--aspect-ratio" in lines and "auto" in lines
+    # 画布与源都取源视频实际尺寸
+    assert "1920x1052" in lines
 
 
 # ── submit --dry-run ─────────────────────────────────────────────────────
@@ -170,6 +212,22 @@ def test_adopt_patch_lands_in_extract_dir(tmp_path, src_video, monkeypatch):
     assert r.exit_code == 0 and target.is_file()
     assert "merge" in r.output                       # patch 的下一步是 merge
     assert case_mod.load("p1", tmp_path).adopt_round == "manual-11112222"
+
+
+def test_adopt_gen_lands_result_in_case(tmp_path, src_video, monkeypatch):
+    case_mod.create("g1", "gen", src_video, root=tmp_path)
+    target = case_mod.case_dir("g1", tmp_path) / "result.mp4"
+
+    def fake_capture(argv):
+        target.write_bytes(b"r")
+        return 0, f"{target}   round=manual-33334444   gate=ok"
+
+    monkeypatch.setattr(gen, "_capture", fake_capture)
+    r = runner.invoke(gen.app, ["adopt", "--case", "g1", "--cases-dir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    assert case_mod.load("g1", tmp_path).adopt_round == "manual-33334444"
+    assert target.is_file()
+    assert "result.mp4" in r.output and "recompose" not in r.output
 
 
 def test_adopt_vrgen_failure_propagates(tmp_path, src_video, monkeypatch):
