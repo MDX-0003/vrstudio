@@ -15,6 +15,7 @@ import typer
 from .. import case as case_mod
 from .. import config as config_mod
 from ..case import CaseError
+from ..procenv import decode_text, utf8_env
 
 app = typer.Typer(add_completion=False, no_args_is_help=True,
                   help="case 的建立与查看（case.toml 是唯一真源）")
@@ -46,12 +47,12 @@ def save_mode(name: str, mode: str) -> None:
     argv = [_vrgen_exe(conf), "params", "save", "--job", name,
             "--mode", mode, "--workdir", str(_workdir(conf))]
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace")
+        proc = subprocess.run(argv, capture_output=True, env=utf8_env())
     except OSError as exc:
         raise CaseError(f"模式没保存（找不到 vrgen）：{exc}") from exc
     if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip() or f"退出码 {proc.returncode}"
+        detail = decode_text((proc.stderr or b"") + (proc.stdout or b"")).strip() \
+            or f"退出码 {proc.returncode}"
         raise CaseError(f"模式没保存：{detail}")
 
 

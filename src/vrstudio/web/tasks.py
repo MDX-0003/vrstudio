@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 from ..config import REPO_ROOT
+from ..procenv import decode_text, utf8_env
 from ..progress import logs_dir
 
 _TAIL_BYTES = 8 * 1024
@@ -41,7 +42,7 @@ class Task:
         with open(self.out_path, "w", encoding="utf-8", newline="") as fh:
             self.proc = subprocess.Popen(
                 self.argv, stdout=fh, stderr=subprocess.STDOUT,
-                cwd=str(REPO_ROOT))
+                cwd=str(REPO_ROOT), env=utf8_env())
             self.state = "running"
             self.started = time.time()
             self.returncode = self.proc.wait()
@@ -56,7 +57,7 @@ class Task:
             f.seek(0, 2)
             size = f.tell()
             f.seek(max(0, size - window))
-            lines = f.read().decode("utf-8", "replace").splitlines()
+            lines = decode_text(f.read()).splitlines()
         out = lines[-max_lines:]
         # 失败时的原因行可能被超长提示词挤出尾部窗口（真实额度错误已遇到）：
         # 把最后一条 ERROR/vrgen 报错补在末尾，页面上不至于只看到"失败"。

@@ -27,6 +27,7 @@ from ..case import CaseError
 from ..config import REPO_ROOT
 from ..config import load as load_config
 from ..media.videoio import VideoIOError, probe
+from ..procenv import decode_text, utf8_env
 from ..redraw.manifest import Manifest
 
 app = typer.Typer(add_completion=False, no_args_is_help=True,
@@ -65,14 +66,13 @@ def _workdir(conf) -> Path:
 
 def _stream(argv: list[str]) -> int:
     """长操作（submit/register）：输出原样流回终端与日志。"""
-    return subprocess.run(argv).returncode
+    return subprocess.run(argv, env=utf8_env()).returncode
 
 
 def _capture(argv: list[str]) -> tuple[int, str]:
     """短操作（result）：捕获 stdout 以解析轮次 key。"""
-    r = subprocess.run(argv, capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
-    return r.returncode, (r.stdout or "") + (r.stderr or "")
+    r = subprocess.run(argv, capture_output=True, env=utf8_env())
+    return r.returncode, decode_text((r.stdout or b"") + (r.stderr or b""))
 
 
 # ── 输入包解析（flow 特有知识全部在这里）─────────────────────────────────

@@ -16,6 +16,7 @@ import pytest
 
 from vrstudio import config as config_mod
 from vrstudio.config import ConfigError, builtin_defaults, load, parse_override
+from vrstudio.procenv import decode_text, utf8_env
 from vrstudio.redraw.geometry import PadSpec, plan_pad
 from vrstudio.redraw.manifest import Manifest, VideoSettings, from_plan
 from vrstudio.redraw.pipeline import TransformContext, apply_chain, build_chain
@@ -28,6 +29,20 @@ from vrstudio.redraw.verify_core import (
 )
 
 ASPECT = Fraction(21, 9)
+
+
+# ---------------------------------------------------------- 子进程文本编码
+def test_utf8_env_pins_child_stdout_encoding():
+    env = utf8_env()
+    assert env["PYTHONUTF8"] == "1"
+    assert env["PYTHONIOENCODING"] == "utf-8"
+
+
+def test_decode_text_falls_back_to_local_codepage():
+    import locale
+    text = "job x: 还没有 Session（记录根 E:\\runs\\x）"
+    assert decode_text(text.encode("utf-8")) == text
+    assert decode_text(text.encode(locale.getpreferredencoding(False))) == text
 
 
 # ----------------------------------------------------------------- config

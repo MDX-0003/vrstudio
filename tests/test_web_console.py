@@ -519,6 +519,31 @@ def test_task_status_carries_submit_time_and_ten_history():
     assert q.status()["queued"][0]["submitted"] == t.submitted
 
 
+def test_rounds_forces_utf8_env(client, monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return web_app.subprocess.CompletedProcess(
+            argv, 0, stdout="job x: 还没有 Session（记录根 E:\\runs\\x）\n", stderr="")
+
+    monkeypatch.setattr(web_app.subprocess, "run", fake_run)
+    payload = web_app._rounds("x")
+    assert seen["env"]["PYTHONUTF8"] == "1"
+    assert "还没有 Session" in payload["hint"]
+
+
+def test_task_tail_decodes_legacy_local_codepage_log(tmp_path):
+    import locale
+    text = "job x: 还没有 Session（记录根 E:\\runs\\x）"
+    log = tmp_path / "web_status_x.log"
+    log.write_bytes(text.encode(locale.getpreferredencoding(False)))
+    task = tasks_mod.Task("submit", "x", ["echo"])
+    task.out_path = log
+    task.state = "done"
+    assert text in "\n".join(task.tail())
+
+
 def test_failed_task_tail_keeps_the_error_line(tmp_path):
     """超长提示词会把 ERROR 行挤出尾部窗口；失败任务的 tail 必须补回原因。"""
     log = tmp_path / "web_submit_x.log"

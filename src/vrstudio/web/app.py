@@ -30,6 +30,7 @@ from .. import case as case_mod
 from .. import config as config_mod
 from ..case import CaseError
 from ..cli.generate import TEMPLATE_BY_FLOW, GenError, resolve_package
+from ..procenv import decode_text, utf8_env
 from ..redraw.manifest import Manifest
 from .render import PreviewStore
 from .tasks import QUEUE, vrstudio_argv
@@ -162,7 +163,7 @@ def _rounds(name: str) -> dict:
         r = subprocess.run([_vrgen_exe(), "status", "--job", name,
                             "--workdir", str(_workdir())],
                            capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=30)
+                           errors="replace", timeout=30, env=utf8_env())
     except (OSError, subprocess.TimeoutExpired) as e:
         return {"rounds": [], "hint": f"生成服务（vrgen）没有找到，生成记录暂时显示不了：{e}"}
     rounds = []
@@ -182,7 +183,8 @@ def _vrgen_json(argv: list[str]) -> dict:
     vrgen 不在（未装/路径未配）不炸页面——回 {"error": …} 给面板显示提示。"""
     try:
         r = subprocess.run([_vrgen_exe(), *argv], capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=30)
+                           encoding="utf-8", errors="replace", timeout=30,
+                           env=utf8_env())
     except (OSError, subprocess.TimeoutExpired) as e:
         return {"error": f"生成服务（vrgen）没有找到，提示词暂时显示不了：{e}"}
     if r.returncode != 0:
@@ -243,7 +245,7 @@ def _log_tail(name: str, round_key: str | None, lines: int = 24) -> list[str]:
     try:
         with open(p, "rb") as f:
             data = f.read()
-        return data.decode("utf-8", "replace").splitlines()[-lines:]
+        return decode_text(data).splitlines()[-lines:]
     except OSError:
         return []
 
