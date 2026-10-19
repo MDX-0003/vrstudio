@@ -254,6 +254,51 @@ def test_gates_progress_with_extract_and_result(client, patch_case, tmp_path):
 # ── 提示词模板与变量（决策 18；vrgen 侧用假 JSON 通道替身）────────────────
 
 
+def test_sessions_endpoint_returns_project_tree(client, monkeypatch):
+    tree = {"fetched_at": "2026-10-19T06:30:00Z",
+            "projects": [{"id": 11, "name": "项目甲", "episodes": [
+                {"no": 1, "id": 111, "name": "第一集",
+                 "sessions": [{"id": 1111, "name": "会话一"}]}]}]}
+    calls = []
+
+    def fake(argv):
+        calls.append(argv)
+        return tree if argv[:2] == ["sessions", "list"] else {"error": "unexpected"}
+
+    monkeypatch.setattr(web_app, "_vrgen_json", fake)
+    r = client.get("/api/sessions")
+    assert r.status_code == 200
+    assert r.json()["projects"][0]["episodes"][0]["sessions"][0]["id"] == 1111
+    assert calls == [["sessions", "list"]]
+
+
+def test_sessions_endpoint_reports_vrgen_error(client, monkeypatch):
+    monkeypatch.setattr(web_app, "_vrgen_json",
+                        lambda argv: {"error": "mglc 未登录"})
+    r = client.get("/api/sessions")
+    assert r.status_code == 400 and "未登录" in r.text
+
+
+def test_params_save_passes_project_session_fields(client, fullredraw_case,
+                                                   monkeypatch):
+    calls = []
+
+    def fake(argv):
+        calls.append(argv)
+        return {"resolution": "1080p", "scale": "auto", "session_id": 1111,
+                "project_id": 11, "episode": 1}
+
+    monkeypatch.setattr(web_app, "_vrgen_json", fake)
+    r = client.post("/api/case/f1/params",
+                    json={"resolution": "1080p", "scale": "auto",
+                          "session_id": 1111, "project_id": 11, "episode": 1})
+    assert r.status_code == 200, r.text
+    argv = calls[0]
+    for flag, value in (("--session-id", "1111"), ("--project-id", "11"),
+                        ("--episode", "1")):
+        assert flag in argv and value in argv
+
+
 def test_case_info_prompt_survives_missing_vrgen(client, patch_case):
     info = client.get("/api/case/p1").json()
     assert "error" in info["prompt"]          # vrgen 缺席 → 提示文案，不是 500

@@ -19,6 +19,7 @@ let info = null;            // 最近一次 /api/case 的应答
 let curStep = null;         // 当前显示的步骤 id
 let wasRunning = false;     // 任务从忙到闲时刷新一次 info
 let vpFrame = null;         // 当前逐帧查看的帧号（null = 第 0 帧）
+let sessionTree = null;     // /api/sessions 的项目/剧集/会话树
 
 // 任务类型 → 页面上的说法（op id 是内部标识，不出现在页面上）
 const KIND_LABEL = {
@@ -65,6 +66,7 @@ async function loadInfo() {
   renderGenParams();
   renderStepFiles();
   renderCompare();
+  loadSessions();          // 每次打开/刷新页面都重新取项目与会话
 }
 
 function gateText(id, elId) {
@@ -440,6 +442,156 @@ function setupCompare() {
     const mu = () => { removeEventListener("pointermove", mm); removeEventListener("pointerup", mu); };
     addEventListener("pointermove", mm); addEventListener("pointerup", mu);
   });
+}
+
+// ── 生成额度：项目/剧集/生成会话（决策 22）────────────────────────────
+// 数据每次页面加载都从 /api/sessions 重新取；选择结果写 generation.toml。
+
+function _option(sel, value, label, title) {
+  const o = document.createElement("option");
+  o.value = String(value);
+  o.textContent = label;
+  if (title) o.title = title;
+  sel.appendChild(o);
+  return o;
+}
+
+function _currentGenParams() {
+  return ((info && info.generation_params) || {}).current || {};
+}
+
+function _project(id) {
+  return ((sessionTree && sessionTree.projects) || []).find(p => p.id === id);
+}
+
+function _episode(project, no) {
+  return ((project && project.episodes) || []).find(e => e.no === no);
+}
+
+function fillEpisodes(project, wantedEp) {
+  const sel = $("sessEpisode");
+  if (!sel) return 0;
+  sel.innerHTML = "";
+  const episodes = (project && project.episodes) || [];
+  if (!episodes.length) {
+    _option(sel, 0, "（这个项目还没有剧集）");
+    return 0;
+  }
+  for (const e of episodes) {
+    _option(sel, e.no, `第 ${e.no} 集 · ${e.name || "未命名"}`);
+  }
+  const hit = episodes.find(e => e.no === wantedEp);
+  const chosen = hit ? hit.no : episodes[0].no;
+  sel.value = String(chosen);
+  return chosen;
+}
+
+function fillSessions(project, episodeNo, wantedSession) {
+  const sel = $("sessSession");
+  if (!sel) return;
+  sel.innerHTML = "";
+  _option(sel, 0, "个人额度（不使用项目会话）");
+  const episode = _episode(project, episodeNo);
+  const sessions = (episode && episode.sessions) || [];
+  for (const s of sessions) {
+    _option(sel, s.id, `${s.name || "未命名"}（${s.id}）`);
+  }
+  if (wantedSession && !sessions.some(s => s.id === wantedSession)) {
+    _option(sel, wantedSession, `⚠ 已失效：${wantedSession}`);
+  }
+  sel.value = String(wantedSession || 0);
+}
+
+function renderSessions() {
+  const projectSel = $("sessProject");
+  if (!projectSel) return;
+  const cur = _currentGenParams();
+  let pid = cur.project_id || 0;
+  let ep = cur.episode || 0;
+  const sid = cur.session_id || 0;
+  const projects = (sessionTree && sessionTree.projects) || [];
+
+  // 旧文件只有 session_id：在树里反查它属于哪个项目与剧集。
+  if ((!pid || !ep) && sid) {
+    for (const p of projects) {
+      for (const e of (p.episodes || [])) {
+        if ((e.sessions || []).some(s => s.id === sid)) { pid = p.id; ep = e.no; }
+      }
+    }
+  }
+
+  projectSel.innerHTML = "";
+  if (!projects.length) {
+    _option(projectSel, 0, "（没有可用的项目）");
+  } else {
+    for (const p of projects) _option(projectSel, p.id, p.name || `项目 ${p.id}`);
+    if (!projects.some(p => p.id === pid)) pid = projects[0].id;
+    projectSel.value = String(pid);
+  }
+  const project = _project(pid);
+  ep = fillEpisodes(project, ep);
+  fillSessions(project, ep, sid);
+}
+
+async function loadSessions() {
+  const hint = $("sessionHint");
+  if (hint) { hint.className = "meta"; hint.textContent = "正在获取项目与会话…"; }
+  try {
+    const r = await fetch("/api/sessions");
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || r.statusText);
+    sessionTree = d;
+    renderSessions();
+    if (hint) {
+      hint.textContent = `已获取 ${(d.projects || []).length} 个项目 · ${d.fetched_at || ""}`;
+    }
+  } catch (e) {
+    renderSessions();
+    if (hint) {
+      hint.className = "meta bad";
+      hint.textContent = "会话列表获取失败：" + (e.message || e);
+    }
+  }
+}
+
+function onProjectChange() {
+  const project = _project(+$("sessProject").value || 0);
+  const ep = fillEpisodes(project, 0);
+  fillSessions(project, ep, 0);
+  $("sessionHint").className = "meta";
+  $("sessionHint").textContent = "选好生成会话后自动保存";
+}
+
+function onEpisodeChange() {
+  const project = _project(+$("sessProject").value || 0);
+  fillSessions(project, +$("sessEpisode").value || 0, 0);
+  $("sessionHint").className = "meta";
+  $("sessionHint").textContent = "选好生成会话后自动保存";
+}
+
+async function onSessionChange() {
+  const pid = +$("sessProject").value || 0;
+  const ep = +$("sessEpisode").value || 0;
+  const sid = +$("sessSession").value || 0;
+  const resolution = ($("genResolution") || {}).value || "";
+  const scale = ($("genScale") || {}).value || "";
+  const hint = $("sessionHint");
+  if (!resolution || !scale) {
+    hint.className = "meta bad";
+    hint.textContent = "生成参数还没加载好，稍后再选会话";
+    return;
+  }
+  const d = await post("params", {
+    resolution, scale,
+    session_id: sid,
+    project_id: sid ? pid : 0,
+    episode: sid ? ep : 0,
+  });
+  if (!d) return;
+  hint.className = "meta " + (sid ? "ok" : "");
+  hint.textContent = sid
+    ? `已保存项目会话 ${sid}；下次提交扣项目额度`
+    : "已切换为个人额度";
 }
 
 // ── 队列轮询 ─────────────────────────────────────────────────────────────

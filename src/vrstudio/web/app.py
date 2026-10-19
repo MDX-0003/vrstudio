@@ -198,6 +198,11 @@ def _prompt(name: str, flow: str) -> dict:
                         "--workdir", str(_workdir())])
 
 
+def _sessions_tree() -> dict:
+    """项目/剧集/生成会话树（只读；契约 case-model.md §4）。"""
+    return _vrgen_json(["sessions", "list"])
+
+
 def _generation_params(name: str) -> dict:
     """生成页的输出/输入分辨率选项（决策 20；契约 case-model.md §4）。"""
     try:
@@ -575,6 +580,13 @@ async def api_case(request):
     return JSONResponse(info)
 
 
+async def api_sessions(request):
+    """项目/剧集/生成会话树：每次请求都重新问 vrgen（不缓存）。"""
+    payload = await asyncio.to_thread(_sessions_tree)
+    status = 400 if "error" in payload else 200
+    return JSONResponse(payload, status_code=status)
+
+
 async def api_prompt(request):
     """提示词变量草稿的保存（决策 18：实时保存，草稿权威在 vrgen 侧）。
     body：{"set": key, "value": …} 新增/覆盖；{"unset": key} 删除。"""
@@ -612,10 +624,15 @@ async def api_params(request):
     scale = str(body.get("scale") or "")
     if not resolution or not scale:
         return JSONResponse({"error": "resolution 和 scale 都要给"}, status_code=400)
-    payload = await asyncio.to_thread(_vrgen_json, [
-        "params", "save", "--job", name,
-        "--resolution", resolution, "--scale", scale,
-        "--workdir", str(_workdir())])
+    argv = ["params", "save", "--job", name,
+            "--resolution", resolution, "--scale", scale]
+    for field, flag in (("session_id", "--session-id"),
+                        ("project_id", "--project-id"),
+                        ("episode", "--episode")):
+        if body.get(field) is not None:
+            argv += [flag, str(body[field])]
+    argv += ["--workdir", str(_workdir())]
+    payload = await asyncio.to_thread(_vrgen_json, argv)
     if "error" in payload:
         return JSONResponse(payload, status_code=400)
     info = await asyncio.to_thread(_case_info, name)
@@ -811,6 +828,7 @@ routes = [
     Route("/api/case/{name}/draft", api_draft, methods=["POST"]),
     Route("/api/case/{name}/prompt", api_prompt, methods=["POST"]),
     Route("/api/case/{name}/params", api_params, methods=["POST"]),
+    Route("/api/sessions", api_sessions),
     Route("/api/case/{name}/viewport", api_viewport, methods=["POST"]),
     Route("/api/case/{name}/inner", api_inner, methods=["POST"]),
     Route("/api/case/{name}/nudge", api_nudge, methods=["POST"]),
