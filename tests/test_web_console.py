@@ -116,10 +116,18 @@ def test_wizard_page_404_for_unknown(client):
     assert client.get("/case/nope").status_code == 404
 
 
+def test_fullredraw_wizard_page_renders_partials(client, fullredraw_case):
+    r = client.get("/case/f1")
+    assert r.status_code == 200
+    assert "扩充原视频两侧画面" in r.text and "裁回原尺寸" in r.text
+    assert "生成参数" in r.text and "提交生成" in r.text
+
+
 def test_gen_wizard_page_has_assets_and_generate(client, gen_case):
     r = client.get("/case/g1")
     assert r.status_code == 200
     assert 'data-flow="gen"' in r.text
+    assert "添加视频或图片" in r.text and "素材" in r.text
     info = client.get("/api/case/g1").json()
     assert set(info["gates"]) == {"assets", "generate"}   # gen：素材 → 生成
     assert info["gates"]["assets"]["ok"] is True          # 创建时的源视频已复制为 v1
