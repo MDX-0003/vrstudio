@@ -382,6 +382,23 @@ def test_task_status_carries_submit_time_and_ten_history():
     assert q.status()["queued"][0]["submitted"] == t.submitted
 
 
+def test_failed_task_tail_keeps_the_error_line(tmp_path):
+    """超长提示词会把 ERROR 行挤出尾部窗口；失败任务的 tail 必须补回原因。"""
+    log = tmp_path / "web_submit_x.log"
+    log.write_text("x" * 9000 + "\n" + "\n".join(
+        ["ERROR mglc code 400403: 生产栗额度不足",
+         "calls       x/mglc.log"] + ["prompt tail"] * 10),
+        encoding="utf-8")
+    t = tasks_mod.Task("submit", "x", ["echo"])
+    t.out_path = log
+    t.state = "failed"
+    tail = t.tail(5)
+    assert tail[-1] == "ERROR mglc code 400403: 生产栗额度不足"
+
+    t.state = "running"
+    assert "ERROR mglc code" not in " ".join(t.tail(1))
+
+
 # ── step_files：两套 flow 的文件规范必须分流 ─────────────────────────────
 
 

@@ -50,12 +50,24 @@ class Task:
     def tail(self, max_lines: int = 14) -> list[str]:
         if not self.out_path or not self.out_path.exists():
             return []
+        # 失败时错误行可能远在提示词/命令行之前：窗口放大到 256KB 再找。
+        window = 256 * 1024 if self.state == "failed" else _TAIL_BYTES
         with open(self.out_path, "rb") as f:
             f.seek(0, 2)
             size = f.tell()
-            f.seek(max(0, size - _TAIL_BYTES))
+            f.seek(max(0, size - window))
             lines = f.read().decode("utf-8", "replace").splitlines()
-        return lines[-max_lines:]
+        out = lines[-max_lines:]
+        # 失败时的原因行可能被超长提示词挤出尾部窗口（真实额度错误已遇到）：
+        # 把最后一条 ERROR/vrgen 报错补在末尾，页面上不至于只看到"失败"。
+        if self.state == "failed":
+            errors = [line for line in lines
+                      if line.startswith("ERROR ") or line.startswith("vrgen:")]
+            if errors:
+                # 放到最后：页面读 tail 的最后几行，失败原因必须最先被看见。
+                out = [line for line in out if line != errors[-1]]
+                out = out + ["……", errors[-1]]
+        return out
 
 
 class TaskQueue:
