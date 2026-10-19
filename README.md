@@ -1,6 +1,6 @@
 # vrstudio — 360° 视频流程仓库
 
-> 状态：**M0 脚手架**。CLI 命令面已按架构声明（stub），实现未开始。
+> 状态：**M4 web 控制台可用**（patch 流程已通过浏览器验收；fullredraw 链路可跑通）。
 > 架构与路线：`E:\VRAIGC\docs\`（architecture / case-model / roadmap）。
 
 两条互斥的流程，一个 case 二选一：
@@ -22,13 +22,38 @@ uv run pytest                # 本地门禁（等价于 CI 的 test job）
 uv run ruff check .          # lint
 ```
 
+## 启动 / 重启 web 控制台
+
+本机使用（默认只监听 127.0.0.1，端口 8760）：
+
+```bash
+uv run vrstudio serve
+```
+
+启动后打开 <http://127.0.0.1:8760/>。需要让局域网其他机器访问时加 `--host`：
+
+```bash
+uv run vrstudio serve --host 0.0.0.0
+```
+
+前台运行时按 `Ctrl+C` 停止，再执行同一条命令就是重启。如果忘了服务开在哪个终端，可以在 PowerShell 里按端口结束进程再启动：
+
+```powershell
+Get-NetTCPConnection -LocalPort 8760 -State Listen |
+  Select-Object -ExpandProperty OwningProcess -Unique |
+  ForEach-Object { Stop-Process -Id $_ -Force }
+uv run vrstudio serve
+```
+
+注意：改了 `src/vrstudio/` 下的 Python 代码（包括 `web/app.py`）必须重启服务才会生效；只改模板或静态文件时刷新网页即可。`--cases-dir` 可指定别的 case 根目录，默认是本仓库的 `cases/`。
+
 ## 目录（目标态，见 docs/architecture.md §3）
 
 ```
 src/vrstudio/cli/     # case/generate ★新增 + extract/merge/restore/pad/recompose/辅助 ←旧仓库迁入
 src/vrstudio/patch/   # ← vrpatch 核心库（投影/合成/时间对齐/缩放拟合）
 src/vrstudio/redraw/  # ← vrpad 核心库（几何/循环pad/混合/配准/重组）
-src/vrstudio/media/   # 统一 ffmpeg 封装（三档编码 profile）
+src/vrstudio/media/   # 统一 ffmpeg 封装（唯一编码档：H.264 8-bit yuv420p）
 src/vrstudio/web/     # ← vrpatch web 骨架扩展（M4）
 cases/ sources/ logs/ bin/   # 运行期数据，gitignore
 ```

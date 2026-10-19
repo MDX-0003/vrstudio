@@ -65,7 +65,7 @@ def test_fullredraw_end_to_end(tmp_path):
     r = subprocess.run([ffmpeg(conf), "-y", "-v", "error", "-i",
                         str(cdir / "seedance_input.mp4"),
                         "-vf", "scale=252:108", "-c:v", "libx264", "-crf", "12",
-                        "-preset", "ultrafast", "-pix_fmt", "yuv444p", "-an", str(gen)],
+                        "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-an", str(gen)],
                        capture_output=True)
     assert r.returncode == 0, r.stderr.decode("utf-8", "replace")[:300]
 
@@ -88,6 +88,7 @@ def test_fullredraw_end_to_end(tmp_path):
     vr("recompose", "--in", str(cdir / "result.mp4"), "--manifest", str(manifest),
        "--out", str(final), "--quiet", "--set", "video.preset=ultrafast")
     assert probe(final, conf).size == (W, H)
+    assert probe(final, conf).pix_fmt == "yuv420p"
     assert final.with_name("manual_recompose.json").is_file()
 
     # 7) vrgen status 也该认账（同构台账）

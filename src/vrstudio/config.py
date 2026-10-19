@@ -63,9 +63,9 @@ _FALLBACK: dict = {
     },
     "video": {
         "encoder": "libx264",
-        "crf": 0,
+        "crf": 18,
         "preset": "veryfast",
-        "pix_fmt": "yuv444p",
+        "pix_fmt": "yuv420p",
         "audio": "copy",
         "metadata": "copy",
     },
@@ -259,6 +259,11 @@ def _validate(data: dict) -> None:
         raise ConfigError("pad.on_aspect_conflict must be error | grow_canvas")
     if data["video"]["audio"] not in ("copy", "none"):
         raise ConfigError("video.audio must be copy | none")
+    if data["video"]["pix_fmt"] != "yuv420p":
+        raise ConfigError(
+            "video.pix_fmt must be yuv420p: the pipeline has a single "
+            "browser-playable profile (4:4:4 archives were dropped in decision 19)"
+        )
 
     band = data["verify"]["interior_band"]
     if not (isinstance(band, list) and len(band) == 2

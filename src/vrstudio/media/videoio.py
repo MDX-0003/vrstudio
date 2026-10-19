@@ -4,16 +4,18 @@ Everything is streamed frame by frame. A 600-frame 8K pass would be ~62 GB if it
 were resident, so the algorithms only ever see one frame (pure functions in, pure
 functions out), and this module owns the pipes.
 
-Two encoding details that are part of the pixel baseline (CLAUDE.md 9):
+Two encoding details that are part of the pixel baseline:
 
 * frames move as ``bgr24`` rawvideo (OpenCV's native channel order, so no
   conversion anywhere);
 * audio is muxed in a **second pass** with ``-c:v copy``. Encoding with the audio
   input present can change the frame count, and a copied stream cannot.
 
-``crf 0`` + ``yuv444p`` is lossless. The blend is a per-pixel weighted sum, so
-4:2:0 would add chroma loss on top of it; 10-bit is available via
-``video.pix_fmt`` for the same reason (a smoothstep ramp in 8 bits can band).
+The only output profile is H.264 8-bit ``yuv420p`` (``video.pix_fmt``): the
+Seedance return is already 4:2:0, and Chrome's H.264 decoder rejects 4:4:4, so
+storing the deliverable as 4:4:4 used to buy a huge file that the console could
+not play. Pixel-baseline tests that need an exact round trip pin
+``video.crf = 0`` explicitly instead of relying on a lossless default.
 """
 
 from __future__ import annotations
@@ -194,6 +196,11 @@ class FrameWriter:
 
     def __enter__(self) -> "FrameWriter":
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.width % 2 or self.height % 2:
+            raise VideoIOError(
+                f"yuv420p needs even dimensions, got {self.width}x{self.height}; "
+                f"trim or rescale the canvas before encoding"
+            )
         args = [ffmpeg(self.config), "-y", "-v", "error", "-nostdin",
                 "-f", "rawvideo", "-pix_fmt", FRAME_PIX_FMT,
                 "-s", f"{self.width}x{self.height}", "-r", self.fps, "-i", "-",

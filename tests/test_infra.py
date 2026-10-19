@@ -44,6 +44,7 @@ def test_defaults_load_and_validate():
     assert conf.get("pad.pipeline.transforms") == ["pre_roll", "pad_h"]
     assert conf.get("recompose.d_star_mode") == "clip_median"
     assert conf.get("bin.allow_path_fallback") is False
+    assert conf.get("video.pix_fmt") == "yuv420p"   # 唯一编码档，浏览器可播
 
 
 def test_override_parsing_types():
@@ -86,6 +87,8 @@ def test_validation_rejects_bad_values(tmp_path):
         load(write("[recompose]\nsearch_pct = 0.0\n"))
     with pytest.raises(ConfigError, match="on_aspect_conflict"):
         load(write("[pad]\non_aspect_conflict = \"whatever\"\n"))
+    with pytest.raises(ConfigError, match="yuv420p"):
+        load(write("[video]\npix_fmt = \"yuv444p\"\n"))
 
 
 def test_config_file_missing_is_an_error():
@@ -109,7 +112,7 @@ def _manifest(tmp_path, frame, **kw):
         has_audio=True, write_hash=True, mask_path="src_mask.png",
         mask_strategy="redundant_white", mask_feather_px=0, mask_png_compression=0,
         restore_interp="lanczos4",
-        video=VideoSettings("libx264", 0, "veryfast", "yuv444p", "copy", "copy"),
+        video=VideoSettings("libx264", 18, "veryfast", "yuv420p", "copy", "copy"),
         tool_version="0.1.0",
     )
     defaults.update(kw)

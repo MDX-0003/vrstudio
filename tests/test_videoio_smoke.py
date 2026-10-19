@@ -1,11 +1,11 @@
 """End-to-end through real files, with ffmpeg.
 
 Skipped when ``bin/ffmpeg.exe`` is absent (a fresh clone has no binaries; see
-``bin/README.md``). Uses ``video.crf = 0`` + ``yuv444p`` so the only loss in the
-file round trip is the RGB<->YUV colour transform, which is why the frame
-comparison carries a small tolerance rather than demanding bit equality — the
-bit-exact assertions live in ``test_roundtrip.py``, at the library boundary where
-no colour conversion happens.
+``bin/README.md``). These tests pin ``video.crf = 0`` on top of the production
+``yuv420p`` profile so the file round trip is not polluted by delivery
+compression; the only loss left is RGB<->YUV plus 4:2:0 chroma subsampling.
+The bit-exact assertions live in ``test_roundtrip.py``, at the library boundary
+where no colour conversion happens.
 """
 
 from __future__ import annotations
@@ -58,6 +58,7 @@ def _write(path, frames, conf) -> None:
 def test_video_roundtrip_through_files(tmp_path):
     conf = config_mod.load()
     conf.data["video"]["preset"] = "ultrafast"
+    conf.data["video"]["crf"] = 0
 
     src_frames = _closed_erp()
     src = tmp_path / "src.mp4"
@@ -67,6 +68,8 @@ def test_video_roundtrip_through_files(tmp_path):
     assert info.size == (W, H)
     assert info.frames in (0, N), f"expected {N} frames, ffprobe said {info.frames}"
     assert not info.has_audio
+    with FrameReader(info, conf) as reader:
+        src_back = list(reader)
 
     plan = plan_pad(PadSpec((W, H), ASPECT))
     padded = tmp_path / "padded.mp4"
@@ -87,6 +90,7 @@ def test_video_roundtrip_through_files(tmp_path):
 
     back = probe(final, conf)
     assert back.size == (W, H)
+    assert back.pix_fmt == "yuv420p"
     assert len(out_frames) == N
 
     # pre_roll cancelled the rotation, so the delivered frames are the source again.
@@ -98,11 +102,14 @@ def test_video_roundtrip_through_files(tmp_path):
         for frame in reader:
             got.append(frame)
     assert len(got) == N, f"expected {N} frames back, got {len(got)}"
+    # Compare against the decoded source, not the synthetic frames: in the real
+    # fullredraw flow the source is already a file, so its own encode is not part
+    # of what pad/recompose have to preserve. Each 8-bit yuv420p write costs up to
+    # ~5 levels through the RGB<->YUV limited-range round trip; the bit-exact
+    # assertions live in test_roundtrip.py at the library boundary.
     worst = max(int(np.abs(a.astype(int) - b.astype(int)).max())
-                for a, b in zip(got, src_frames))
-    # two 8-bit yuv444p round trips; measured at ~1 level each (see
-    # docs/knowledge/verification.md). yuv444p10le would make it exact.
-    assert worst <= 3, f"file round trip drifted by {worst} levels"
+                for a, b in zip(got, src_back))
+    assert worst <= 5, f"file round trip drifted by {worst} levels"
 
 
 def test_cli_pad_and_recompose_and_verify(tmp_path):
@@ -117,6 +124,7 @@ def test_cli_pad_and_recompose_and_verify(tmp_path):
     env["VRSTUDIO_BIN_DIR"] = str(root / "bin")
 
     conf = config_mod.load()
+    conf.data["video"]["crf"] = 0
     src_frames = _closed_erp()
     src = tmp_path / "src.mp4"
     _write(src, src_frames, conf)
@@ -128,7 +136,7 @@ def test_cli_pad_and_recompose_and_verify(tmp_path):
 
     padded = tmp_path / "padded.mp4"
     r = run("pad", "--in", str(src), "--out", str(padded), "--quiet",
-            "--set", "video.preset=ultrafast")
+            "--set", "video.preset=ultrafast", "--set", "video.crf=0")
     assert r.returncode == 0, r.stdout + r.stderr
 
     # derived names come from the config templates, so read them from there
@@ -147,9 +155,10 @@ def test_cli_pad_and_recompose_and_verify(tmp_path):
     final = tmp_path / "final.mp4"
     r = run("recompose", "--in", str(padded), "--out", str(final),
             "--manifest", str(manifest), "--quiet",
-            "--set", "video.preset=ultrafast")
+            "--set", "video.preset=ultrafast", "--set", "video.crf=0")
     assert r.returncode == 0, r.stdout + r.stderr
     assert final.is_file()
+    assert probe(final, conf).pix_fmt == "yuv420p"
     report = final.with_name(final.stem + "_recompose.json")
     assert report.is_file(), "recompose wrote no report"
     assert json.loads(report.read_text(encoding="utf-8"))["registration"]["verdict"] == "ok"
@@ -224,7 +233,7 @@ def test_output_geometry_does_not_follow_the_returned_aspect(tmp_path, return_si
     gen = tmp_path / "gen.mp4"
     r = subprocess.run([ffmpeg(conf), "-y", "-v", "error", "-i", str(padded),
                         "-vf", f"scale={gw}:{gh}", "-c:v", "libx264", "-crf", "12",
-                        "-preset", "ultrafast", "-pix_fmt", "yuv444p", "-an", str(gen)],
+                        "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-an", str(gen)],
                        capture_output=True)
     assert r.returncode == 0, r.stderr.decode("utf-8", "replace")[:300]
 
