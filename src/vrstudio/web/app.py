@@ -216,8 +216,6 @@ def _generation_params(name: str) -> dict:
             "--canvas", f"{canvas[0]}x{canvas[1]}",
             "--source", f"{source[0]}x{source[1]}",
             "--workdir", str(_workdir())]
-    if case.flow == "gen":
-        argv += ["--aspect-ratio", "auto"]      # videoEdit 跟随输入，不显示 21:9
     return _vrgen_json(argv)
 
 
@@ -626,7 +624,9 @@ async def api_params(request):
         return JSONResponse({"error": "resolution 和 scale 都要给"}, status_code=400)
     argv = ["params", "save", "--job", name,
             "--resolution", resolution, "--scale", scale]
-    for field, flag in (("session_id", "--session-id"),
+    for field, flag in (("mode", "--mode"),
+                        ("aspect_ratio", "--aspect-ratio"),
+                        ("session_id", "--session-id"),
                         ("project_id", "--project-id"),
                         ("episode", "--episode")):
         if body.get(field) is not None:
@@ -756,6 +756,10 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
             argv += ["--resolution", str(body["resolution"])]
         if body.get("scale"):
             argv += ["--scale", str(body["scale"])]
+        if body.get("mode"):
+            argv += ["--mode", str(body["mode"])]
+        if body.get("aspect_ratio"):
+            argv += ["--aspect-ratio", str(body["aspect_ratio"])]
         return argv
     if op == "adopt":
         argv = vrstudio_argv("generate", "adopt", "--case", name, *root)

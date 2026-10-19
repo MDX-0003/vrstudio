@@ -233,11 +233,15 @@ def test_run_submit_passes_generation_params(client, patch_case, monkeypatch):
     monkeypatch.setattr(web_app.QUEUE, "submit",
                         lambda kind, case, argv: submitted.append((kind, case, argv)))
     r = client.post("/api/case/p1/run",
-                    json={"op": "submit", "resolution": "720p", "scale": "auto"})
+                    json={"op": "submit", "mode": "allMediaRef",
+                          "aspect_ratio": "16:9",
+                          "resolution": "720p", "scale": "auto"})
     assert r.status_code == 200 and r.json()["submitted"] == "submit"
     argv = submitted[0][2]
     assert "--resolution" in argv and "720p" in argv
     assert "--scale" in argv and "auto" in argv
+    assert "--mode" in argv and "allMediaRef" in argv
+    assert "--aspect-ratio" in argv and "16:9" in argv
 
 
 def test_gates_progress_with_extract_and_result(client, patch_case, tmp_path):
@@ -297,6 +301,23 @@ def test_params_save_passes_project_session_fields(client, fullredraw_case,
     for flag, value in (("--session-id", "1111"), ("--project-id", "11"),
                         ("--episode", "1")):
         assert flag in argv and value in argv
+
+
+def test_params_save_passes_mode_and_aspect(client, fullredraw_case, monkeypatch):
+    calls = []
+
+    def fake(argv):
+        calls.append(argv)
+        return {"mode": "allMediaRef", "aspect_ratio": "16:9"}
+
+    monkeypatch.setattr(web_app, "_vrgen_json", fake)
+    r = client.post("/api/case/f1/params",
+                    json={"resolution": "1080p", "scale": "auto",
+                          "mode": "allMediaRef", "aspect_ratio": "16:9"})
+    assert r.status_code == 200, r.text
+    argv = calls[0]
+    assert "--mode" in argv and "allMediaRef" in argv
+    assert "--aspect-ratio" in argv and "16:9" in argv
 
 
 def test_case_info_prompt_survives_missing_vrgen(client, patch_case):

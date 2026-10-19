@@ -216,8 +216,10 @@ function renderGenerate() {
 async function runSubmit() {
   // 变量值以「提示词」区保存的草稿为准（vrgen submit 自己读 prompt-vars.toml），
   // 这里不再传临时 --set，避免出现两份说不清谁生效的值。
-  // 分辨率同时显式传给本次 submit：页面显示什么就用什么，不依赖保存请求的时序。
+  // 模式和分辨率同时显式传给本次 submit：页面显示什么就用什么。
   await run("submit", {
+    mode: ($("genMode") || {}).value || "",
+    aspect_ratio: ($("genAspect") || {}).value || "",
     resolution: ($("genResolution") || {}).value || "",
     scale: ($("genScale") || {}).value || "",
   });
@@ -239,24 +241,59 @@ function renderFinish() {
   }
 }
 
-// ── 生成参数（输出分辨率 / 输入分辨率，决策 20）────────────────────────
+// ── 生成参数（模式 / 比例 / 输出与输入分辨率，决策 20/23）─────────────
+
+function _modeMeta(gp, value) {
+  return ((gp && gp.modes) || []).find(m => m.value === value) || null;
+}
+
+function _fillAspect(mode, wanted) {
+  const sel = $("genAspect");
+  if (!sel) return "auto";
+  sel.innerHTML = "";
+  const ratios = (mode && mode.ratios) || [];
+  if (!ratios.length) {
+    sel.appendChild(new Option("跟随输入", "auto"));
+    sel.value = "auto";
+    return "auto";
+  }
+  for (const r of ratios) sel.appendChild(new Option(r, r));
+  const pick = ratios.includes(wanted) ? wanted
+    : (ratios.includes("16:9") ? "16:9" : ratios[0]);
+  sel.value = pick;
+  return pick;
+}
 
 function renderGenParams() {
   const resSel = $("genResolution"), scaleSel = $("genScale");
+  const modeSel = $("genMode"), aspectSel = $("genAspect");
   const hint = $("genParamsHint"), fixed = $("genFixed");
-  if (!resSel || !scaleSel) return;
+  if (!resSel || !scaleSel || !modeSel || !aspectSel) return;
   const gp = (info && info.generation_params) || {};
   if (gp.error) {
-    resSel.innerHTML = "";
-    scaleSel.innerHTML = "";
-    resSel.disabled = scaleSel.disabled = true;
+    for (const sel of [resSel, scaleSel, modeSel, aspectSel]) {
+      sel.innerHTML = "";
+      sel.disabled = true;
+    }
     hint.style.display = "block";
     hint.textContent = "生成参数暂时读不到：" + gp.error;
     if (fixed) fixed.textContent = "";
     return;
   }
   hint.style.display = "none";
-  resSel.disabled = scaleSel.disabled = false;
+  for (const sel of [resSel, scaleSel, modeSel, aspectSel]) sel.disabled = false;
+  const cur = gp.current || {};
+  const modes = gp.modes || [];
+  modeSel.innerHTML = "";
+  const modeList = modes.length ? modes
+    : [{value: cur.mode || "videoEdit", label: cur.mode || "videoEdit"}];
+  for (const m of modeList) {
+    modeSel.appendChild(new Option(m.label || m.value, m.value));
+  }
+  const mode = _modeMeta(gp, cur.mode) || modeList[0];
+  modeSel.value = mode.value;
+  _fillAspect(mode, cur.aspect_ratio);
+
   const label = (o) => `${o.value}（${o.width}×${o.height}）`;
   resSel.innerHTML = (gp.output || []).map(o =>
     `<option value="${o.value}">${label(o)}</option>`).join("");
@@ -264,24 +301,31 @@ function renderGenParams() {
     `<option value="${o.value}" title="${o.reason || ""}"` +
     `${o.ok === false ? " disabled" : ""}>` +
     `${label(o)}${o.ok === false ? "　超限" : ""}</option>`).join("");
-  const cur = gp.current || {};
   if (cur.resolution) resSel.value = cur.resolution;
   // 已保存的 full 可能被平台限额判为不可用：退回第一个可用档，不静默留在超限值。
   const wanted = [...scaleSel.options].find(o => o.value === cur.scale);
   if (wanted && !wanted.disabled) scaleSel.value = cur.scale;
   else scaleSel.value = ((gp.input || []).find(o => o.ok !== false) || {}).value || "auto";
   const f = gp.fixed || {};
-  const ratio = f.aspect_ratio === "auto" ? "跟随输入" : f.aspect_ratio;
   fixed.textContent =
-    `模型 ${f.model_id}（Seedance 2.5）· 模式 ${f.mode} · 比例 ${ratio}` +
-    ` · 时长 ${f.duration_s}s（按输入自动）· 数量 ${f.num}`;
+    `模型 ${f.model_id}（Seedance 2.5）· 时长 ${f.duration_s}s（按输入自动）` +
+    ` · 数量 ${f.num}`;
+}
+
+function onModeChange() {
+  const gp = (info && info.generation_params) || {};
+  const mode = _modeMeta(gp, ($("genMode") || {}).value);
+  _fillAspect(mode, null);
+  saveGenParams();
 }
 
 function saveGenParams() {
+  const mode = ($("genMode") || {}).value || "";
+  const aspect = ($("genAspect") || {}).value || "";
   const resolution = ($("genResolution") || {}).value || "";
   const scale = ($("genScale") || {}).value || "";
-  if (!resolution || !scale) return;
-  post("params", { resolution, scale });
+  if (!mode || !aspect || !resolution || !scale) return;
+  post("params", { mode, aspect_ratio: aspect, resolution, scale });
 }
 
 function _fmtBytes(n) {

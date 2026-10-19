@@ -148,6 +148,12 @@
   </div>
   <h3>生成参数</h3>
   <div class="row" style="align-items:center">
+    <label class="meta">生成模式
+      <select id="genMode" onchange="onModeChange()"></select>
+    </label>
+    <label class="meta">输出比例
+      <select id="genAspect" onchange="saveGenParams()"></select>
+    </label>
     <label class="meta">输出分辨率
       <select id="genResolution" onchange="saveGenParams()"></select>
     </label>
