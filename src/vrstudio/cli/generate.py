@@ -173,6 +173,9 @@ def submit(
                                       help="输出比例（← mglc --aspect-ratio）。"),
     scale: str = typer.Option(None, "--scale",
                               help="上传缩放 auto|full|half（vrgen 自有，无 mglc 对应）。"),
+    session_id: int = typer.Option(
+        None, "--session-id",
+        help="项目生成会话 ID（>0）：在该项目额度下提交；不传则用 generation.toml/配置。"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只打印 argv，不真调 vrgen。"),
     cases_dir: Path = typer.Option(None, "--cases-dir"),
     overrides: list[str] = typer.Option(None, "--set", help="config 覆盖。"),
@@ -209,6 +212,8 @@ def submit(
         argv += ["--aspect-ratio", "auto"]
     if scale is not None:
         argv += ["--scale", scale]
+    if session_id is not None:
+        argv += ["--session-id", str(session_id)]
     argv += ["--workdir", str(_workdir(conf))]
     if dry_run:
         typer.echo("dry-run：将发出")
