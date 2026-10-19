@@ -274,6 +274,14 @@ function setupCompare() {
   a.addEventListener("pause", () => { b.pause(); $("cmpPlay").textContent = "▶"; });
   a.addEventListener("ratechange", () => { b.playbackRate = a.playbackRate; });
 
+  // 循环播放：A 是时钟主。播到结尾时把两路一起拉回 0:00 再继续，
+  // 避免只循环一路造成下一轮左右错位（B 比 A 短，先停在最后一帧）。
+  a.addEventListener("ended", () => {
+    a.currentTime = 0;
+    b.currentTime = 0;
+    a.play();
+  });
+
   // 统一传输控制：一套按钮/进度条同时驱动两份视频（A 的原生 controls 已移除）
   $("cmpPlay").onclick = () => { a.paused ? (a.play(), b.play()) : (b.pause(), a.pause()); };
   const seek = $("cmpSeek");
