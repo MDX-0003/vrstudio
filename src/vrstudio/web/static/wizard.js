@@ -489,8 +489,9 @@ function renderPrompt() {
   }
   box.textContent = p.template_text || "（还没有选定模板）";
   meta.textContent = p.template
-    ? `模板 ${p.template}。正文里其余 ${p.geometry_keys.length} 个花括号占位是画布尺寸、` +
-      "冗余带列号这类几何数值，提交时自动算好填入，不用手动改。"
+    ? `模板 ${p.template}。正文里其余 ${p.geometry_keys.length} 个花括号占位是画布尺寸` +
+      (FLOW === "fullredraw" ? "、冗余带列号" : "") +
+      "这类几何数值，提交时自动算好填入，不用手动改。"
     : "";
   const declared = (p.placeholders || []).filter(k => !p.geometry_keys.includes(k));
   const keys = [...new Set([...declared, ...Object.keys(p.vars || {})])];
