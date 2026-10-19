@@ -3,6 +3,10 @@
 格式是对外契约（E:\\VRAIGC\\docs\\case-model.md §2）。原则：生成侧的一切
 （提示词、task_id、台账）都不进 case；case → vrgen 的唯一耦合是 ``[adopt] round``
 一行指针。读写只有这一份实现——CLI、generate、web（M4）三方共用。
+
+gen 流自决策 24/25 起以有序 ``[[assets]]`` 为素材真源：视频与图片复制进
+``cases/<name>/assets/``，路径相对 case 目录；源视频不再是独立字段。旧 gen case
+（只有 ``[source]``）在 load 时自动迁移并落盘。
 """
 
 from __future__ import annotations
@@ -10,8 +14,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import REPO_ROOT
@@ -23,6 +28,29 @@ FLOWS = ("patch", "fullredraw", "gen")
 _CASE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 _PATCH_SECTIONS = ("viewport", "inner", "frames", "extract")
+
+#: gen 的素材种类与角色受控词表。
+KINDS = ("video", "image")
+ROLE_LABELS = {
+    "edit_master": "编辑母版（时间轴、构图与动作基准）",
+    "motion_ref": "动作参考（只提供动作节奏与路径）",
+    "scene_ref": "场景参考（只提供构图、背景与光照）",
+    "subject_ref": "主体参考（只定义角色外观）",
+}
+ROLES = tuple(ROLE_LABELS)
+
+#: 本期支持的三种生成模式，以及每种模式允许的角色。
+#: 真正的提交前校验在 vrgen；这里是同一份规则的只读镜像，供页面列选项。
+MODE_ROLES: dict[str, dict[str, tuple[str, ...]]] = {
+    "videoEdit": {"video": ("edit_master",), "image": ("subject_ref",)},
+    "allMediaRef": {"video": ("edit_master", "motion_ref", "scene_ref"),
+                    "image": ("subject_ref", "scene_ref")},
+    "videoExtend": {"video": ("edit_master",), "image": ("subject_ref",)},
+}
+GEN_MODES = tuple(MODE_ROLES)
+
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+_VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm"}
 
 
 class CaseError(ValueError):
@@ -56,42 +84,90 @@ def file_sha256(path: str | Path) -> str:
 
 
 @dataclass
+class Asset:
+    """一条 gen 素材；``path`` 是相对 case 目录的写法。"""
+
+    id: str
+    kind: str
+    path: str
+    role: str
+    sha256: str | None = None
+
+    def resolved(self, case: Case, root: str | Path | None = None) -> Path:
+        return case.dir(root) / self.path
+
+
+@dataclass
 class Case:
     name: str
     flow: str
-    source_path: str                     # 存 toml 原文（相对 paths/ 的写法原样保留）
+    source_path: str | None = None            # 仅 patch/fullredraw；gen 用 assets
     sha256: str | None = None
     # ── 仅 flow = patch：选区草稿（web pick / 手填，extract 时冻结进 clip.json）──
     viewport: dict | None = None
     inner: dict | None = None
     frames: dict | None = None
     extract_current: str | None = None
-    # ── 仅 flow = gen：参考图功能预留字段（当前不参与生成）──
-    reference_images: list[str] | None = None
+    # ── 仅 flow = gen：有序素材列表（顺序即 @VideoN / @ImageN 编号）──
+    assets: list[Asset] = field(default_factory=list)
     # ── adopt 指针：vrgen 台账里被采用的轮次 ──
     adopt_round: str | None = None
 
     def dir(self, root: str | Path | None = None) -> Path:
         return case_dir(self.name, root)
 
+    def asset(self, asset_id: str) -> Asset:
+        for item in self.assets:
+            if item.id == asset_id:
+                return item
+        raise CaseError(f"case {self.name} 没有素材 {asset_id!r}")
 
-def create(name: str, flow: str, source: str | Path,
+    def master(self) -> Asset | None:
+        """提示词几何与上传基准：第一条 edit_master，否则第一条视频。"""
+        videos = [a for a in self.assets if a.kind == "video"]
+        for item in videos:
+            if item.role == "edit_master":
+                return item
+        return videos[0] if videos else None
+
+
+# ── 创建 ─────────────────────────────────────────────────────────────────
+
+
+def create(name: str, flow: str, source: str | Path | None = None,
            root: str | Path | None = None, compute_hash: bool = True) -> Case:
     _check_name(name)
     if flow not in FLOWS:
         raise CaseError(f"flow 必须是 {' 或 '.join(FLOWS)}，got {flow!r}")
-    src = Path(source)
-    if not src.is_file():
-        raise CaseError(f"源视频不存在：{src}")
     target = case_toml(name, root)
     if target.is_file():
         raise CaseError(f"case 已存在：{target}")
+    if flow == "gen":
+        if source is not None:
+            src = Path(source)
+            if not src.is_file():
+                raise CaseError(f"源视频不存在：{src}")
+            if _kind_of(src) != "video":
+                raise CaseError(f"gen 的 --source 必须是视频：{src.name}")
+        case = Case(name=name, flow=flow)
+        save(case, root)
+        if source is not None:
+            # 新建 gen 仍接受 --source：复制为 v1/edit_master，与素材步骤同一条路。
+            return add_assets(name, [(source, "edit_master")], root=root)
+        return case
+    if source is None:
+        raise CaseError(f"flow={flow} 必须指定源视频")
+    src = Path(source)
+    if not src.is_file():
+        raise CaseError(f"源视频不存在：{src}")
     # patch 的 merge 要重读源视频贴回，源变了就静默错片——创建时就把身份钉死；
-    # gen 每次 submit 都重读源并上传，同样钉死；fullredraw 在 pad 之后源不再被读
-    # （manifest 已含源身份），哈希可选。
-    sha = file_sha256(src) if (compute_hash and flow in ("patch", "gen")) else None
+    # fullredraw 在 pad 之后源不再被读（manifest 已含源身份），哈希可选。
+    sha = file_sha256(src) if (compute_hash and flow == "patch") else None
     case = Case(name=name, flow=flow, source_path=str(src), sha256=sha)
     return save(case, root)
+
+
+# ── 读写 ─────────────────────────────────────────────────────────────────
 
 
 def load(name: str, root: str | Path | None = None) -> Case:
@@ -112,31 +188,46 @@ def load(name: str, root: str | Path | None = None) -> Case:
     if references is not None and not (
             isinstance(references, list) and all(isinstance(r, str) for r in references)):
         raise CaseError(f"{path}: [gen] reference_images 必须是字符串数组")
+    assets = _parse_assets(raw.get("assets"), path)
+    if flow != "gen" and assets:
+        raise CaseError(f"{path}: [[assets]] 只属于 flow=gen")
     case = Case(
         name=name, flow=flow,
-        source_path=str(source.get("path", "")),
+        source_path=str(source.get("path", "")) or None,
         sha256=source.get("sha256"),
         viewport=raw.get("viewport"), inner=raw.get("inner"),
         frames=raw.get("frames"), extract_current=raw.get("extract", {}).get("current"),
-        reference_images=list(references) if references else None,
+        assets=assets,
         adopt_round=raw.get("adopt", {}).get("round"),
     )
-    if not case.source_path:
-        raise CaseError(f"{path}: [source] 缺 path")
     if flow != "patch":
         for section in _PATCH_SECTIONS:
             if raw.get(section) is not None:
                 raise CaseError(f"{path}: flow={flow} 不该有 [{section}]（patch 专属段）")
     if flow != "gen" and raw.get("gen") is not None:
         raise CaseError(f"{path}: [gen] 只属于 flow=gen")
+    if flow != "gen" and not case.source_path:
+        raise CaseError(f"{path}: [source] 缺 path")
+    if flow == "gen":
+        case = _migrate_gen(case, references, path, root)
     return case
 
 
 def save(case: Case, root: str | Path | None = None) -> Case:
     lines = [f"schema = {SCHEMA}", f'flow = "{case.flow}"']
-    lines += ["", "[source]", f"path = {_s(case.source_path)}"]
-    if case.sha256:
-        lines.append(f"sha256 = {_s(case.sha256)}")
+    if case.flow == "gen":
+        for asset in case.assets:
+            lines += ["", "[[assets]]",
+                      f"id = {_s(asset.id)}",
+                      f"kind = {_s(asset.kind)}",
+                      f"path = {_s(asset.path)}",
+                      f"role = {_s(asset.role)}"]
+            if asset.sha256:
+                lines.append(f"sha256 = {_s(asset.sha256)}")
+    elif case.source_path is not None:
+        lines += ["", "[source]", f"path = {_s(case.source_path)}"]
+        if case.sha256:
+            lines.append(f"sha256 = {_s(case.sha256)}")
     if case.flow == "patch":
         for section, value in (("viewport", case.viewport), ("inner", case.inner),
                                ("frames", case.frames)):
@@ -145,16 +236,209 @@ def save(case: Case, root: str | Path | None = None) -> Case:
                 lines += [_kv(k, v) for k, v in value.items()]
         if case.extract_current:
             lines += ["", "[extract]", f"current = {_s(case.extract_current)}"]
-    if case.flow == "gen" and case.reference_images:
-        lines += ["", "[gen]",
-                  "reference_images = " + json.dumps(case.reference_images,
-                                                     ensure_ascii=False)]
     if case.adopt_round:
         lines += ["", "[adopt]", f"round = {_s(case.adopt_round)}"]
     path = case_toml(case.name, root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return case
+
+
+def _parse_assets(raw, path: Path) -> list[Asset]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise CaseError(f"{path}: [[assets]] 必须是数组")
+    out: list[Asset] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise CaseError(f"{path}: [[assets]] 每项必须是表")
+        asset = Asset(
+            id=str(item.get("id", "")),
+            kind=str(item.get("kind", "")),
+            path=str(item.get("path", "")).replace("\\", "/"),
+            role=str(item.get("role", "")),
+            sha256=item.get("sha256"),
+        )
+        _validate_asset(asset, path)
+        if asset.id in seen:
+            raise CaseError(f"{path}: 素材 id 重复：{asset.id}")
+        seen.add(asset.id)
+        out.append(asset)
+    return out
+
+
+def _validate_asset(asset: Asset, path: Path) -> None:
+    if asset.kind not in KINDS:
+        raise CaseError(f"{path}: 素材 {asset.id} 的 kind 必须是 {' 或 '.join(KINDS)}")
+    prefix = "v" if asset.kind == "video" else "i"
+    if not re.fullmatch(rf"{prefix}\d+", asset.id):
+        raise CaseError(
+            f"{path}: 素材 id {asset.id!r} 不合约"
+            f"（kind={asset.kind!r} 应为 {prefix}1、{prefix}2…）")
+    if asset.role not in ROLES:
+        raise CaseError(f"{path}: 素材 {asset.id} 的 role {asset.role!r} 不合约")
+    if not asset.path:
+        raise CaseError(f"{path}: 素材 {asset.id} 缺 path")
+    rel = Path(asset.path)
+    if rel.is_absolute() or ".." in rel.parts:
+        raise CaseError(f"{path}: 素材 {asset.id} 的 path 必须是 case 目录内的相对路径")
+
+
+# ── 旧 gen case 迁移 ─────────────────────────────────────────────────────
+
+
+def _migrate_gen(case: Case, references: list[str] | None, path: Path,
+                 root: str | Path | None) -> Case:
+    """旧 ``[source]`` 与 ``[gen] reference_images`` → assets，并落盘一次。
+
+    只在 load 时触发；源视频不存在时明确报错，不悄悄留下半迁移的 case.toml。
+    """
+    if case.assets and case.source_path:
+        raise CaseError(
+            f"{path}: gen case 同时有 [source] 与 [[assets]]；"
+            f"源视频应只作为一条素材，请手动删掉 [source]")
+    if not case.assets and case.source_path:
+        src = _stored_path(case.source_path)
+        if not src.is_file():
+            raise CaseError(f"{path}: 旧 gen case 的源视频不在了，无法迁移：{src}")
+        # 先在内存里摘掉 [source]，再复制：即使中途失败，落盘的也是“无源的
+        # gen case + 已复制素材”，不会停在 source 与 assets 并存的状态。
+        case.source_path = None
+        case.sha256 = None
+        case = _add_assets_to(case, [(src, "edit_master")], root)
+    if references:
+        pairs = [(Path(r), "subject_ref") for r in references]
+        for src, _role in pairs:
+            if not src.is_file():
+                raise CaseError(f"{path}: [gen] reference_images 里的图片不在了：{src}")
+        case = _add_assets_to(case, pairs, root)
+    return case
+
+
+# ── 素材增删改排（web/CLI 共用）──────────────────────────────────────────
+
+
+def add_assets(name: str, pairs: list[tuple[str | Path, str]],
+               root: str | Path | None = None) -> Case:
+    """按 (本地文件, 角色) 复制进 assets/ 并追加到素材列表。
+
+    角色必须由调用方显式给出（用户手动选择，不按顺序推断）。先整体校验再复制；
+    复制中途失败时清掉本次已复制的文件，不留下半条记录。
+    """
+    case = load(name, root)
+    if case.flow != "gen":
+        raise CaseError(f"case {name} 是 {case.flow} 流，没有素材列表")
+    return _add_assets_to(case, pairs, root)
+
+
+def _add_assets_to(case: Case, pairs: list[tuple[str | Path, str]],
+                   root: str | Path | None) -> Case:
+    """已加载 case 的素材追加本体；迁移路径直接调用它，避免 load 递归。"""
+    if not pairs:
+        raise CaseError("没有要添加的素材")
+    counters = {"video": _next_asset_number(case, "video"),
+                "image": _next_asset_number(case, "image")}
+    prepared: list[tuple[Path, str, str, str, str]] = []   # src, kind, role, id, filename
+    assets_dir = case.dir(root) / "assets"
+    existing_names = {Path(a.path).name for a in case.assets}
+    for raw_path, role in pairs:
+        src = Path(raw_path)
+        if not src.is_file():
+            raise CaseError(f"素材不存在：{src}")
+        kind = _kind_of(src)
+        if role not in ROLES:
+            raise CaseError(f"素材 {src.name} 的角色 {role!r} 不合约；可选：{', '.join(ROLES)}")
+        prefix = "v" if kind == "video" else "i"
+        asset_id = f"{prefix}{counters[kind]}"
+        counters[kind] += 1
+        stem = _safe_stem(src.stem)
+        filename = f"{asset_id}_{stem}{src.suffix.lower()}"
+        n = 2
+        while filename in existing_names or (assets_dir / filename).exists():
+            filename = f"{asset_id}_{stem}-{n}{src.suffix.lower()}"
+            n += 1
+        existing_names.add(filename)
+        prepared.append((src, kind, role, asset_id, filename))
+
+    copied: list[Path] = []
+    try:
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        for src, kind, role, asset_id, filename in prepared:
+            target = assets_dir / filename
+            shutil.copyfile(src, target)
+            copied.append(target)
+            case.assets.append(Asset(
+                id=asset_id, kind=kind, path=f"assets/{filename}", role=role,
+                sha256=file_sha256(target)))
+    except OSError as exc:
+        for p in copied:
+            p.unlink(missing_ok=True)
+        raise CaseError(f"复制素材失败：{exc}") from exc
+    return save(case, root)
+
+
+def remove_asset(name: str, asset_id: str, root: str | Path | None = None) -> Case:
+    case = load(name, root)
+    if case.flow != "gen":
+        raise CaseError(f"case {name} 是 {case.flow} 流，没有素材列表")
+    target = case.asset(asset_id).resolved(case, root)
+    try:
+        target.unlink(missing_ok=True)
+    except OSError as exc:
+        raise CaseError(f"素材文件删不掉：{target}（{exc}）；记录未改动") from exc
+    case.assets = [a for a in case.assets if a.id != asset_id]
+    return save(case, root)
+
+
+def set_asset_role(name: str, asset_id: str, role: str,
+                   root: str | Path | None = None) -> Case:
+    case = load(name, root)
+    if case.flow != "gen":
+        raise CaseError(f"case {name} 是 {case.flow} 流，没有素材列表")
+    if role not in ROLES:
+        raise CaseError(f"角色 {role!r} 不合约；可选：{', '.join(ROLES)}")
+    case.asset(asset_id).role = role
+    return save(case, root)
+
+
+def reorder_assets(name: str, ids: list[str], root: str | Path | None = None) -> Case:
+    case = load(name, root)
+    if case.flow != "gen":
+        raise CaseError(f"case {name} 是 {case.flow} 流，没有素材列表")
+    current = {a.id for a in case.assets}
+    if sorted(ids) != sorted(current) or len(set(ids)) != len(ids):
+        raise CaseError(f"排序必须给出全部素材 id，且不能重复；当前：{sorted(current)}")
+    by_id = {a.id: a for a in case.assets}
+    case.assets = [by_id[i] for i in ids]
+    return save(case, root)
+
+
+def _kind_of(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in _VIDEO_EXTS:
+        return "video"
+    if suffix in _IMAGE_EXTS:
+        return "image"
+    raise CaseError(
+        f"不支持的素材类型：{path.name}（视频 {'/'.join(sorted(_VIDEO_EXTS))}，"
+        f"图片 {'/'.join(sorted(_IMAGE_EXTS))}）")
+
+
+def _next_asset_number(case: Case, kind: str) -> int:
+    prefix = "v" if kind == "video" else "i"
+    used = [int(a.id[1:]) for a in case.assets
+            if a.id.startswith(prefix) and a.id[1:].isdigit()]
+    return max(used, default=0) + 1
+
+
+def _safe_stem(stem: str) -> str:
+    clean = re.sub(r"[^\w.-]", "_", stem, flags=re.UNICODE).strip("._-")
+    return clean or "asset"
+
+
+# ── 草稿与采用指针 ───────────────────────────────────────────────────────
 
 
 def set_adopt(name: str, round_key: str, root: str | Path | None = None) -> Case:
@@ -199,9 +483,21 @@ def set_extract_current(name: str, version: str, root: str | Path | None = None)
     return save(case, root)
 
 
+def _stored_path(raw: str) -> Path:
+    """解析 case.toml 里的路径；旧文件的相对路径相对仓库根（当前工作目录）解析。"""
+    p = Path(raw)
+    if not p.is_absolute() and not p.is_file():
+        alt = REPO_ROOT / p
+        if alt.is_file():
+            return alt
+    return p
+
+
 def check_source(case: Case, root: str | Path | None = None) -> Path:
-    """patch / gen 流的守卫：生成或合并前确认源视频还是创建时的那份。"""
-    src = Path(case.source_path)
+    """patch / fullredraw 流的守卫：生成或合并前确认源视频还是创建时的那份。"""
+    if not case.source_path:
+        raise CaseError(f"case {case.name} 没有源视频")
+    src = _stored_path(case.source_path)
     if not src.is_file():
         raise CaseError(f"源视频不在了：{src}（case.toml 记录的路径）")
     if case.sha256 and file_sha256(src) != case.sha256:
@@ -210,6 +506,23 @@ def check_source(case: Case, root: str | Path | None = None) -> Path:
             f"换源 = 新 case；这份几何契约只对创建时那份源有效。"
         )
     return src
+
+
+def check_assets(case: Case, root: str | Path | None = None) -> list[tuple[Asset, Path]]:
+    """gen 流的守卫：每个素材都在、且内容与添加时一致。"""
+    if case.flow != "gen":
+        raise CaseError(f"case {case.name} 是 {case.flow} 流，没有 assets")
+    out: list[tuple[Asset, Path]] = []
+    for asset in case.assets:
+        target = asset.resolved(case, root)
+        if not target.is_file():
+            raise CaseError(f"素材文件不在了：{target}（case.toml 记录的路径）")
+        if asset.sha256 and file_sha256(target) != asset.sha256:
+            raise CaseError(
+                f"素材 {asset.id} 的内容与添加时不同（sha256 不匹配）：{target}。"
+                f"请重新添加，或删除后换文件。")
+        out.append((asset, target))
+    return out
 
 
 def _s(value: str) -> str:

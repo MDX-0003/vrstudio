@@ -1,0 +1,16 @@
+<h3>生成额度（项目会话）</h3>
+<div class="meta">个人额度不够时，选项目、剧集和生成会话，提交会扣项目余额。
+  列表在每次打开或刷新页面时重新获取；选中会话后立即保存到这个 case。</div>
+<div class="row" style="align-items:center">
+  <label class="meta">项目
+    <select id="sessProject" onchange="onProjectChange()"></select>
+  </label>
+  <label class="meta">剧集
+    <select id="sessEpisode" onchange="onEpisodeChange()"></select>
+  </label>
+  <label class="meta">生成会话
+    <select id="sessSession" onchange="onSessionChange()"></select>
+  </label>
+  <button onclick="loadSessions()">刷新会话</button>
+</div>
+<div class="meta" id="sessionHint"></div>

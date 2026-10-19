@@ -6,6 +6,7 @@ adopt 后 [adopt] round 落 case、退出码透传。
 
 from __future__ import annotations
 
+import json
 from fractions import Fraction
 from pathlib import Path
 
@@ -89,7 +90,7 @@ def test_resolve_patch_reads_extract_pointer(tmp_path, src_video):
     assert canvas == (1470, 630) and source == (1470, 630)   # 来自 clip.json 契约
 
 
-# ── gen：源视频直接上传 ─────────────────────────────────────────────────
+# ── gen：素材清单 → vrgen --refs ───────────────────────────────────────
 
 
 def _gen_info() -> VideoInfo:
@@ -98,25 +99,23 @@ def _gen_info() -> VideoInfo:
                      codec="h264", has_audio=True, duration_s=12.23)
 
 
-def test_resolve_gen_uses_source_and_probes_size(tmp_path, src_video, monkeypatch):
+def test_resolve_gen_uses_master_asset_and_probes_size(tmp_path, src_video, monkeypatch):
     case = case_mod.create("g1", "gen", src_video, root=tmp_path)
     monkeypatch.setattr(gen, "probe", lambda path: _gen_info())
     video, mask, template, canvas, source = gen.resolve_package(case, tmp_path)
-    assert video == src_video and mask is None
-    assert template == "gen-edit"
+    assert video == case.assets[0].resolved(case, tmp_path)
+    assert mask is None
+    assert template == "gen-multi"
     assert canvas == source == (1920, 1052)
 
 
-def test_resolve_gen_rejects_reference_images_until_wired(tmp_path, src_video, monkeypatch):
-    case = case_mod.create("g1", "gen", src_video, root=tmp_path)
-    case.reference_images = ["ref.png"]
-    case_mod.save(case, tmp_path)
-    monkeypatch.setattr(gen, "probe", lambda path: _gen_info())
-    with pytest.raises(gen.GenError, match="参考图功能还没接入"):
+def test_resolve_gen_requires_assets(tmp_path):
+    case_mod.create("g1", "gen", root=tmp_path)
+    with pytest.raises(gen.GenError, match="还没有素材"):
         gen.resolve_package(case_mod.load("g1", tmp_path), tmp_path)
 
 
-def test_submit_dry_run_gen_omits_aspect_ratio(tmp_path, src_video, monkeypatch):
+def test_submit_dry_run_gen_writes_refs_and_omits_input(tmp_path, src_video, monkeypatch):
     case_mod.create("g1", "gen", src_video, root=tmp_path)
     monkeypatch.setattr(gen, "probe", lambda path: _gen_info())
     r = runner.invoke(gen.app, ["submit", "--case", "g1", "--dry-run",
@@ -124,10 +123,15 @@ def test_submit_dry_run_gen_omits_aspect_ratio(tmp_path, src_video, monkeypatch)
                                 "--cases-dir", str(tmp_path)])
     assert r.exit_code == 0, r.output
     lines = [line.strip() for line in r.output.splitlines()]
-    assert "--template" in lines and "gen-edit" in lines
+    assert "--template" in lines and "gen-multi" in lines
     assert "--aspect-ratio" in lines and "auto" in lines
-    # 画布与源都取源视频实际尺寸
     assert "1920x1052" in lines
+    assert "--input" not in lines and "--refs" in lines
+    refs_path = Path(lines[lines.index("--refs") + 1])
+    data = json.loads(refs_path.read_text(encoding="utf-8"))
+    assert data["assets"][0]["id"] == "v1"
+    assert data["assets"][0]["role"] == "edit_master"
+    assert data["assets"][0]["path"].endswith(".mp4")
 
 
 # ── submit --dry-run ─────────────────────────────────────────────────────
@@ -150,6 +154,16 @@ def test_submit_dry_run_prints_argv_without_calling(tmp_path, src_video, monkeyp
                   "--template", "360-closure", "--set", "theme=夜晚"):
         assert token in argv_lines, f"argv 缺 {token!r}：{r.output}"
     assert not called                     # dry-run 绝不真调
+
+
+def test_submit_check_calls_vrgen_dry_run(tmp_path, src_video, monkeypatch):
+    _fullredraw_case(tmp_path, src_video)
+    called = []
+    monkeypatch.setattr(gen, "_stream", lambda argv: called.append(argv) or 0)
+    r = runner.invoke(gen.app, ["submit", "--case", "e2e", "--check",
+                                "--cases-dir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    assert called and called[0][-1] == "--dry-run"
 
 
 def test_submit_passes_exit_code_through(tmp_path, src_video, monkeypatch):

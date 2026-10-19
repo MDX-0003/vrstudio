@@ -9,7 +9,9 @@
 
 from typer.testing import CliRunner
 
+from vrstudio import case as case_mod
 from vrstudio.cli import app
+from vrstudio.cli import case as case_cli
 
 runner = CliRunner()
 
@@ -40,6 +42,39 @@ def test_migrated_commands_answer_help():
     for cmd in sorted(MIGRATED_COMMANDS):
         r = runner.invoke(app, [cmd, "--help"])
         assert r.exit_code == 0, f"`vrstudio {cmd} --help` 退出码 {r.exit_code}"
+
+
+def test_case_new_gen_requires_mode_and_writes_it(tmp_path, monkeypatch):
+    saved = []
+    monkeypatch.setattr(case_cli, "save_mode", lambda name, mode: saved.append((name, mode)))
+    r = runner.invoke(app, ["case", "new", "g1", "--flow", "gen",
+                            "--cases-dir", str(tmp_path)])
+    assert r.exit_code == 2 and "--mode" in r.output
+    r = runner.invoke(app, ["case", "new", "g1", "--flow", "gen", "--mode", "allMediaRef",
+                            "--cases-dir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    assert saved == [("g1", "allMediaRef")]
+    case = case_mod.load("g1", tmp_path)
+    assert case.assets == [] and case.source_path is None
+
+
+def test_case_new_patch_rejects_mode(tmp_path):
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"fake")
+    r = runner.invoke(app, ["case", "new", "p1", "--flow", "patch",
+                            "--source", str(src), "--mode", "videoEdit",
+                            "--cases-dir", str(tmp_path)])
+    assert r.exit_code == 2 and "--mode" in r.output
+
+
+def test_case_new_gen_keeps_case_when_mode_save_fails(tmp_path, monkeypatch):
+    def boom(name, mode):
+        raise case_mod.CaseError("vrgen down")
+    monkeypatch.setattr(case_cli, "save_mode", boom)
+    r = runner.invoke(app, ["case", "new", "g2", "--flow", "gen",
+                            "--mode", "videoEdit", "--cases-dir", str(tmp_path)])
+    assert r.exit_code == 2 and "已创建" in r.output
+    assert case_mod.load("g2", tmp_path).flow == "gen"
 
 
 def test_stubs_exit_2_until_implemented():

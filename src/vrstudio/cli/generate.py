@@ -13,8 +13,11 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 import typer
@@ -31,7 +34,7 @@ app = typer.Typer(add_completion=False, no_args_is_help=True,
 
 #: 每个 flow 首轮 submit 用的模板 id（模板本体在 vrgen templates/）。
 TEMPLATE_BY_FLOW = {"fullredraw": "360-closure", "patch": "character-repaint",
-                    "gen": "gen-edit"}
+                    "gen": "gen-multi"}
 
 _ROUND_IN_OUTPUT = re.compile(r"round=([A-Za-z0-9._-]+)")
 
@@ -87,12 +90,15 @@ def resolve_package(case: case_mod.Case,
     gen：源视频直接上传，canvas=source=源实际尺寸（探测），无 mask。
     """
     if case.flow == "gen":
-        if case.reference_images:
+        if not case.assets:
             raise GenError(
-                "[gen] reference_images 非空：参考图功能还没接入生成，"
-                "先清空 case.toml 里的这个列表")
+                f"case {case.name} 还没有素材——先在生成页的「素材」步骤添加视频与图片")
+        master = case.master()
+        if master is None:
+            raise GenError(f"case {case.name} 至少需要 1 个视频素材")
         try:
-            video = case_mod.check_source(case, root)
+            case_mod.check_assets(case, root)
+            video = master.resolved(case, root)
             info = probe(video)
         except (CaseError, VideoIOError) as exc:
             raise GenError(str(exc)) from exc
@@ -177,6 +183,9 @@ def submit(
         None, "--session-id",
         help="项目生成会话 ID（>0）：在该项目额度下提交；不传则用 generation.toml/配置。"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只打印 argv，不真调 vrgen。"),
+    check: bool = typer.Option(
+        False, "--check",
+        help="调 vrgen submit --dry-run：校验素材与提示词并打印完整命令，不提交不花钱。"),
     cases_dir: Path = typer.Option(None, "--cases-dir"),
     overrides: list[str] = typer.Option(None, "--set", help="config 覆盖。"),
 ) -> None:
@@ -187,12 +196,29 @@ def submit(
         video, mask, template, canvas_size, source_size = resolve_package(case, cases_dir)
     except GenError as exc:
         _fail(exc)
-    argv = [_vrgen_exe(conf), "submit", "--job", case.name,
-            "--input", str(video), "--template", template,
-            "--canvas", f"{canvas_size[0]}x{canvas_size[1]}",
-            "--source", f"{source_size[0]}x{source_size[1]}"]
-    if mask:
-        argv += ["--mask", str(mask)]
+    refs_file: Path | None = None
+    if case.flow == "gen":
+        payload = {"assets": [
+            {"id": asset.id, "kind": asset.kind, "role": asset.role,
+             "path": str(path.resolve()), "sha256": asset.sha256}
+            for asset, path in case_mod.check_assets(case, cases_dir)
+        ]}
+        fd, raw = tempfile.mkstemp(prefix=f"vrgen-{case.name}-", suffix=".json")
+        os.close(fd)
+        refs_file = Path(raw)
+        refs_file.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                             encoding="utf-8")
+        argv = [_vrgen_exe(conf), "submit", "--job", case.name,
+                "--refs", str(refs_file), "--template", template,
+                "--canvas", f"{canvas_size[0]}x{canvas_size[1]}",
+                "--source", f"{source_size[0]}x{source_size[1]}"]
+    else:
+        argv = [_vrgen_exe(conf), "submit", "--job", case.name,
+                "--input", str(video), "--template", template,
+                "--canvas", f"{canvas_size[0]}x{canvas_size[1]}",
+                "--source", f"{source_size[0]}x{source_size[1]}"]
+        if mask:
+            argv += ["--mask", str(mask)]
     for item in variables or []:
         argv += ["--set", item]
     if model_id is not None:
@@ -215,12 +241,23 @@ def submit(
     if session_id is not None:
         argv += ["--session-id", str(session_id)]
     argv += ["--workdir", str(_workdir(conf))]
+    if dry_run and check:
+        _fail(GenError("--dry-run 与 --check 互斥"))
     if dry_run:
         typer.echo("dry-run：将发出")
         for a in argv:
             typer.echo(f"  {a}")
+        if refs_file is not None:
+            typer.echo(f"  （素材清单保留在 {refs_file}，可直接复跑这条命令）")
         return
-    raise typer.Exit(_stream(argv))
+    if check:
+        argv += ["--dry-run"]
+    try:
+        code = _stream(argv)
+    finally:
+        if refs_file is not None:
+            refs_file.unlink(missing_ok=True)
+    raise typer.Exit(code)
 
 
 @app.command()

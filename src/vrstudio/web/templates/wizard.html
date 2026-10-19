@@ -77,6 +77,25 @@
                z-index: 9; box-shadow: 0 4px 16px rgba(90,74,48,.15); }
   .bitem { padding: 0.15rem 0.3rem; cursor: pointer; }
   .bitem:hover { background: #f6f1e7; }
+  /* gen 素材卡片与多选浏览器 */
+  #assetList { display: flex; flex-direction: column; gap: 0.4rem; margin: 0.4rem 0; }
+  .assetCard { display: flex; gap: 0.6rem; align-items: center; border: 1px solid #e7ddcc;
+               border-radius: 6px; padding: 0.35rem; background: #fffdf8; }
+  .assetCard.dragging { opacity: 0.35; }
+  .assetCard img { width: 120px; height: 68px; object-fit: cover; cursor: pointer; }
+  .assetCard .ameta { flex: 1; min-width: 180px; font-size: 0.78rem; color: #6b5d48;
+                      overflow-wrap: anywhere; }
+  .assetCard .ameta b { color: #5a4a30; }
+  .assetCard select { min-width: 190px; }
+  .assetCard button { margin: 0; }
+  #assetBrowseBox { position: fixed; top: 8%; left: 28%; width: 44%; max-height: 80%;
+                    overflow-y: auto; background: #ffffff; border: 1px solid #c2a066;
+                    border-radius: 6px; padding: 0.7rem; display: none; z-index: 10;
+                    box-shadow: 0 4px 16px rgba(90,74,48,.15); }
+  .abitem { display: flex; gap: 0.4rem; align-items: center; padding: 0.12rem 0.3rem; }
+  .abitem:hover { background: #f6f1e7; }
+  .abitem .kind { font-size: 0.7rem; color: #8a7c66; }
+  .absel { display: flex; gap: 0.4rem; align-items: center; padding: 0.15rem 0; }
 </style>
 </head>
 <body data-name="{{ name }}" data-flow="{{ flow }}">
@@ -131,73 +150,16 @@
   <div id="verList"></div>
 </div>
 
-<!-- ── 生成（两条流程共用）─────────────────────────────────────────── -->
+<!-- ── gen：素材 ───────────────────────────────────────────────────── -->
+{% if flow == "gen" %}
+<div class="panel" id="pnl-assets">
+  {% include "partials/assets.html" %}
+</div>
+{% endif %}
+
+<!-- ── 生成（三条流程共用）─────────────────────────────────────────── -->
 <div class="panel" id="pnl-generate">
-  <h3>生成画面</h3>
-  <div class="row">
-    <div style="min-width:300px">
-      <h3>用 Seedance 生成</h3>
-      <button class="big" onclick="runSubmit()">提交生成（用下面保存的提示词）</button>
-      <div class="meta">提交会消耗平台配额；中途断了重新提交会接着上次的进度走，不会重复扣</div>
-    </div>
-    <div style="min-width:300px">
-      <h3>用别的工具做好的视频</h3>
-      <button onclick="openBrowse()">选用非 Seedance 生成的视频执行后续步骤</button>
-      <div class="meta">从电脑里挑一个已经在别处生成好的视频文件，交给后面的步骤用</div>
-    </div>
-  </div>
-  <h3>生成参数</h3>
-  <div class="row" style="align-items:center">
-    <label class="meta">生成模式
-      <select id="genMode" onchange="onModeChange()"></select>
-    </label>
-    <label class="meta">输出比例
-      <select id="genAspect" onchange="saveGenParams()"></select>
-    </label>
-    <label class="meta">输出分辨率
-      <select id="genResolution" onchange="saveGenParams()"></select>
-    </label>
-    <label class="meta">输入分辨率
-      <select id="genScale" onchange="saveGenParams()"></select>
-    </label>
-  </div>
-  <div class="meta" id="genFixed"></div>
-  <h3>生成额度（项目会话）</h3>
-  <div class="meta">个人额度不够时，选项目、剧集和生成会话，提交会扣项目余额。
-    列表在每次打开或刷新页面时重新获取；选中会话后立即保存到这个 case。</div>
-  <div class="row" style="align-items:center">
-    <label class="meta">项目
-      <select id="sessProject" onchange="onProjectChange()"></select>
-    </label>
-    <label class="meta">剧集
-      <select id="sessEpisode" onchange="onEpisodeChange()"></select>
-    </label>
-    <label class="meta">生成会话
-      <select id="sessSession" onchange="onSessionChange()"></select>
-    </label>
-    <button onclick="loadSessions()">刷新会话</button>
-  </div>
-  <div class="meta" id="sessionHint"></div>
-  <div class="meta bad" id="genParamsHint" style="display:none"></div>
-  <div class="files" id="files-generate"></div>
-  <h3>提示词（这次发给 Seedance 的完整内容）</h3>
-  <div class="meta">下面的模板正文是固定不动的部分，照原样发出去；模板里需要填的变量
-    在输入框里改，改动立即保存，下次打开这个 case 还在。模板自带的变量只能改值，
-    自己添加的变量可以删除。</div>
-  <pre id="promptBox">（加载中）</pre>
-  <div id="varList"></div>
-  <div class="row" style="align-items:center">
-    <input id="newVarKey" placeholder="新变量名（英文）" style="width:170px">
-    <input id="newVarVal" placeholder="新变量的值" style="width:300px">
-    <button onclick="addVar()">添加变量</button>
-  </div>
-  <div class="meta" id="promptMeta"></div>
-  <h3>Session 列表与选用</h3>
-  <div class="meta">✓ 表示这个 Session 里的视频已生成、可以选用；「选用」= 把选中的
-    Session 里的视频拷贝到 case 文件夹，供后续步骤使用。✗ 表示未生成视频，无法被后续流程使用。</div>
-  <div id="roundList"><span class="meta">还没有生成记录</span></div>
-  <div class="meta">最近一次生成的过程记录（末尾）</div>
-  <pre id="logBox">（空）</pre>
+  {% include "partials/generate.html" %}
 </div>
 
 <!-- ── patch：merge ────────────────────────────────────────────────── -->
@@ -252,10 +214,7 @@
   <video id="cmpB" muted preload="auto" style="display:none"></video>
 </div>
 
-<h3>任务</h3>
-<pre id="taskBox">（空闲）</pre>
-<div class="meta">一次只跑一个任务，跑完自动开始下一个；每个任务行首是它的提交时间，
-  最近完成的收在最后一节（新的在上）；每一步的完整过程记录都在 logs/ 文件夹里</div>
+{% include "partials/tasks.html" %}
 
 <div id="browseBox">
   <b>选择做好的视频</b> <button style="float:right" onclick="closeBrowse()">×</button>
@@ -264,7 +223,12 @@
 </div>
 
 <script src="/static/pick.js?v=4"></script>
-<script src="/static/erp360.js?v=4"></script>
-<script src="/static/wizard.js?v=4"></script>
+<script src="/static/erp360.js?v=5"></script>
+<script src="/static/common.js?v=1"></script>
+<script src="/static/assets.js?v=1"></script>
+<script src="/static/params.js?v=1"></script>
+<script src="/static/prompt.js?v=1"></script>
+<script src="/static/tasks.js?v=1"></script>
+<script src="/static/wizard.js?v=5"></script>
 </body>
 </html>

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from vrstudio import case as case_mod
@@ -31,16 +33,83 @@ def test_create_fullredraw_hash_optional(tmp_path, src_video):
     assert case.sha256 is None            # pad 之后源不再被读（决策：哈希可选）
 
 
-def test_create_gen_pins_hash_and_reserves_reference_images(tmp_path, src_video):
+def test_create_gen_copies_source_as_v1(tmp_path, src_video):
     case = case_mod.create("simple", "gen", src_video, root=tmp_path)
     assert case.flow == "gen"
-    assert case.sha256 == case_mod.file_sha256(src_video)   # 每次 submit 重读源
-    case.reference_images = ["ref/character.png"]
-    case_mod.save(case, tmp_path)
-    back = case_mod.load("simple", tmp_path)
-    assert back.reference_images == ["ref/character.png"]
+    assert case.source_path is None                      # gen 不再有 [source]
+    assert len(case.assets) == 1
+    asset = case.assets[0]
+    assert (asset.id, asset.kind, asset.role) == ("v1", "video", "edit_master")
+    assert asset.path.startswith("assets/v1_")
+    assert asset.sha256 == case_mod.file_sha256(src_video)
+    assert (tmp_path / "simple" / asset.path).is_file()
     text = case_mod.case_toml("simple", tmp_path).read_text(encoding="utf-8")
-    assert "[gen]" in text and "reference_images" in text
+    assert "[[assets]]" in text and "[source]" not in text
+
+
+def test_create_gen_without_source_is_empty(tmp_path):
+    case = case_mod.create("empty", "gen", root=tmp_path)
+    assert case.flow == "gen" and case.assets == [] and case.source_path is None
+    assert case_mod.load("empty", tmp_path).assets == []
+
+
+def test_gen_assets_add_role_reorder_remove(tmp_path, src_video):
+    case_mod.create("g", "gen", root=tmp_path)
+    image = tmp_path / "ref.png"
+    image.write_bytes(b"fake png bytes")
+    case = case_mod.add_assets("g", [(src_video, "motion_ref"),
+                                     (image, "subject_ref")], root=tmp_path)
+    assert [a.id for a in case.assets] == ["v1", "i1"]
+    assert [a.role for a in case.assets] == ["motion_ref", "subject_ref"]
+    case = case_mod.set_asset_role("g", "v1", "edit_master", root=tmp_path)
+    assert case.assets[0].role == "edit_master"
+    case = case_mod.reorder_assets("g", ["i1", "v1"], root=tmp_path)
+    assert [a.id for a in case.assets] == ["i1", "v1"]
+    image_path = tmp_path / "g" / case.assets[0].path
+    assert image_path.is_file()
+    case = case_mod.remove_asset("g", "i1", root=tmp_path)
+    assert [a.id for a in case.assets] == ["v1"]
+    assert not image_path.exists()
+
+
+def test_gen_asset_hash_guard(tmp_path, src_video):
+    case_mod.create("g", "gen", src_video, root=tmp_path)
+    case = case_mod.load("g", tmp_path)
+    assert case_mod.check_assets(case, tmp_path)
+    (tmp_path / "g" / case.assets[0].path).write_bytes(b"changed")
+    with pytest.raises(CaseError, match="sha256"):
+        case_mod.check_assets(case, tmp_path)
+
+
+def test_legacy_gen_source_migrates_on_load(tmp_path, src_video):
+    d = tmp_path / "old"
+    d.mkdir()
+    (d / "case.toml").write_text(
+        'schema = 1\nflow = "gen"\n\n[source]\n'
+        f'path = {json.dumps(str(src_video), ensure_ascii=False)}\n'
+        f'sha256 = "{case_mod.file_sha256(src_video)}"\n',
+        encoding="utf-8")
+    case = case_mod.load("old", tmp_path)
+    assert case.source_path is None and len(case.assets) == 1
+    assert case.assets[0].role == "edit_master"
+    text = (d / "case.toml").read_text(encoding="utf-8")
+    assert "[source]" not in text and "[[assets]]" in text
+    assert (d / case.assets[0].path).is_file()
+
+
+def test_legacy_reference_images_migrate_to_assets(tmp_path, src_video):
+    image = tmp_path / "ref.png"
+    image.write_bytes(b"fake png bytes")
+    d = tmp_path / "old"
+    d.mkdir()
+    (d / "case.toml").write_text(
+        'schema = 1\nflow = "gen"\n\n[source]\n'
+        f'path = {json.dumps(str(src_video), ensure_ascii=False)}\n\n'
+        f'[gen]\nreference_images = [{json.dumps(str(image), ensure_ascii=False)}]\n',
+        encoding="utf-8")
+    case = case_mod.load("old", tmp_path)
+    assert [a.kind for a in case.assets] == ["video", "image"]
+    assert case.assets[1].role == "subject_ref"
 
 
 def test_gen_rejects_patch_sections_and_other_flows_reject_gen_section(tmp_path, src_video):

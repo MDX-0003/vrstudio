@@ -116,17 +116,18 @@ def test_wizard_page_404_for_unknown(client):
     assert client.get("/case/nope").status_code == 404
 
 
-def test_gen_wizard_page_and_single_step(client, gen_case):
+def test_gen_wizard_page_has_assets_and_generate(client, gen_case):
     r = client.get("/case/g1")
     assert r.status_code == 200
     assert 'data-flow="gen"' in r.text
     info = client.get("/api/case/g1").json()
-    assert set(info["gates"]) == {"generate"}          # gen 只有生成一步
+    assert set(info["gates"]) == {"assets", "generate"}   # gen：素材 → 生成
+    assert info["gates"]["assets"]["ok"] is True          # 创建时的源视频已复制为 v1
     assert info["gates"]["generate"]["ok"] is False
-    assert "提交生成" in info["gates"]["generate"]["reason"]
+    assert "填好提示词" in info["gates"]["generate"]["reason"]
     sf = info["step_files"]
-    assert set(sf) == {"generate"}
-    assert sf["generate"]["groups"][0]["inputs"][0]["name"] == "simple.mp4"
+    assert set(sf) == {"assets", "generate"}
+    assert sf["generate"]["groups"][0]["inputs"][0]["name"].startswith("v1_")
 
 
 def test_gen_generate_gate_unlocks_after_adopt(client, gen_case, tmp_path):
@@ -135,6 +136,68 @@ def test_gen_generate_gate_unlocks_after_adopt(client, gen_case, tmp_path):
     info = client.get("/api/case/g1").json()
     assert info["gates"]["generate"]["ok"] is True
     assert "result.mp4" in info["gates"]["generate"]["evidence"]
+
+
+def test_create_gen_without_video_requires_mode_and_name(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(web_app, "_save_gen_mode", lambda name, mode: None)
+    r = client.post("/api/cases", json={"flow": "gen", "name": "g2"})
+    assert r.status_code == 400 and "模式" in r.json()["error"]
+
+    r = client.post("/api/cases", json={"flow": "gen", "mode": "allMediaRef"})
+    assert r.status_code == 400 and "case 名" in r.json()["error"]
+
+    r = client.post("/api/cases", json={"flow": "gen", "name": "g2",
+                                         "mode": "allMediaRef"})
+    assert r.status_code == 200, r.text
+    case = case_mod.load("g2", tmp_path)
+    assert case.assets == [] and case.source_path is None
+
+
+def test_create_gen_keeps_case_when_mode_save_fails(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(web_app, "_save_gen_mode", lambda name, mode: "vrgen down")
+    r = client.post("/api/cases", json={"flow": "gen", "name": "g3",
+                                         "mode": "videoEdit"})
+    assert r.status_code == 502 and r.json()["created"] is True
+    assert case_mod.load("g3", tmp_path).flow == "gen"
+
+
+def test_asset_api_add_role_reorder_remove(client, gen_case, tmp_path):
+    image = tmp_path / "ref.png"
+    image.write_bytes(b"fake png")
+    r = client.post("/api/case/g1/assets",
+                    json={"op": "add", "paths": [str(image)],
+                          "roles": ["subject_ref"]})
+    assert r.status_code == 200, r.text
+    assert [a["id"] for a in r.json()["assets"]] == ["v1", "i1"]
+
+    r = client.post("/api/case/g1/assets",
+                    json={"op": "role", "id": "i1", "role": "scene_ref"})
+    assert [a["role"] for a in r.json()["assets"]] == ["edit_master", "scene_ref"]
+
+    r = client.post("/api/case/g1/assets",
+                    json={"op": "reorder", "ids": ["i1", "v1"]})
+    assert [a["id"] for a in r.json()["assets"]] == ["i1", "v1"]
+
+    r = client.post("/api/case/g1/assets", json={"op": "remove", "id": "i1"})
+    assert [a["id"] for a in r.json()["assets"]] == ["v1"]
+    assert not list((case_mod.case_dir("g1", tmp_path) / "assets").glob("i1_*"))
+
+
+def test_asset_api_rejects_bad_role(client, gen_case, tmp_path):
+    image = tmp_path / "ref.png"
+    image.write_bytes(b"fake png")
+    r = client.post("/api/case/g1/assets",
+                    json={"op": "add", "paths": [str(image)], "roles": ["nope"]})
+    assert r.status_code == 400
+
+
+def test_modes_endpoint_returns_model_modes(client, monkeypatch):
+    monkeypatch.setattr(web_app, "_vrgen_json",
+                        lambda argv: {"modes": [{"value": "allMediaRef"}],
+                                      "current": {"mode": "allMediaRef"}})
+    r = client.get("/api/modes")
+    assert r.status_code == 200
+    assert r.json()["modes"][0]["value"] == "allMediaRef"
 
 
 def test_cases_list_has_gates(client, patch_case):
@@ -478,7 +541,7 @@ def test_step_files_are_flow_specific(client, patch_case, fullredraw_case, gen_c
     assert "extract" not in full and "merge" not in full
 
     gen = client.get("/api/case/g1").json()["step_files"]
-    assert set(gen) == {"generate"}
+    assert set(gen) == {"assets", "generate"}
 
 
 def test_step_files_fullredraw_reports_names_and_times(client, fullredraw_case, tmp_path):

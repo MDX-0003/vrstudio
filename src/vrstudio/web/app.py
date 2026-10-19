@@ -20,6 +20,7 @@ from pathlib import Path
 
 import cv2
 import jinja2
+import numpy as np
 from starlette.applications import Starlette
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
@@ -35,6 +36,7 @@ from .tasks import QUEUE, vrstudio_argv
 
 _WEB_DIR = Path(__file__).parent
 _VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi"}
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 
 _env = jinja2.Environment(loader=jinja2.FileSystemLoader(_WEB_DIR / "templates"),
                           autoescape=True)
@@ -204,13 +206,24 @@ def _sessions_tree() -> dict:
 
 
 def _generation_params(name: str) -> dict:
-    """生成页的输出/输入分辨率选项（决策 20；契约 case-model.md §4）。"""
+    """生成页的输出/输入分辨率选项（决策 20；契约 case-model.md §4）。
+
+    gen case 还没有素材时，`resolve_package` 会拒绝；这里退回不带 `--input`
+    的 `params show`，页面仍能拿到模式列表，先完成素材步骤。
+    """
     try:
         case = case_mod.load(name, _ctx["cases_root"])
         video, _mask, _template, canvas, source = resolve_package(
             case, _ctx["cases_root"])
     except (CaseError, GenError, KeyError, ValueError, OSError) as e:
-        return {"error": str(e)}
+        try:
+            case = case_mod.load(name, _ctx["cases_root"])
+        except CaseError:
+            return {"error": str(e)}
+        if case.flow != "gen":
+            return {"error": str(e)}
+        return _vrgen_json(["params", "show", "--job", name,
+                            "--workdir", str(_workdir())])
     argv = ["params", "show", "--job", name,
             "--input", str(video),
             "--canvas", f"{canvas[0]}x{canvas[1]}",
@@ -279,6 +292,57 @@ def _file_info(path: Path) -> dict:
                 "mtime": None, "size": None}
     return {"name": p.name, "path": str(p), "rel": rel, "exists": True,
             "mtime": st.st_mtime, "size": st.st_size}
+
+
+def _imread(path: Path, flags: int):
+    """OpenCV 在 Windows 上不认非 ASCII 路径；从字节解码绕开它。"""
+    data = np.fromfile(str(path), dtype=np.uint8)
+    return cv2.imdecode(data, flags) if data.size else None
+
+
+def _media_meta(path: Path, kind: str) -> dict:
+    """尺寸/时长/帧率：素材卡片与缩略图共用的只读元数据。"""
+    meta: dict = {"width": None, "height": None, "duration": None, "fps": None}
+    if not path.is_file():
+        return meta
+    if kind == "video":
+        cap = cv2.VideoCapture(str(path))
+        if cap.isOpened():
+            meta["width"] = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or None
+            meta["height"] = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or None
+            fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
+            frames = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            meta["fps"] = round(fps, 3) if fps else None
+            meta["duration"] = round(frames / fps, 3) if fps and frames else None
+        cap.release()
+        return meta
+    image = _imread(path, cv2.IMREAD_UNCHANGED)
+    if image is not None:
+        meta["height"], meta["width"] = int(image.shape[0]), int(image.shape[1])
+    return meta
+
+
+def _asset_details(case: case_mod.Case) -> list[dict]:
+    """gen 素材卡片的数据源；文件缺失也照常返回，页面标红。
+
+    ``label`` 按当前顺序重新编号（@Video1/@Image1），不能拿素材 id 的数字代替：
+    拖动排序只改数组顺序，id 保持不变。
+    """
+    out = []
+    counters = {"video": 0, "image": 0}
+    for asset in case.assets:
+        counters[asset.kind] += 1
+        prefix = "Video" if asset.kind == "video" else "Image"
+        path = asset.resolved(case, _ctx["cases_root"])
+        info = _file_info(path)
+        meta = _media_meta(path, asset.kind)
+        out.append({
+            "id": asset.id, "kind": asset.kind, "role": asset.role,
+            "label": f"@{prefix}{counters[asset.kind]}", "path": asset.path,
+            "url": f"/img/asset/{case.name}/{asset.id}",
+            **info, **meta,
+        })
+    return out
 
 
 def _round_dir(case: case_mod.Case) -> Path | None:
@@ -398,10 +462,11 @@ def _patch_step_files(case: case_mod.Case, cdir: Path) -> dict:
 
 
 def _gen_step_files(case: case_mod.Case, cdir: Path) -> dict:
-    """gen：源视频直接上传；采用后的副本落在 case/result.mp4。"""
+    """gen：素材副本是输入；采用后的副本落在 case/result.mp4。"""
+    files = [_file_info(a.resolved(case, _ctx["cases_root"])) for a in case.assets]
     return {
-        "generate": _generation_groups(
-            case, [_file_info(Path(case.source_path))], cdir / "result.mp4"),
+        "assets": {"inputs": [], "outputs": files},
+        "generate": _generation_groups(case, files, cdir / "result.mp4"),
     }
 
 
@@ -477,8 +542,25 @@ def _gates(case: case_mod.Case, extracts: list[dict]) -> dict:
                         "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}"},
         }
     else:
+        has_video = any(a.kind == "video" for a in case.assets)
+        roles_ok = bool(case.assets) and all(a.role in case_mod.ROLES for a in case.assets)
+        assets_ok = has_video and roles_ok
+        if not case.assets:
+            asset_reason = "先添加至少 1 个视频素材"
+        elif not has_video:
+            asset_reason = "至少需要 1 个视频素材"
+        elif not roles_ok:
+            asset_reason = "每个素材都要选择角色"
+        else:
+            asset_reason = ""
         steps = {
-            "generate": {"ok": result_file, "ready": True,
+            "assets": {
+                "ok": assets_ok,
+                "reason": asset_reason,
+                "evidence": (f"在 {cdir}\\assets\\ 检测到 {len(case.assets)} 条素材，"
+                             f"顺序与角色已写入 case.toml" if assets_ok else ""),
+            },
+            "generate": {"ok": result_file, "ready": assets_ok,
                          "reason": "" if result_file else "填好提示词和分辨率后提交生成，并采用一轮结果",
                          "evidence": (f"在 {cdir}\\result.mp4 检测到已选用的结果"
                                       f"（来自 Session {case.adopt_round}）；想换一个，回到上面点别的「选用」"
@@ -503,6 +585,7 @@ def _case_info(name: str) -> dict | None:
         "frame_count": store.frame_count if store else None,
         "extract_current": case.extract_current,
         "adopt_round": case.adopt_round,
+        "assets": _asset_details(case) if case.flow == "gen" else [],
         "extracts": extracts,
         "outputs": _outputs(case),
         "step_files": _step_files(case),
@@ -514,30 +597,55 @@ def _case_info(name: str) -> dict | None:
     return info
 
 
+def _save_gen_mode(name: str, mode: str) -> str | None:
+    """创建 gen case 后立即写模式；返回错误文案，成功返回 None。"""
+    payload = _vrgen_json(["params", "save", "--job", name,
+                           "--mode", mode, "--workdir", str(_workdir())])
+    return payload.get("error")
+
+
 async def api_cases(request):
     if request.method == "GET":
         names = sorted(p.parent.name for p in _root().glob("*/case.toml"))
         infos = await asyncio.to_thread(
             lambda: [i for n in names if (i := _brief(n)) is not None])
         return JSONResponse(infos)
-    # POST：从 sources/ 建新 case（探尺寸给默认草稿）
+    # POST：建新 case。gen 不再要求视频，但必须选模式；patch/fullredraw 仍要视频。
     body = await request.json()
-    flow, video = body.get("flow"), sources_dir() / Path(body.get("video", "")).name
+    flow = body.get("flow")
     if flow not in case_mod.FLOWS:
         return JSONResponse({"error": f"flow 必须是 {' 或 '.join(case_mod.FLOWS)}"},
                             status_code=400)
-    if not video.is_file():
-        return JSONResponse({"error": f"sources/ 里没有这个视频：{video.name}"},
-                            status_code=400)
-    name = body.get("name") or video.stem
-    cap = cv2.VideoCapture(str(video))
-    if not cap.isOpened():
-        return JSONResponse({"error": "打不开这个视频"}, status_code=400)
-    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    cap.release()
+    raw_video = str(body.get("video") or "")
+    video = sources_dir() / Path(raw_video).name if raw_video else None
+    mode = body.get("mode")
+    if flow == "gen":
+        if mode not in case_mod.GEN_MODES:
+            return JSONResponse(
+                {"error": f"gen 必须选择模式：{' / '.join(case_mod.GEN_MODES)}"},
+                status_code=400)
+        if video is not None and not video.is_file():
+            return JSONResponse({"error": f"sources/ 里没有这个视频：{video.name}"},
+                                status_code=400)
+        if video is None and not str(body.get("name") or "").strip():
+            return JSONResponse({"error": "没有视频素材时，必须填写 case 名"},
+                                status_code=400)
+    elif video is None or not video.is_file():
+        return JSONResponse({"error": "sources/ 里没有这个视频"}, status_code=400)
+
+    name = str(body.get("name") or (video.stem if video else "")).strip()
+    if not name:
+        return JSONResponse({"error": "必须填写 case 名"}, status_code=400)
+    n = w = 0
+    fps = 30.0
+    if video is not None:
+        cap = cv2.VideoCapture(str(video))
+        if not cap.isOpened():
+            return JSONResponse({"error": "打不开这个视频"}, status_code=400)
+        n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        cap.release()
     try:
         case = case_mod.create(name, flow, video, root=_ctx["cases_root"])
         if flow == "patch":
@@ -552,6 +660,12 @@ async def api_cases(request):
                                frames={"start": 0, "end": max(0, n - 1)})
     except CaseError as e:
         return JSONResponse({"error": str(e)}, status_code=409)
+    if flow == "gen":
+        error = await asyncio.to_thread(_save_gen_mode, name, mode)
+        if error:
+            return JSONResponse(
+                {"error": f"case 已创建，但模式没保存：{error}",
+                 "name": name, "created": True}, status_code=502)
     return JSONResponse({"name": case.name, "flow": flow,
                          "fps": round(fps, 3)})
 
@@ -583,6 +697,95 @@ async def api_sessions(request):
     payload = await asyncio.to_thread(_sessions_tree)
     status = 400 if "error" in payload else 200
     return JSONResponse(payload, status_code=status)
+
+
+async def api_modes(request):
+    """新建 gen case 的模式列表（模型能力；无需已有 case）。"""
+    payload = await asyncio.to_thread(
+        _vrgen_json, ["params", "show", "--job", "modes-probe",
+                      "--workdir", str(_workdir())])
+    status = 400 if "error" in payload else 200
+    return JSONResponse(payload, status_code=status)
+
+
+def _thumb(path: Path, kind: str) -> bytes:
+    image = None
+    if kind == "video":
+        cap = cv2.VideoCapture(str(path))
+        ok, frame = cap.read()
+        cap.release()
+        image = frame if ok else None
+    else:
+        image = _imread(path, cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError(f"读不出缩略图：{path.name}")
+    height, width = image.shape[:2]
+    if width > 320:
+        scale = 320 / width
+        image = cv2.resize(image, (320, max(1, int(height * scale))),
+                           interpolation=cv2.INTER_AREA)
+    ok, buffer = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+    if not ok:
+        raise ValueError(f"缩略图编码失败：{path.name}")
+    return buffer.tobytes()
+
+
+async def asset_img(request):
+    """素材缩略图：视频取首帧，图片直接缩放；每次请求现算，不设缓存。"""
+    try:
+        case = case_mod.load(request.path_params["name"], _ctx["cases_root"])
+        asset = case.asset(request.path_params["file"])
+    except CaseError:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    path = asset.resolved(case, _ctx["cases_root"])
+    if not path.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        data = await asyncio.to_thread(_thumb, path, asset.kind)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return Response(content=data, media_type="image/jpeg")
+
+
+async def api_assets(request):
+    """gen 素材增删改排（唯一权威仍是 vrstudio.case 的素材函数）。"""
+    name = request.path_params["name"]
+    try:
+        case = case_mod.load(name, _ctx["cases_root"])
+    except CaseError:
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    if case.flow != "gen":
+        return JSONResponse({"error": f"{case.flow} 流没有素材列表"}, status_code=400)
+    body = await request.json()
+    op = body.get("op")
+    try:
+        if op == "add":
+            paths = [str(p) for p in (body.get("paths") or [])]
+            roles = [str(r) for r in (body.get("roles") or [])]
+            if not paths or len(paths) != len(roles):
+                return JSONResponse({"error": "paths 与 roles 要一一对应且非空"},
+                                    status_code=400)
+            await asyncio.to_thread(case_mod.add_assets, name,
+                                    list(zip(paths, roles, strict=True)), _ctx["cases_root"])
+        elif op == "remove":
+            await asyncio.to_thread(case_mod.remove_asset, name,
+                                    str(body.get("id") or ""), _ctx["cases_root"])
+        elif op == "role":
+            await asyncio.to_thread(case_mod.set_asset_role, name,
+                                    str(body.get("id") or ""),
+                                    str(body.get("role") or ""), _ctx["cases_root"])
+        elif op == "reorder":
+            ids = [str(i) for i in (body.get("ids") or [])]
+            await asyncio.to_thread(case_mod.reorder_assets, name, ids,
+                                    _ctx["cases_root"])
+        else:
+            return JSONResponse({"error": f"未知素材操作：{op}"}, status_code=400)
+    except CaseError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    info = await asyncio.to_thread(_case_info, name)
+    info["generation_params"] = await asyncio.to_thread(_generation_params, name)
+    info["prompt"] = await asyncio.to_thread(_prompt, name, case.flow)
+    return JSONResponse(info)
 
 
 async def api_prompt(request):
@@ -620,10 +823,15 @@ async def api_params(request):
     body = await request.json()
     resolution = str(body.get("resolution") or "")
     scale = str(body.get("scale") or "")
-    if not resolution or not scale:
-        return JSONResponse({"error": "resolution 和 scale 都要给"}, status_code=400)
-    argv = ["params", "save", "--job", name,
-            "--resolution", resolution, "--scale", scale]
+    if not any(body.get(k) is not None for k in
+               ("resolution", "scale", "mode", "aspect_ratio",
+                "session_id", "project_id", "episode")):
+        return JSONResponse({"error": "没有要保存的参数"}, status_code=400)
+    argv = ["params", "save", "--job", name]
+    if resolution:
+        argv += ["--resolution", resolution]
+    if scale:
+        argv += ["--scale", scale]
     for field, flag in (("mode", "--mode"),
                         ("aspect_ratio", "--aspect-ratio"),
                         ("session_id", "--session-id"),
@@ -748,8 +956,10 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
             raise CaseError(f"不是文件：{f}")
         return vrstudio_argv("generate", "register", "--case", name,
                              "--file", f, *root)
-    if op == "submit":
+    if op in ("submit", "dry_run"):
         argv = vrstudio_argv("generate", "submit", "--case", name, *root)
+        if op == "dry_run":
+            argv += ["--check"]
         for item in body.get("vars") or []:
             argv += ["--var", item]
         if body.get("resolution"):
@@ -806,18 +1016,26 @@ async def api_sources(request):
 
 
 async def api_browse(request):
-    """本地文件浏览器（指认 register 的返回件；单人本地工具，不设限）。"""
+    """本地文件浏览器（register 的返回件 / gen 素材多选；单人本地工具，不设限）。"""
     d = Path(request.query_params.get("path", str(config_mod.REPO_ROOT)))
     if not d.is_dir():
         return JSONResponse({"error": "not a directory"}, status_code=400)
     dirs = sorted(p for p in d.iterdir() if p.is_dir() and not p.name.startswith("."))
+    assets_mode = request.query_params.get("kinds") == "assets"
+    allowed = _VIDEO_EXTS | _IMAGE_EXTS if assets_mode else _VIDEO_EXTS
     files = sorted(p for p in d.iterdir()
-                   if p.is_file() and p.suffix.lower() in _VIDEO_EXTS)
+                   if p.is_file() and p.suffix.lower() in allowed)
+    if assets_mode:
+        rows = [{"path": str(p), "name": p.name,
+                 "kind": "video" if p.suffix.lower() in _VIDEO_EXTS else "image"}
+                for p in files[:200]]
+    else:
+        rows = [str(p) for p in files[:200]]
     return JSONResponse({
         "path": str(d),
         "parent": str(d.parent) if d.parent != d else None,
         "dirs": [p.name for p in dirs[:200]],
-        "files": [str(p) for p in files[:200]],
+        "files": rows,
     })
 
 
@@ -825,6 +1043,7 @@ routes = [
     Route("/", index),
     Route("/case/{name}", wizard),
     Route("/img/{name}/{file}", img),
+    Route("/img/asset/{name}/{file}", asset_img),
     Route("/video/source/{name}", video_source),
     Route("/video/out/{name}/{file}", video_out),
     Route("/api/cases", api_cases, methods=["GET", "POST"]),
@@ -832,7 +1051,9 @@ routes = [
     Route("/api/case/{name}/draft", api_draft, methods=["POST"]),
     Route("/api/case/{name}/prompt", api_prompt, methods=["POST"]),
     Route("/api/case/{name}/params", api_params, methods=["POST"]),
+    Route("/api/case/{name}/assets", api_assets, methods=["POST"]),
     Route("/api/sessions", api_sessions),
+    Route("/api/modes", api_modes),
     Route("/api/case/{name}/viewport", api_viewport, methods=["POST"]),
     Route("/api/case/{name}/inner", api_inner, methods=["POST"]),
     Route("/api/case/{name}/nudge", api_nudge, methods=["POST"]),

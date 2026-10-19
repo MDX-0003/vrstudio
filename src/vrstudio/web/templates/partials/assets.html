@@ -1,0 +1,20 @@
+<h3>素材</h3>
+<div class="meta">顺序决定提示词里的 @Video1、@Image1 编号；角色必须手动选择。
+  素材会复制进这个 case 的 assets/ 文件夹，之后不再依赖原文件路径。
+  格式、时长、像素与体积由生成服务在提交前检查，页面不提前判定。</div>
+<div class="row" style="align-items:center;margin:0.4rem 0">
+  <button class="big" onclick="openAssetBrowse()">添加视频或图片</button>
+  <span class="meta" id="assetHint"></span>
+</div>
+<div id="assetList"><span class="meta">还没有素材</span></div>
+<div class="files" id="files-assets"></div>
+
+<div id="assetBrowseBox">
+  <b>选择素材文件</b>
+  <button style="float:right" onclick="closeAssetBrowse()">×</button>
+  <div class="meta">可以多选；选好后为每个文件指定角色，再点“添加”。</div>
+  <div class="meta" id="abPath"></div>
+  <div id="abList" style="max-height:260px;overflow-y:auto"></div>
+  <div id="abSelected" style="margin-top:0.4rem"></div>
+  <button onclick="submitAssetAdd()">添加选中素材</button>
+</div>

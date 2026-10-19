@@ -1,0 +1,243 @@
+/** params.js —— 生成参数（模式/比例/输出与输入分辨率）与项目会话选择。
+ *
+ * 数据源是 info.generation_params（vrgen params show）与 /api/sessions。
+ * 模式与比例先保存；分辨率/缩放要等素材步骤完成后才有可计算的值。
+ */
+"use strict";
+
+function _modeMeta(gp, value) {
+  return ((gp && gp.modes) || []).find(m => m.value === value) || null;
+}
+
+function _currentGenParams() {
+  return ((info && info.generation_params) || {}).current || {};
+}
+
+function _fillAspect(mode, wanted) {
+  const sel = $("genAspect");
+  if (!sel) return "auto";
+  sel.innerHTML = "";
+  const ratios = (mode && mode.ratios) || [];
+  if (!ratios.length) {
+    sel.appendChild(new Option("跟随输入", "auto"));
+    sel.value = "auto";
+    return "auto";
+  }
+  for (const r of ratios) sel.appendChild(new Option(r, r));
+  const pick = ratios.includes(wanted) ? wanted
+    : (ratios.includes("16:9") ? "16:9" : ratios[0]);
+  sel.value = pick;
+  return pick;
+}
+
+function renderGenParams() {
+  const resSel = $("genResolution"), scaleSel = $("genScale");
+  const modeSel = $("genMode"), aspectSel = $("genAspect");
+  const hint = $("genParamsHint"), fixed = $("genFixed");
+  if (!resSel || !scaleSel || !modeSel || !aspectSel) return;
+  const gp = (info && info.generation_params) || {};
+  if (gp.error) {
+    for (const sel of [resSel, scaleSel, modeSel, aspectSel]) {
+      sel.innerHTML = "";
+      sel.disabled = true;
+    }
+    hint.style.display = "block";
+    hint.textContent = "生成参数暂时读不到：" + gp.error;
+    if (fixed) fixed.textContent = "";
+    return;
+  }
+  hint.style.display = "none";
+  for (const sel of [resSel, scaleSel, modeSel, aspectSel]) sel.disabled = false;
+  const cur = gp.current || {};
+  const modes = gp.modes || [];
+  modeSel.innerHTML = "";
+  const modeList = modes.length ? modes
+    : [{ value: cur.mode || "videoEdit", label: cur.mode || "videoEdit" }];
+  for (const m of modeList) {
+    modeSel.appendChild(new Option(m.label || m.value, m.value));
+  }
+  const mode = _modeMeta(gp, cur.mode) || modeList[0];
+  modeSel.value = mode.value;
+  _fillAspect(mode, cur.aspect_ratio);
+
+  const label = (o) => `${o.value}（${o.width}×${o.height}）`;
+  resSel.innerHTML = (gp.output || []).map(o =>
+    `<option value="${o.value}">${label(o)}</option>`).join("");
+  scaleSel.innerHTML = (gp.input || []).map(o =>
+    `<option value="${o.value}" title="${o.reason || ""}"` +
+    `${o.ok === false ? " disabled" : ""}>` +
+    `${label(o)}${o.ok === false ? "　超限" : ""}</option>`).join("");
+  // gen 还没有素材时两者都是空数组：保持空下拉，等素材补齐后重新计算。
+  const noAssets = !(gp.output || []).length || !(gp.input || []).length;
+  if (noAssets) {
+    resSel.disabled = true;
+    scaleSel.disabled = true;
+    hint.style.display = "block";
+    hint.textContent = "先添加至少 1 个视频素材，再计算输入/输出尺寸。";
+  } else {
+    if (cur.resolution) resSel.value = cur.resolution;
+    const wanted = [...scaleSel.options].find(o => o.value === cur.scale);
+    if (wanted && !wanted.disabled) scaleSel.value = cur.scale;
+    else scaleSel.value = ((gp.input || []).find(o => o.ok !== false) || {}).value || "auto";
+  }
+  const f = gp.fixed || {};
+  fixed.textContent =
+    `模型 ${f.model_id}（Seedance 2.5）· 时长 ${f.duration_s || "按输入自动"}s` +
+    ` · 数量 ${f.num}`;
+}
+
+function onModeChange() {
+  const gp = (info && info.generation_params) || {};
+  const mode = _modeMeta(gp, ($("genMode") || {}).value);
+  _fillAspect(mode, null);
+  saveGenParams();
+}
+
+function saveGenParams() {
+  const mode = ($("genMode") || {}).value || "";
+  const aspect = ($("genAspect") || {}).value || "";
+  const resolution = ($("genResolution") || {}).value || "";
+  const scale = ($("genScale") || {}).value || "";
+  if (!mode || !aspect) return;
+  const body = { mode, aspect_ratio: aspect };
+  if (resolution) body.resolution = resolution;
+  if (scale) body.scale = scale;
+  post("params", body);
+}
+
+// ── 生成额度：项目/剧集/生成会话（决策 22）────────────────────────────
+// 数据每次页面加载都从 /api/sessions 重新取；选择结果写 generation.toml。
+
+function _option(sel, value, label, title) {
+  const o = document.createElement("option");
+  o.value = String(value);
+  o.textContent = label;
+  if (title) o.title = title;
+  sel.appendChild(o);
+  return o;
+}
+
+function _project(id) {
+  return ((sessionTree && sessionTree.projects) || []).find(p => p.id === id);
+}
+
+function _episode(project, no) {
+  return ((project && project.episodes) || []).find(e => e.no === no);
+}
+
+function fillEpisodes(project, wantedEp) {
+  const sel = $("sessEpisode");
+  if (!sel) return 0;
+  sel.innerHTML = "";
+  const episodes = (project && project.episodes) || [];
+  if (!episodes.length) {
+    _option(sel, 0, "（这个项目还没有剧集）");
+    return 0;
+  }
+  for (const e of episodes) {
+    _option(sel, e.no, `第 ${e.no} 集 · ${e.name || "未命名"}`);
+  }
+  const hit = episodes.find(e => e.no === wantedEp);
+  const chosen = hit ? hit.no : episodes[0].no;
+  sel.value = String(chosen);
+  return chosen;
+}
+
+function fillSessions(project, episodeNo, wantedSession) {
+  const sel = $("sessSession");
+  if (!sel) return;
+  sel.innerHTML = "";
+  _option(sel, 0, "个人额度（不使用项目会话）");
+  const episode = _episode(project, episodeNo);
+  const sessions = (episode && episode.sessions) || [];
+  for (const s of sessions) {
+    _option(sel, s.id, `${s.name || "未命名"}（${s.id}）`);
+  }
+  if (wantedSession && !sessions.some(s => s.id === wantedSession)) {
+    _option(sel, wantedSession, `⚠ 已失效：${wantedSession}`);
+  }
+  sel.value = String(wantedSession || 0);
+}
+
+function renderSessions() {
+  const projectSel = $("sessProject");
+  if (!projectSel) return;
+  const cur = _currentGenParams();
+  let pid = cur.project_id || 0;
+  let ep = cur.episode || 0;
+  const sid = cur.session_id || 0;
+  const projects = (sessionTree && sessionTree.projects) || [];
+
+  // 旧文件只有 session_id：在树里反查它属于哪个项目与剧集。
+  if ((!pid || !ep) && sid) {
+    for (const p of projects) {
+      for (const e of (p.episodes || [])) {
+        if ((e.sessions || []).some(s => s.id === sid)) { pid = p.id; ep = e.no; }
+      }
+    }
+  }
+
+  projectSel.innerHTML = "";
+  if (!projects.length) {
+    _option(projectSel, 0, "（没有可用的项目）");
+  } else {
+    for (const p of projects) _option(projectSel, p.id, p.name || `项目 ${p.id}`);
+    if (!projects.some(p => p.id === pid)) pid = projects[0].id;
+    projectSel.value = String(pid);
+  }
+  const project = _project(pid);
+  ep = fillEpisodes(project, ep);
+  fillSessions(project, ep, sid);
+}
+
+async function loadSessions() {
+  const hint = $("sessionHint");
+  if (!hint) return;
+  hint.className = "meta";
+  hint.textContent = "正在获取项目与会话…";
+  try {
+    const r = await fetch("/api/sessions");
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || r.statusText);
+    sessionTree = d;
+    renderSessions();
+    hint.textContent = `已获取 ${(d.projects || []).length} 个项目 · ${d.fetched_at || ""}`;
+  } catch (e) {
+    renderSessions();
+    hint.className = "meta bad";
+    hint.textContent = "会话列表获取失败：" + (e.message || e);
+  }
+}
+
+function onProjectChange() {
+  const project = _project(+$("sessProject").value || 0);
+  const ep = fillEpisodes(project, 0);
+  fillSessions(project, ep, 0);
+  $("sessionHint").className = "meta";
+  $("sessionHint").textContent = "选好生成会话后自动保存";
+}
+
+function onEpisodeChange() {
+  const project = _project(+$("sessProject").value || 0);
+  fillSessions(project, +$("sessEpisode").value || 0, 0);
+  $("sessionHint").className = "meta";
+  $("sessionHint").textContent = "选好生成会话后自动保存";
+}
+
+async function onSessionChange() {
+  const pid = +$("sessProject").value || 0;
+  const ep = +$("sessEpisode").value || 0;
+  const sid = +$("sessSession").value || 0;
+  const resolution = ($("genResolution") || {}).value || "";
+  const scale = ($("genScale") || {}).value || "";
+  const hint = $("sessionHint");
+  const body = { session_id: sid, project_id: sid ? pid : 0, episode: sid ? ep : 0 };
+  if (resolution) body.resolution = resolution;
+  if (scale) body.scale = scale;
+  const d = await post("params", body);
+  if (!d) return;
+  hint.className = "meta " + (sid ? "ok" : "");
+  hint.textContent = sid
+    ? `已保存项目会话 ${sid}；下次提交扣项目额度`
+    : "已切换为个人额度";
+}
