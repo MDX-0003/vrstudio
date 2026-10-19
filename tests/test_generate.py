@@ -124,7 +124,8 @@ def test_submit_dry_run_gen_writes_refs_and_omits_input(tmp_path, src_video, mon
     assert r.exit_code == 0, r.output
     lines = [line.strip() for line in r.output.splitlines()]
     assert "--template" in lines and "gen-multi" in lines
-    assert "--aspect-ratio" in lines and "auto" in lines
+    # 未显式给比例时不再补 auto：让 generation.toml 的 16:9/21:9 生效
+    assert "--aspect-ratio" not in lines
     assert "1920x1052" in lines
     assert "--input" not in lines and "--refs" in lines
     refs_path = Path(lines[lines.index("--refs") + 1])
@@ -132,6 +133,17 @@ def test_submit_dry_run_gen_writes_refs_and_omits_input(tmp_path, src_video, mon
     assert data["assets"][0]["id"] == "v1"
     assert data["assets"][0]["role"] == "edit_master"
     assert data["assets"][0]["path"].endswith(".mp4")
+
+
+def test_submit_dry_run_gen_passes_explicit_aspect(tmp_path, src_video, monkeypatch):
+    case_mod.create("g1", "gen", src_video, root=tmp_path)
+    monkeypatch.setattr(gen, "probe", lambda path: _gen_info())
+    r = runner.invoke(gen.app, ["submit", "--case", "g1", "--dry-run",
+                                "--aspect-ratio", "16:9",
+                                "--cases-dir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    lines = [line.strip() for line in r.output.splitlines()]
+    assert "--aspect-ratio" in lines and "16:9" in lines
 
 
 # ── submit --dry-run ─────────────────────────────────────────────────────

@@ -233,9 +233,8 @@ def submit(
         argv += ["--num", str(num)]
     if aspect_ratio is not None:
         argv += ["--aspect-ratio", aspect_ratio]
-    elif case.flow == "gen":
-        # videoEdit 的输出比例跟随输入，页面不提供比例下拉；auto 让 vrgen 不传该 flag。
-        argv += ["--aspect-ratio", "auto"]
+    # gen 未显式给比例时不再补 auto：generation.toml 是唯一权威，videoEdit 的
+    # auto 由 vrgen 在无比例列表的模式里自行兜底。网页仍会把下拉框的值显式传下来。
     if scale is not None:
         argv += ["--scale", scale]
     if session_id is not None:
