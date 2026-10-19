@@ -28,7 +28,7 @@ from starlette.staticfiles import StaticFiles
 from .. import case as case_mod
 from .. import config as config_mod
 from ..case import CaseError
-from ..cli.generate import TEMPLATE_BY_FLOW
+from ..cli.generate import TEMPLATE_BY_FLOW, GenError, resolve_package
 from ..redraw.manifest import Manifest
 from .render import PreviewStore
 from .tasks import QUEUE, vrstudio_argv
@@ -195,6 +195,21 @@ def _prompt(name: str, flow: str) -> dict:
     """提示词模板 + 变量草稿（决策 18；契约 case-model.md §4）。"""
     return _vrgen_json(["prompt", "show", "--job", name,
                         "--template", TEMPLATE_BY_FLOW[flow],
+                        "--workdir", str(_workdir())])
+
+
+def _generation_params(name: str) -> dict:
+    """生成页的输出/输入分辨率选项（决策 20；契约 case-model.md §4）。"""
+    try:
+        case = case_mod.load(name, _ctx["cases_root"])
+        video, _mask, _template, canvas, source = resolve_package(
+            case, _ctx["cases_root"])
+    except (CaseError, GenError, KeyError, ValueError, OSError) as e:
+        return {"error": str(e)}
+    return _vrgen_json(["params", "show", "--job", name,
+                        "--input", str(video),
+                        "--canvas", f"{canvas[0]}x{canvas[1]}",
+                        "--source", f"{source[0]}x{source[1]}",
                         "--workdir", str(_workdir())])
 
 
@@ -533,8 +548,10 @@ async def api_case(request):
     info = await asyncio.to_thread(_case_info, name)
     if info is None:
         return JSONResponse({"error": "no such case"}, status_code=404)
-    # prompt 只挂在这一个读端点上：draft/nudge 等高频路径不多 spawn 一个子进程
+    # prompt / 生成参数只挂在这一个读端点上：draft/nudge 等高频路径不多 spawn
+    # 两个子进程
     info["prompt"] = await asyncio.to_thread(_prompt, name, info["flow"])
+    info["generation_params"] = await asyncio.to_thread(_generation_params, name)
     return JSONResponse(info)
 
 
@@ -560,6 +577,30 @@ async def api_prompt(request):
         return JSONResponse(payload, status_code=400)
     info = await asyncio.to_thread(_case_info, name)
     info["prompt"] = payload          # save 的回显就是保存后的状态，不再多问一次
+    return JSONResponse(info)
+
+
+async def api_params(request):
+    """生成参数的保存（决策 20：输出档位 + 输入缩放，写 vrgen generation.toml）。"""
+    name = request.path_params["name"]
+    try:
+        case = case_mod.load(name, _ctx["cases_root"])
+    except CaseError:
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    body = await request.json()
+    resolution = str(body.get("resolution") or "")
+    scale = str(body.get("scale") or "")
+    if not resolution or not scale:
+        return JSONResponse({"error": "resolution 和 scale 都要给"}, status_code=400)
+    payload = await asyncio.to_thread(_vrgen_json, [
+        "params", "save", "--job", name,
+        "--resolution", resolution, "--scale", scale,
+        "--workdir", str(_workdir())])
+    if "error" in payload:
+        return JSONResponse(payload, status_code=400)
+    info = await asyncio.to_thread(_case_info, name)
+    info["prompt"] = await asyncio.to_thread(_prompt, name, case.flow)
+    info["generation_params"] = await asyncio.to_thread(_generation_params, name)
     return JSONResponse(info)
 
 
@@ -674,6 +715,10 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
         argv = vrstudio_argv("generate", "submit", "--case", name, *root)
         for item in body.get("vars") or []:
             argv += ["--var", item]
+        if body.get("resolution"):
+            argv += ["--resolution", str(body["resolution"])]
+        if body.get("scale"):
+            argv += ["--scale", str(body["scale"])]
         return argv
     if op == "adopt":
         argv = vrstudio_argv("generate", "adopt", "--case", name, *root)
@@ -745,6 +790,7 @@ routes = [
     Route("/api/case/{name}", api_case),
     Route("/api/case/{name}/draft", api_draft, methods=["POST"]),
     Route("/api/case/{name}/prompt", api_prompt, methods=["POST"]),
+    Route("/api/case/{name}/params", api_params, methods=["POST"]),
     Route("/api/case/{name}/viewport", api_viewport, methods=["POST"]),
     Route("/api/case/{name}/inner", api_inner, methods=["POST"]),
     Route("/api/case/{name}/nudge", api_nudge, methods=["POST"]),

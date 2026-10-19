@@ -144,6 +144,20 @@ def submit(
     case_name: str = typer.Option(..., "--case", help="case 名（= vrgen job 名）。"),
     variables: list[str] = typer.Option(None, "--var",
                                         help="提示词变量 k=v，透传给 vrgen submit --set。"),
+    model_id: int = typer.Option(None, "--model-id",
+                                 help="透传 vrgen submit --model-id（← mglc --model-id）。"),
+    mode: str = typer.Option(None, "--mode",
+                             help="透传 vrgen submit --mode（← mglc --type）。"),
+    resolution: str = typer.Option(None, "--resolution",
+                                   help="输出档位 480p|720p|1080p（← mglc --resolution）。"),
+    duration: int = typer.Option(None, "--duration",
+                                 help="整数秒（← mglc --duration；默认按输入自动）。"),
+    num: int = typer.Option(None, "--num",
+                            help="生成数量 1..4（← mglc --num；当前只取第一个结果）。"),
+    aspect_ratio: str = typer.Option(None, "--aspect-ratio",
+                                      help="输出比例（← mglc --aspect-ratio）。"),
+    scale: str = typer.Option(None, "--scale",
+                              help="上传缩放 auto|full|half（vrgen 自有，无 mglc 对应）。"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只打印 argv，不真调 vrgen。"),
     cases_dir: Path = typer.Option(None, "--cases-dir"),
     overrides: list[str] = typer.Option(None, "--set", help="config 覆盖。"),
@@ -163,6 +177,20 @@ def submit(
         argv += ["--mask", str(mask)]
     for item in variables or []:
         argv += ["--set", item]
+    if model_id is not None:
+        argv += ["--model-id", str(model_id)]
+    if mode is not None:
+        argv += ["--mode", mode]
+    if resolution is not None:
+        argv += ["--resolution", resolution]
+    if duration is not None:
+        argv += ["--duration", str(duration)]
+    if num is not None:
+        argv += ["--num", str(num)]
+    if aspect_ratio is not None:
+        argv += ["--aspect-ratio", aspect_ratio]
+    if scale is not None:
+        argv += ["--scale", scale]
     argv += ["--workdir", str(_workdir(conf))]
     if dry_run:
         typer.echo("dry-run：将发出")

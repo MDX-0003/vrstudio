@@ -60,6 +60,7 @@ async function loadInfo() {
   renderGenerate();
   renderPrompt();
   renderFinish();
+  renderGenParams();
   renderStepFiles();
   renderCompare();
 }
@@ -211,7 +212,11 @@ function renderGenerate() {
 async function runSubmit() {
   // 变量值以「提示词」区保存的草稿为准（vrgen submit 自己读 prompt-vars.toml），
   // 这里不再传临时 --set，避免出现两份说不清谁生效的值。
-  await run("submit", {});
+  // 分辨率同时显式传给本次 submit：页面显示什么就用什么，不依赖保存请求的时序。
+  await run("submit", {
+    resolution: ($("genResolution") || {}).value || "",
+    scale: ($("genScale") || {}).value || "",
+  });
 }
 
 // ── merge / pad / recompose ─────────────────────────────────────────────
@@ -230,7 +235,49 @@ function renderFinish() {
   }
 }
 
-// ── 每步的输入/输出文件（服务端已按 flow 分流，前端只渲染）──────────────
+// ── 生成参数（输出分辨率 / 输入分辨率，决策 20）────────────────────────
+
+function renderGenParams() {
+  const resSel = $("genResolution"), scaleSel = $("genScale");
+  const hint = $("genParamsHint"), fixed = $("genFixed");
+  if (!resSel || !scaleSel) return;
+  const gp = (info && info.generation_params) || {};
+  if (gp.error) {
+    resSel.innerHTML = "";
+    scaleSel.innerHTML = "";
+    resSel.disabled = scaleSel.disabled = true;
+    hint.style.display = "block";
+    hint.textContent = "生成参数暂时读不到：" + gp.error;
+    if (fixed) fixed.textContent = "";
+    return;
+  }
+  hint.style.display = "none";
+  resSel.disabled = scaleSel.disabled = false;
+  const label = (o) => `${o.value}（${o.width}×${o.height}）`;
+  resSel.innerHTML = (gp.output || []).map(o =>
+    `<option value="${o.value}">${label(o)}</option>`).join("");
+  scaleSel.innerHTML = (gp.input || []).map(o =>
+    `<option value="${o.value}" title="${o.reason || ""}"` +
+    `${o.ok === false ? " disabled" : ""}>` +
+    `${label(o)}${o.ok === false ? "　超限" : ""}</option>`).join("");
+  const cur = gp.current || {};
+  if (cur.resolution) resSel.value = cur.resolution;
+  // 已保存的 full 可能被平台限额判为不可用：退回第一个可用档，不静默留在超限值。
+  const wanted = [...scaleSel.options].find(o => o.value === cur.scale);
+  if (wanted && !wanted.disabled) scaleSel.value = cur.scale;
+  else scaleSel.value = ((gp.input || []).find(o => o.ok !== false) || {}).value || "auto";
+  const f = gp.fixed || {};
+  fixed.textContent =
+    `模型 ${f.model_id}（Seedance 2.5）· 模式 ${f.mode} · 比例 ${f.aspect_ratio}` +
+    ` · 时长 ${f.duration_s}s（按输入自动）· 数量 ${f.num}`;
+}
+
+function saveGenParams() {
+  const resolution = ($("genResolution") || {}).value || "";
+  const scale = ($("genScale") || {}).value || "";
+  if (!resolution || !scale) return;
+  post("params", { resolution, scale });
+}
 
 function _fmtBytes(n) {
   if (n == null) return "";
@@ -531,9 +578,14 @@ async function post(path, body) {
   if (r.status === 404) { location.href = "/"; return null; }
   const d = await r.json();
   if (!r.ok) { alert(d.error || r.statusText); return null; }
+  const prev = info;
   info = d;                                   // 这些端点都回新 info
+  // draft/nudge 等高频端点不回 prompt / 生成参数；保留上一份，避免面板被清空。
+  if (!info.generation_params && prev && prev.generation_params)
+    info.generation_params = prev.generation_params;
+  if (!info.prompt && prev && prev.prompt) info.prompt = prev.prompt;
   renderSteps(); renderPick(); renderExtract(); renderGenerate(); renderFinish();
-  renderStepFiles(); renderCompare();
+  renderGenParams(); renderStepFiles(); renderCompare();
   return d;
 }
 

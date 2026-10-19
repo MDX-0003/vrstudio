@@ -47,7 +47,8 @@ def _mk_extract(case: str, tmp_path, version: str, with_result: bool = False):
     d = case_mod.case_dir(case, tmp_path) / "extracts" / version
     d.mkdir(parents=True)
     (d / "clip.json").write_text(json.dumps(
-        {"segments": [{"viewport": VIEWPORT, "inner": INNER}]}, ensure_ascii=False),
+        {"segments": [{"id": "s0", "frame_start": 0, "frame_end": 5,
+                       "viewport": VIEWPORT, "inner": INNER}]}, ensure_ascii=False),
         encoding="utf-8")
     if with_result:
         (d / "result.mp4").write_bytes(b"r")
@@ -198,6 +199,18 @@ def test_run_submits_to_queue(client, patch_case, monkeypatch):
     assert "--case" in argv and "p1" in argv
 
 
+def test_run_submit_passes_generation_params(client, patch_case, monkeypatch):
+    submitted = []
+    monkeypatch.setattr(web_app.QUEUE, "submit",
+                        lambda kind, case, argv: submitted.append((kind, case, argv)))
+    r = client.post("/api/case/p1/run",
+                    json={"op": "submit", "resolution": "720p", "scale": "auto"})
+    assert r.status_code == 200 and r.json()["submitted"] == "submit"
+    argv = submitted[0][2]
+    assert "--resolution" in argv and "720p" in argv
+    assert "--scale" in argv and "auto" in argv
+
+
 def test_gates_progress_with_extract_and_result(client, patch_case, tmp_path):
     _mk_extract("p1", tmp_path, "v1", with_result=True)
     case_mod.set_extract_current("p1", "v1", root=tmp_path)
@@ -215,6 +228,64 @@ def test_gates_progress_with_extract_and_result(client, patch_case, tmp_path):
 def test_case_info_prompt_survives_missing_vrgen(client, patch_case):
     info = client.get("/api/case/p1").json()
     assert "error" in info["prompt"]          # vrgen 缺席 → 提示文案，不是 500
+
+
+def test_case_info_generation_params_survive_missing_vrgen(client, patch_case):
+    info = client.get("/api/case/p1").json()
+    assert "error" in info["generation_params"]
+
+
+def test_params_save_calls_vrgen_and_returns_full_info(client, fullredraw_case,
+                                                       monkeypatch):
+    calls = []
+    shown = {
+        "output": [{"value": "720p", "width": 1470, "height": 630}],
+        "input": [{"value": "auto", "width": 4400, "height": 1884,
+                   "ok": True, "reason": ""}],
+        "current": {"resolution": "720p", "scale": "auto"},
+        "fixed": {"model_id": 37, "mode": "videoEdit", "aspect_ratio": "21:9",
+                  "duration_s": 8, "num": 1},
+        "saved": True,
+    }
+
+    def fake(argv):
+        calls.append(argv)
+        if argv[:2] == ["params", "save"]:
+            return {"resolution": argv[argv.index("--resolution") + 1],
+                    "scale": argv[argv.index("--scale") + 1]}
+        if argv[:2] == ["params", "show"]:
+            return shown
+        return {"template": None, "available": [], "template_text": None,
+                "placeholders": [], "geometry_keys": [], "vars": {}}
+
+    monkeypatch.setattr(web_app, "_vrgen_json", fake)
+    r = client.post("/api/case/f1/params", json={"resolution": "720p", "scale": "auto"})
+    assert r.status_code == 200, r.text
+    assert any(c[:2] == ["params", "save"] for c in calls)
+    assert r.json()["generation_params"] == shown
+    assert r.json()["generation_params"]["current"]["resolution"] == "720p"
+
+
+def test_case_info_exposes_generation_params(client, fullredraw_case, monkeypatch):
+    shown = {
+        "output": [{"value": "480p", "width": 992, "height": 432},
+                   {"value": "720p", "width": 1470, "height": 630},
+                   {"value": "1080p", "width": 2206, "height": 946}],
+        "input": [{"value": "auto", "width": 4400, "height": 1884,
+                   "ok": True, "reason": ""},
+                  {"value": "full", "width": 4668, "height": 2000,
+                   "ok": False, "reason": "over cap"},
+                  {"value": "half", "width": 2334, "height": 1000,
+                   "ok": True, "reason": ""}],
+        "current": {"resolution": "720p", "scale": "auto"},
+        "fixed": {"model_id": 37, "mode": "videoEdit", "aspect_ratio": "21:9",
+                  "duration_s": 8, "num": 1},
+        "saved": True,
+    }
+    monkeypatch.setattr(web_app, "_vrgen_json", lambda argv: shown if argv[:2] ==
+                        ["params", "show"] else {"template": None})
+    info = client.get("/api/case/f1").json()
+    assert info["generation_params"] == shown
 
 
 def test_case_info_ok_for_fresh_fullredraw(client, tmp_path):

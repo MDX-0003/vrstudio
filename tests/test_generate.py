@@ -117,6 +117,20 @@ def test_submit_passes_exit_code_through(tmp_path, src_video, monkeypatch):
     assert r.exit_code == 2               # vrgen 的 stub 退出码原样透传
 
 
+def test_submit_dry_run_passes_generation_params(tmp_path, src_video, monkeypatch):
+    _fullredraw_case(tmp_path, src_video)
+    monkeypatch.setattr(gen, "_stream", lambda argv: 0)
+    r = runner.invoke(gen.app, [
+        "submit", "--case", "e2e", "--dry-run",
+        "--resolution", "720p", "--scale", "half",
+        "--cases-dir", str(tmp_path),
+    ])
+    assert r.exit_code == 0, r.output
+    lines = [line.strip() for line in r.output.splitlines()]
+    assert "--resolution" in lines and "720p" in lines
+    assert "--scale" in lines and "half" in lines
+
+
 # ── adopt ────────────────────────────────────────────────────────────────
 
 

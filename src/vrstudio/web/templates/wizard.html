@@ -145,6 +145,17 @@
       <div class="meta">从电脑里挑一个已经在别处生成好的视频文件，交给后面的步骤用</div>
     </div>
   </div>
+  <h3>生成参数</h3>
+  <div class="row" style="align-items:center">
+    <label class="meta">输出分辨率
+      <select id="genResolution" onchange="saveGenParams()"></select>
+    </label>
+    <label class="meta">输入分辨率
+      <select id="genScale" onchange="saveGenParams()"></select>
+    </label>
+  </div>
+  <div class="meta" id="genFixed"></div>
+  <div class="meta bad" id="genParamsHint" style="display:none"></div>
   <div class="files" id="files-generate"></div>
   <h3>提示词（这次发给 Seedance 的完整内容）</h3>
   <div class="meta">下面的模板正文是固定不动的部分，照原样发出去；「风格」段落里的变量
