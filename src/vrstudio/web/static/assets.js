@@ -35,8 +35,11 @@ function _defaultSelection() {
   if (info && info.submit_selected != null) return new Set(info.submit_selected);
   const mode = _currentMode();
   if (mode === "firstLastFrame") {
-    return new Set(assets.filter(a => ["first_frame", "last_frame"].includes(a.role))
-      .map(a => a.id));
+    const firsts = assets.filter(a => a.role === "first_frame");
+    const lasts = assets.filter(a => a.role === "last_frame");
+    return firsts.length === 1 && lasts.length === 1
+      ? new Set([firsts[0].id, lasts[0].id])
+      : new Set();
   }
   if (mode === "videoEdit" || mode === "videoExtend") {
     return new Set(assets.filter(a =>

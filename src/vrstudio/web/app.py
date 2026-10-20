@@ -1402,7 +1402,10 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
             argv += ["--round", body["round"]]
         return argv
     if op == "merge":
-        return vrstudio_argv("merge", "--case", name, "-q", *root)
+        argv = vrstudio_argv("merge", "--case", name, "-q", *root)
+        if body.get("allow_crop"):
+            argv += ["--allow-crop"]
+        return argv
     if op == "recompose":
         manifests = sorted(cdir.glob("*_pad.json"))
         if not manifests:
