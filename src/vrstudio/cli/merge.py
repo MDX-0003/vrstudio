@@ -21,7 +21,7 @@ import typer
 
 from ..patch.sidecar import InnerRect
 from ..patch.case import load_sidecar_single_segment
-from ..patch.composite import SegmentMaps
+from ..patch.composite import SegmentMaps, normalize_ai_frame
 from ..patch.framealign import index_map, short_by
 from ..media.ffmpeg import FfmpegSink, ffmpeg_path, has_audio
 from ..progress import PhaseLog as Log, PhaseRateMeter as RateMeter, format_duration, open_log_file
@@ -70,7 +70,8 @@ class AiFrameSource:
     geometry before handing it out -- undoing the AI tool's global scale/shift.
     """
 
-    def __init__(self, path, target_size, dst_fps, n, log, correction=None):
+    def __init__(self, path, target_size, dst_fps, n, log, correction=None,
+                 allow_crop=False):
         self.path = path
         self.target_size = target_size
         self.cap = cv2.VideoCapture(path)
@@ -88,11 +89,23 @@ class AiFrameSource:
         self._scaled_i = -1
         self.short = short_by(n, self.src_n)
         self.correction = None if correction is None else np.float32(correction)
+        self.allow_crop = bool(allow_crop)
+
+        src_aspect = self.src_size[0] / self.src_size[1] if self.src_size[1] else 0.0
+        target_aspect = target_size[0] / target_size[1] if target_size[1] else 0.0
+        mismatch = abs(src_aspect - target_aspect) > target_aspect * 0.001
+        if mismatch and not self.allow_crop:
+            raise typer.Exit(
+                f"AI clip is {self.src_size[0]}x{self.src_size[1]} "
+                f"(aspect {src_aspect:.4f}) but the viewport is "
+                f"{target_size[0]}x{target_size[1]} (aspect {target_aspect:.4f}); "
+                f"pass --allow-crop to centre-crop the AI clip")
 
         log.info(f"ai clip : {self.src_n} frames, {self.src_size[0]}x"
                  f"{self.src_size[1]} @ {self.src_fps:.2f}fps -> resample to "
-                 f"{n} frames @ {dst_fps:.2f}fps, resize to "
-                 f"{target_size[0]}x{target_size[1]}"
+                 f"{n} frames @ {dst_fps:.2f}fps, "
+                 + ("centre-crop then resize to " if mismatch else "resize to ")
+                 + f"{target_size[0]}x{target_size[1]}"
                  + (", scale-fit correction applied" if self.correction is not None else ""))
 
     def frame(self, i):
@@ -106,8 +119,8 @@ class AiFrameSource:
         if self._raw is None:
             raise typer.Exit(f"AI clip {self.path!r} yielded no decodable frames")
         if self._scaled_i != self._raw_i:
-            self._scaled = cv2.resize(self._raw, self.target_size,
-                                      interpolation=cv2.INTER_AREA)
+            self._scaled = normalize_ai_frame(
+                self._raw, self.target_size, allow_crop=self.allow_crop)
             self._scaled_i = self._raw_i
         if self.correction is not None:
             # warp fresh off the resize cache: frame() may be called twice for
@@ -150,6 +163,10 @@ def merge(
                                                 "resampler even when it misses "
                                                 "the segment contract "
                                                 "(pre-restore behavior)"),
+    allow_crop: bool = typer.Option(
+        False, "--allow-crop",
+        help="允许比例不一致的 AI 成片按 cover 缩放后中心裁切；默认报错，"
+             "firstLastFrame 正常路径不需要"),
     progress_every: int = typer.Option(0),
     quiet: bool = typer.Option(False, "-q"),
 ):
@@ -241,7 +258,7 @@ def merge(
         if fit.applied:
             correction = fit.matrix32()
     ai_src = AiFrameSource(use_ai, (vp.width, vp.height), sidecar_fps, n_seg,
-                           log, correction=correction)
+                           log, correction=correction, allow_crop=allow_crop)
     if ai_src.short:
         log.info(f"WARNING: AI clip is {ai_src.short} frames short; the last "
                  f"decodable frame is reused to fill the gap.")
@@ -305,6 +322,7 @@ def merge(
             "output": str(output), "frames_written": written,
             "frames_expected": n, "encoder": "ffmpeg/libx264",
             "crf": crf, "preset": preset, "feather": feather, "levels": levels,
+            "allow_crop": bool(allow_crop),
             "inner": [seg.inner.x, seg.inner.y, seg.inner.width, seg.inner.height],
             "warnings": (["ai clip short by %d" % ai_src.short] if ai_src.short else []),
             "elapsed_s": round(time.time() - t_start, 1),

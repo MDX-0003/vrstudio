@@ -68,23 +68,50 @@ class SegmentMaps:
         return out
 
 
-def align_ai_clip(ai_frames, target_size, src_fps, dst_fps, n):
+def normalize_ai_frame(frame, target_size, allow_crop: bool = False):
+    """Resize one AI frame to ``target_size`` without silently stretching it.
+
+    Same aspect: uniform scale (identity when the sizes already match). Different
+    aspect: refuse by default; ``allow_crop`` explicitly opts into a cover-scale
+    followed by a centre crop. The 0.1% tolerance is about one pixel of rounding
+    at 1080p.
+    """
+    target_w, target_h = int(target_size[0]), int(target_size[1])
+    src_h, src_w = int(frame.shape[0]), int(frame.shape[1])
+    if (src_w, src_h) == (target_w, target_h):
+        return frame
+    src_aspect = src_w / src_h if src_h else 0.0
+    target_aspect = target_w / target_h if target_h else 0.0
+    mismatch = abs(src_aspect - target_aspect) > target_aspect * 0.001
+    if not mismatch:
+        return cv2.resize(frame, (target_w, target_h),
+                          interpolation=cv2.INTER_AREA)
+    if not allow_crop:
+        raise ValueError(
+            f"AI frame is {src_w}x{src_h} (aspect {src_aspect:.4f}) but the "
+            f"viewport is {target_w}x{target_h} (aspect {target_aspect:.4f}); "
+            f"enable --allow-crop to centre-crop the AI frame")
+    scale = max(target_w / src_w, target_h / src_h)
+    new_w, new_h = max(target_w, int(round(src_w * scale))), max(target_h, int(round(src_h * scale)))
+    resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    x0 = max(0, (new_w - target_w) // 2)
+    y0 = max(0, (new_h - target_h) // 2)
+    return resized[y0:y0 + target_h, x0:x0 + target_w]
+
+
+def align_ai_clip(ai_frames, target_size, src_fps, dst_fps, n, allow_crop=False):
     """Resize and time-resample an AI clip to exactly `n` frames of `target_size`.
 
     External AI tools routinely disagree with the sidecar on resolution, fps and
     frame count (Viggle returns 25fps, VACE 16fps, and so on), so this is where
     that mismatch is absorbed. The resampling rule itself lives in
     :mod:`vrstudio.patch.framealign` (R1).
-
-    A clip that comes back short is filled by repeating its last frame — the
-    index clamp below does that — rather than refusing to run, because the
-    caller cannot control what the external tool produced.
     """
     ai_frames = np.asarray(ai_frames)
     src_n = len(ai_frames)
     if src_n == 0:
         raise ValueError("ai clip has no frames to align")
-    resized = np.stack([cv2.resize(f, target_size, interpolation=cv2.INTER_AREA)
+    resized = np.stack([normalize_ai_frame(f, target_size, allow_crop=allow_crop)
                         for f in ai_frames])
     if src_n == n:
         return resized
