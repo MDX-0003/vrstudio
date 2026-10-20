@@ -1,13 +1,23 @@
-<h3>素材</h3>
-<div class="meta">顺序决定提示词里的 @Video1、@Image1 编号；角色必须手动选择。
-  素材会复制进这个 case 的 assets/ 文件夹，之后不再依赖原文件路径。
-  格式、时长、像素与体积由生成服务在提交前检查，页面不提前判定。</div>
-<div class="row" style="align-items:center;margin:0.4rem 0">
-  <button class="big" onclick="openAssetBrowse()">添加视频或图片</button>
-  <span class="meta" id="assetHint"></span>
-</div>
-<div id="assetList"><span class="meta">还没有素材</span></div>
-<div class="files" id="files-assets"></div>
+<details id="assetSidebar" open>
+  <summary>素材与本次提交集</summary>
+  <div class="meta">勾选的素材参与本次提交；提示词里的 @VideoN / @ImageN 会按勾选结果重新编号。
+    流程产物（源视频、clip、pad 画布）是只读派生条目，不复制、不进素材列表。</div>
+
+  <div class="fstage">流程产物（派生 · 只读）</div>
+  <div id="derivedList"><span class="meta">（还没有流程产物）</span></div>
+
+  <div class="fstage">文件素材</div>
+  <div id="assetList"><span class="meta">还没有素材</span></div>
+  <div class="row" style="align-items:center;margin:0.4rem 0" id="assetAddRow">
+    <button class="big" onclick="openAssetBrowse()">添加视频或图片</button>
+    <span class="meta" id="assetHint"></span>
+  </div>
+  <div class="row" style="align-items:center;margin:0.3rem 0" id="assetExtractRow">
+    <button onclick="extractFrames()">从当前 clip 抽首尾原始帧</button>
+    <span class="meta">按 clip 原始分辨率导出，不缩放；抽出的帧可用于工作台输入。</span>
+  </div>
+  <div class="meta" id="submitHint"></div>
+</details>
 
 <div id="assetBrowseBox">
   <b>选择素材文件</b>

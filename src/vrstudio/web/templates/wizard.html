@@ -97,6 +97,23 @@
   .abitem:hover { background: #f6f1e7; }
   .abitem .kind { font-size: 0.7rem; color: #8a7c66; }
   .absel { display: flex; gap: 0.4rem; align-items: center; padding: 0.15rem 0; }
+  /* 素材侧边栏与关键帧工作台 */
+  #assetSidebar, #keyframeWorkbench { background: #fffdf8; border: 1px solid #e7ddcc;
+    border-radius: 8px; padding: 0.6rem 0.8rem; margin-bottom: 0.8rem; }
+  #assetSidebar > summary, #keyframeWorkbench > summary { cursor: pointer; font-weight: 600;
+    color: #5a4a30; font-size: 0.9rem; }
+  #derivedList { display: flex; flex-direction: column; gap: 0.15rem; margin: 0.3rem 0; }
+  .derivedRow { display: flex; gap: 0.6rem; font-size: 0.76rem; color: #6b5d48;
+    border-bottom: 1px dashed #ece4d4; padding: 0.12rem 0; }
+  .derivedRow b { color: #5a4a30; min-width: 90px; }
+  .assetCard input[type="checkbox"] { margin: 0 0.2rem; }
+  .kfGrid { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 0.5rem; }
+  .kfCard { border: 1px solid #e7ddcc; border-radius: 6px; padding: 0.35rem;
+    background: #fff; width: 180px; }
+  .kfCard img { width: 100%; height: 100px; object-fit: cover; }
+  .kfCard button { margin: 0.15rem 0.1rem 0 0; }
+  #kfAssets label { display: inline-flex; gap: 0.25rem; align-items: center;
+    margin: 0.15rem 0.6rem 0.15rem 0; }
 </style>
 </head>
 <body data-name="{{ name }}" data-flow="{{ flow }}">
@@ -151,14 +168,7 @@
   <div id="verList"></div>
 </div>
 
-<!-- ── gen：素材 ───────────────────────────────────────────────────── -->
-{% if flow == "gen" %}
-<div class="panel" id="pnl-assets">
-  {% include "partials/assets.html" %}
-</div>
-{% endif %}
-
-<!-- ── 生成（三条流程共用）─────────────────────────────────────────── -->
+<!-- ── 生成（三条流程共用；素材侧边栏与工作台在 partials/generate.html）── -->
 <div class="panel" id="pnl-generate">
   {% include "partials/generate.html" %}
 </div>
@@ -225,11 +235,12 @@
 
 <script src="/static/pick.js?v=4"></script>
 <script src="/static/erp360.js?v=5"></script>
-<script src="/static/common.js?v=1"></script>
-<script src="/static/assets.js?v=1"></script>
-<script src="/static/params.js?v=1"></script>
+<script src="/static/common.js?v=2"></script>
+<script src="/static/assets.js?v=2"></script>
+<script src="/static/params.js?v=2"></script>
 <script src="/static/prompt.js?v=1"></script>
+<script src="/static/keyframe.js?v=1"></script>
 <script src="/static/tasks.js?v=1"></script>
-<script src="/static/wizard.js?v=5"></script>
+<script src="/static/wizard.js?v=6"></script>
 </body>
 </html>

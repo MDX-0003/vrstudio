@@ -798,3 +798,23 @@ def test_keyframe_pick_rejects_mismatched_pair(client, tmp_path, monkeypatch):
                     json={"round": "img-abc12345", "index": 1, "role": "last_frame"})
     assert r.status_code == 400
     assert "宽高不一致" in r.json()["error"]
+
+
+def test_gen_page_has_sidebar_workbench_and_duration(client, gen_case):
+    text = client.get("/case/g1").text
+    assert "素材与本次提交集" in text
+    assert "关键帧工作台" in text
+    assert "生成时长" in text and "genDuration" in text
+    assert "pnl-assets" not in text       # 素材步骤已并入生成页侧边栏
+
+
+def test_fullredraw_page_has_no_workbench(client, fullredraw_case):
+    text = client.get("/case/f1").text
+    assert "素材与本次提交集" in text
+    assert 'id="keyframeWorkbench"' not in text
+
+
+def test_patch_page_has_workbench_and_extract_button(client, patch_case):
+    text = client.get("/case/p1").text
+    assert "关键帧工作台" in text
+    assert "从当前 clip 抽首尾原始帧" in text

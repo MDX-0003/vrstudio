@@ -11,7 +11,7 @@ const FLOW_STEPS = {
           ["merge", "合并"], ["compare", "对比"]],
   fullredraw: [["pad", "扩充画面"], ["generate", "生成"],
                ["recompose", "裁回原尺寸"], ["compare", "对比"]],
-  gen: [["assets", "素材"], ["generate", "生成"]],
+  gen: [["generate", "生成"]],
 };
 const STEPS = FLOW_STEPS[FLOW] || [];
 
@@ -161,7 +161,7 @@ function renderGenerate() {
   // 路径从 info 里按序号取（2026-10-16 反复失败事故的原因）
   rounds.forEach((r) => {
     const mine = r.round === info.adopt_round;
-    const usable = r.result === "yes";
+    const usable = r.result && r.result !== "no";
     const div = document.createElement("div");
     div.className = "verline";
     const b = document.createElement("b");
@@ -183,16 +183,20 @@ function renderGenerate() {
 }
 
 async function runSubmit(dryRun = false) {
-  if (FLOW === "gen" && !((info.gates || {}).assets || {}).ok) {
-    alert("先在「素材」步骤添加至少 1 个视频，并给每个素材选择角色");
+  const gate = (info.gates || {}).generate || {};
+  if (!gate.ready) {
+    alert(gate.reason || "当前模式还不能提交；先补齐素材或抽取版本");
     return;
   }
-  await run(dryRun ? "dry_run" : "submit", {
+  const body = {
     mode: ($("genMode") || {}).value || "",
     aspect_ratio: ($("genAspect") || {}).value || "",
     resolution: ($("genResolution") || {}).value || "",
     scale: ($("genScale") || {}).value || "",
-  });
+  };
+  const duration = ($("genDuration") || {}).value || "auto";
+  if (duration !== "auto") body.duration = +duration;
+  await run(dryRun ? "dry_run" : "submit", body);
 }
 
 // ── merge / pad / recompose ─────────────────────────────────────────────

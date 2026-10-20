@@ -17,7 +17,7 @@ let sessionTree = null;     // /api/sessions 的项目/剧集/会话树
 // 任务类型 → 页面上的说法（op id 是内部标识，不出现在页面上）
 const KIND_LABEL = {
   extract: "抽取", pad: "扩充两侧画面", register: "登记外部视频",
-  submit: "提交生成", dry_run: "检查提交命令",
+  submit: "提交生成", dry_run: "检查提交命令", keyframe: "关键帧图片生成",
   adopt: "拷贝选中的视频到 case", merge: "合并", recompose: "裁回原尺寸",
 };
 
@@ -36,7 +36,8 @@ function gateText(id, elId) {
 function renderAll() {
   for (const name of ["renderSteps", "renderAssets", "renderPick", "renderExtract",
                       "renderGenerate", "renderFinish", "renderGenParams",
-                      "renderStepFiles", "renderPrompt", "renderCompare"]) {
+                      "renderStepFiles", "renderPrompt", "renderCompare",
+                      "renderKeyframe"]) {
     if (typeof window[name] === "function") window[name]();
   }
 }

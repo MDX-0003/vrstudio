@@ -17,6 +17,13 @@ function _fillAspect(mode, wanted) {
   const sel = $("genAspect");
   if (!sel) return "auto";
   sel.innerHTML = "";
+  if (mode && mode.value === "firstLastFrame") {
+    sel.appendChild(new Option("16:9（首期固定）", "16:9"));
+    sel.value = "16:9";
+    sel.disabled = true;
+    return "16:9";
+  }
+  sel.disabled = false;
   const ratios = (mode && mode.ratios) || [];
   if (!ratios.length) {
     sel.appendChild(new Option("跟随输入", "auto"));
@@ -30,14 +37,32 @@ function _fillAspect(mode, wanted) {
   return pick;
 }
 
+function _fillDuration(mode) {
+  const sel = $("genDuration");
+  if (!sel) return;
+  sel.innerHTML = "";
+  const d = (mode && mode.duration) || {};
+  if (d.type === "range" && d.min != null && d.max != null) {
+    sel.appendChild(new Option("自动", "auto"));
+    for (let i = Number(d.min); i <= Number(d.max); i++) {
+      sel.appendChild(new Option(`${i} 秒`, String(i)));
+    }
+    sel.disabled = false;
+  } else {
+    sel.appendChild(new Option("自动（由母版/素材推导）", "auto"));
+    sel.disabled = true;
+  }
+  sel.value = "auto";
+}
+
 function renderGenParams() {
   const resSel = $("genResolution"), scaleSel = $("genScale");
-  const modeSel = $("genMode"), aspectSel = $("genAspect");
+  const modeSel = $("genMode"), aspectSel = $("genAspect"), durSel = $("genDuration");
   const hint = $("genParamsHint"), fixed = $("genFixed");
-  if (!resSel || !scaleSel || !modeSel || !aspectSel) return;
+  if (!resSel || !scaleSel || !modeSel || !aspectSel || !durSel) return;
   const gp = (info && info.generation_params) || {};
   if (gp.error) {
-    for (const sel of [resSel, scaleSel, modeSel, aspectSel]) {
+    for (const sel of [resSel, scaleSel, modeSel, aspectSel, durSel]) {
       sel.innerHTML = "";
       sel.disabled = true;
     }
@@ -47,7 +72,7 @@ function renderGenParams() {
     return;
   }
   hint.style.display = "none";
-  for (const sel of [resSel, scaleSel, modeSel, aspectSel]) sel.disabled = false;
+  for (const sel of [resSel, scaleSel, modeSel, aspectSel, durSel]) sel.disabled = false;
   const cur = gp.current || {};
   const modes = gp.modes || [];
   modeSel.innerHTML = "";
@@ -59,6 +84,7 @@ function renderGenParams() {
   const mode = _modeMeta(gp, cur.mode) || modeList[0];
   modeSel.value = mode.value;
   _fillAspect(mode, cur.aspect_ratio);
+  _fillDuration(mode);
 
   const label = (o) => `${o.value}（${o.width}×${o.height}）`;
   resSel.innerHTML = (gp.output || []).map(o =>
@@ -67,13 +93,13 @@ function renderGenParams() {
     `<option value="${o.value}" title="${o.reason || ""}"` +
     `${o.ok === false ? " disabled" : ""}>` +
     `${label(o)}${o.ok === false ? "　超限" : ""}</option>`).join("");
-  // gen 还没有素材时两者都是空数组：保持空下拉，等素材补齐后重新计算。
+  // 纯图片模式两者都是空数组：保持空下拉，等素材补齐后重新计算。
   const noAssets = !(gp.output || []).length || !(gp.input || []).length;
   if (noAssets) {
     resSel.disabled = true;
     scaleSel.disabled = true;
     hint.style.display = "block";
-    hint.textContent = "先添加至少 1 个视频素材，再计算输入/输出尺寸。";
+    hint.textContent = "先添加素材，再计算输入/输出尺寸；纯图片模式不需要视频。";
   } else {
     if (cur.resolution) resSel.value = cur.resolution;
     const wanted = [...scaleSel.options].find(o => o.value === cur.scale);
@@ -82,14 +108,16 @@ function renderGenParams() {
   }
   const f = gp.fixed || {};
   fixed.textContent =
-    `模型 ${f.model_id}（Seedance 2.5）· 时长 ${f.duration_s || "按输入自动"}s` +
-    ` · 数量 ${f.num}`;
+    `模型 ${f.model_id}（Seedance 2.5）· 时长 ${f.duration_s || "由输入/素材推导"}` +
+    ` · 数量 ${f.num}` +
+    (mode.value === "firstLastFrame" ? " · 首期全链路固定 16:9" : "");
 }
 
 function onModeChange() {
   const gp = (info && info.generation_params) || {};
   const mode = _modeMeta(gp, ($("genMode") || {}).value);
   _fillAspect(mode, null);
+  _fillDuration(mode);
   saveGenParams();
 }
 

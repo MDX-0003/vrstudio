@@ -11,6 +11,11 @@ const ASSET_ROLE_LABELS = {
   space_ref: "空间参考（只提供机位、构图与起终点位置）",
   scene_ref: "场景参考（只提供构图、背景与光照）",
   subject_ref: "主体参考（只定义角色外观）",
+  first_frame: "首帧定稿图（视频第一帧）",
+  last_frame: "尾帧定稿图（视频最后一帧）",
+  mid_frame: "中间过渡帧（预留）",
+  first_frame_raw: "首帧原始抽取图（工作台输入）",
+  last_frame_raw: "尾帧原始抽取图（工作台输入）",
 };
 
 let assetPick = { dir: null, selected: new Map() };   // path -> role
@@ -23,6 +28,39 @@ function _modeMetaFor(infoObj, value) {
 function _currentMode() {
   const gp = (info && info.generation_params) || {};
   return ((gp.current || {}).mode) || "";
+}
+
+function _defaultSelection() {
+  const assets = (info && info.assets) || [];
+  if (info && info.submit_selected != null) return new Set(info.submit_selected);
+  const mode = _currentMode();
+  if (mode === "firstLastFrame") {
+    return new Set(assets.filter(a => ["first_frame", "last_frame"].includes(a.role))
+      .map(a => a.id));
+  }
+  if (mode === "videoEdit" || mode === "videoExtend") {
+    return new Set(assets.filter(a =>
+      (a.kind === "video" && a.role === "edit_master") ||
+      (a.kind === "image" && a.role === "subject_ref")).map(a => a.id));
+  }
+  return new Set(assets.map(a => a.id));
+}
+
+function _canEditAssets() {
+  return FLOW !== "fullredraw";
+}
+
+async function saveSubmitSelection() {
+  const ids = [...document.querySelectorAll("#assetList input[type=checkbox]:checked")]
+    .map(cb => cb.dataset.id);
+  const r = await fetch(`/api/case/${encodeURIComponent(CASE)}/submit`, {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ selected: ids }),
+  });
+  const d = await r.json();
+  if (!r.ok) { alert(d.error || r.statusText); return; }
+  info = d;
+  renderAll();
 }
 
 function _allowedRoles(kind) {
@@ -55,9 +93,10 @@ function _roleSelect(asset) {
 }
 
 function _assetCard(asset, index, assets) {
+  const editable = _canEditAssets();
   const card = document.createElement("div");
   card.className = "assetCard" + (asset.exists ? "" : " bad");
-  card.draggable = true;
+  card.draggable = editable;
   card.dataset.id = asset.id;
 
   const img = document.createElement("img");
@@ -74,14 +113,26 @@ function _assetCard(asset, index, assets) {
   meta.innerHTML = `<b>${asset.label} · ${asset.id}</b> · ${_kindLabel(asset.kind)} · ${size}<br>` +
     `<span class="dim">${asset.rel || asset.path}</span>`;
 
+  let check = null;
+  if (editable) {
+    check = document.createElement("input");
+    check.type = "checkbox";
+    check.dataset.id = asset.id;
+    check.checked = _defaultSelection().has(asset.id);
+    check.title = "勾选后参与本次提交";
+    check.onchange = saveSubmitSelection;
+  }
+
   const moves = document.createElement("span");
-  const up = document.createElement("button");
-  up.textContent = "↑"; up.title = "上移"; up.disabled = index === 0;
-  up.onclick = () => _moveAsset(assets, index, -1);
-  const down = document.createElement("button");
-  down.textContent = "↓"; down.title = "下移"; down.disabled = index === assets.length - 1;
-  down.onclick = () => _moveAsset(assets, index, 1);
-  moves.append(up, down);
+  if (editable) {
+    const up = document.createElement("button");
+    up.textContent = "↑"; up.title = "上移"; up.disabled = index === 0;
+    up.onclick = () => _moveAsset(assets, index, -1);
+    const down = document.createElement("button");
+    down.textContent = "↓"; down.title = "下移"; down.disabled = index === assets.length - 1;
+    down.onclick = () => _moveAsset(assets, index, 1);
+    moves.append(up, down);
+  }
 
   const del = document.createElement("button");
   del.textContent = "删除";
@@ -90,25 +141,36 @@ function _assetCard(asset, index, assets) {
     post("assets", { op: "remove", id: asset.id });
   };
 
-  card.addEventListener("dragstart", (e) => {
-    card.classList.add("dragging");
-    e.dataTransfer.setData("text/plain", asset.id);
-  });
-  card.addEventListener("dragend", () => card.classList.remove("dragging"));
-  card.addEventListener("dragover", (e) => e.preventDefault());
-  card.addEventListener("drop", (e) => {
-    e.preventDefault();
-    const from = e.dataTransfer.getData("text/plain");
-    if (!from || from === asset.id) return;
-    const ids = assets.map(a => a.id);
-    const fromIndex = ids.indexOf(from);
-    const toIndex = ids.indexOf(asset.id);
-    if (fromIndex < 0 || toIndex < 0) return;
-    ids.splice(toIndex, 0, ids.splice(fromIndex, 1)[0]);
-    post("assets", { op: "reorder", ids });
-  });
+  if (editable) {
+    card.addEventListener("dragstart", (e) => {
+      card.classList.add("dragging");
+      e.dataTransfer.setData("text/plain", asset.id);
+    });
+    card.addEventListener("dragend", () => card.classList.remove("dragging"));
+    card.addEventListener("dragover", (e) => e.preventDefault());
+    card.addEventListener("drop", (e) => {
+      e.preventDefault();
+      const from = e.dataTransfer.getData("text/plain");
+      if (!from || from === asset.id) return;
+      const ids = assets.map(a => a.id);
+      const fromIndex = ids.indexOf(from);
+      const toIndex = ids.indexOf(asset.id);
+      if (fromIndex < 0 || toIndex < 0) return;
+      ids.splice(toIndex, 0, ids.splice(fromIndex, 1)[0]);
+      post("assets", { op: "reorder", ids });
+    });
+  }
 
-  card.append(img, meta, _roleSelect(asset), moves, del);
+  const roleEl = editable ? _roleSelect(asset) :
+    Object.assign(document.createElement("span"), {
+      className: "meta",
+      textContent: ASSET_ROLE_LABELS[asset.role] || asset.role,
+    });
+  if (check) card.append(check);
+  card.append(img, meta, roleEl);
+  if (editable) {
+    card.append(moves, del);
+  }
   return card;
 }
 
@@ -120,17 +182,63 @@ function _moveAsset(assets, index, delta) {
   post("assets", { op: "reorder", ids });
 }
 
+function _renderDerived() {
+  const el = $("derivedList");
+  if (!el) return;
+  const rows = (info && info.derived) || [];
+  el.innerHTML = "";
+  if (!rows.length) {
+    el.innerHTML = '<span class="meta">（还没有流程产物）</span>';
+    return;
+  }
+  for (const row of rows) {
+    const div = document.createElement("div");
+    div.className = "derivedRow" + (row.exists ? "" : " bad");
+    const name = document.createElement("b");
+    name.textContent = row.label;
+    const meta = document.createElement("span");
+    meta.textContent = `${row.name || ""} · ${row.submit || "只读"}`;
+    div.append(name, meta);
+    el.appendChild(div);
+  }
+}
+
+function _renderSubmitHint() {
+  const el = $("submitHint");
+  if (!el) return;
+  const mode = _currentMode();
+  if (FLOW === "fullredraw") {
+    el.textContent = "fullredraw 保持 videoEdit：文件素材只读展示，不参与提交。";
+    return;
+  }
+  if (mode === "firstLastFrame") {
+    el.textContent = "firstLastFrame：勾选恰好一张 first_frame 与一张 last_frame；" +
+      "原始抽取帧和首尾定稿图不要混选。";
+  } else if (mode === "videoEdit" || mode === "videoExtend") {
+    el.textContent = "当前模式只重绘流程视频，文件素材不参与提交。";
+  } else if (mode === "allMediaRef") {
+    el.textContent = "allMediaRef：勾选的素材会全部进入本次 refs 清单。";
+  } else {
+    el.textContent = "勾选参与本次提交的素材；提示词编号随之重算。";
+  }
+}
+
 function renderAssets() {
-  if (FLOW !== "gen") return;
+  _renderDerived();
+  _renderSubmitHint();
   const el = $("assetList");
   if (!el) return;
   const assets = (info && info.assets) || [];
   el.innerHTML = "";
   if (!assets.length) {
-    el.innerHTML = '<span class="meta">还没有素材。至少添加 1 个视频；图片作为附加参考。</span>';
+    el.innerHTML = '<span class="meta">还没有素材。gen 可以只用图片，patch 还要有流程视频。</span>';
   } else {
     assets.forEach((asset, index) => el.appendChild(_assetCard(asset, index, assets)));
   }
+  const addRow = $("assetAddRow");
+  if (addRow) addRow.style.display = _canEditAssets() ? "" : "none";
+  const extractRow = $("assetExtractRow");
+  if (extractRow) extractRow.style.display = FLOW === "patch" ? "" : "none";
   const hint = $("assetHint");
   if (hint) {
     const videos = assets.filter(a => a.kind === "video").length;
@@ -139,7 +247,7 @@ function renderAssets() {
     hint.textContent = assets.length
       ? `当前模式 ${mode || "未设置"} · ${videos} 个视频 · ${images} 张图片`
       : "先添加素材，再回到「生成」步骤";
-    hint.className = "meta " + (videos ? "ok" : "bad");
+    hint.className = "meta " + ((videos || images) ? "ok" : "bad");
   }
 }
 
