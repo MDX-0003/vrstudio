@@ -146,6 +146,124 @@ def test_submit_dry_run_gen_passes_explicit_aspect(tmp_path, src_video, monkeypa
     assert "--aspect-ratio" in lines and "16:9" in lines
 
 
+def _image_assets(tmp_path):
+    first = tmp_path / "first.png"
+    last = tmp_path / "last.png"
+    first.write_bytes(b"first")
+    last.write_bytes(b"last")
+    return first, last
+
+
+def test_resolve_gen_image_master_omits_video(tmp_path, monkeypatch):
+    first, last = _image_assets(tmp_path)
+    case_mod.create("g2", "gen", root=tmp_path)
+    case_mod.add_assets("g2", [(first, "first_frame"), (last, "last_frame")],
+                        root=tmp_path)
+    monkeypatch.setattr(gen, "_image_size", lambda path: (1920, 1080))
+    case = case_mod.load("g2", tmp_path)
+    video, mask, template, canvas, source = gen.resolve_package(
+        case, tmp_path, mode="firstLastFrame")
+    assert video is None and mask is None
+    assert template == "gen-multi"
+    assert canvas == source == (1920, 1080)
+
+
+def test_submit_gen_image_master_uses_refs(tmp_path, monkeypatch):
+    first, last = _image_assets(tmp_path)
+    case_mod.create("g2", "gen", root=tmp_path)
+    case_mod.add_assets("g2", [(first, "first_frame"), (last, "last_frame")],
+                        root=tmp_path)
+    monkeypatch.setattr(gen, "_image_size", lambda path: (1920, 1080))
+    r = runner.invoke(gen.app, ["submit", "--case", "g2", "--mode", "firstLastFrame",
+                                "--dry-run", "--cases-dir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    lines = [line.strip() for line in r.output.splitlines()]
+    assert "--refs" in lines and "--input" not in lines
+    assert "gen-multi" in lines
+    refs_path = Path(lines[lines.index("--refs") + 1])
+    data = json.loads(refs_path.read_text(encoding="utf-8"))
+    assert [a["role"] for a in data["assets"]] == ["first_frame", "last_frame"]
+
+
+def test_submit_refs_filtered_by_selected(tmp_path, src_video, monkeypatch):
+    case_mod.create("g3", "gen", src_video, root=tmp_path)
+    first, _last = _image_assets(tmp_path)
+    case_mod.add_assets("g3", [(first, "subject_ref")], root=tmp_path)
+    case_mod.set_submit_selected("g3", ["v1"], root=tmp_path)
+    monkeypatch.setattr(gen, "probe", lambda path: _gen_info())
+    r = runner.invoke(gen.app, ["submit", "--case", "g3", "--dry-run",
+                                "--cases-dir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    lines = [line.strip() for line in r.output.splitlines()]
+    refs_path = Path(lines[lines.index("--refs") + 1])
+    data = json.loads(refs_path.read_text(encoding="utf-8"))
+    assert [a["id"] for a in data["assets"]] == ["v1"]
+
+
+def test_submit_firstlast_default_requires_exactly_one_pair(tmp_path, monkeypatch):
+    first, last = _image_assets(tmp_path)
+    third = tmp_path / "third.png"
+    third.write_bytes(b"third")
+    case_mod.create("g4", "gen", root=tmp_path)
+    case_mod.add_assets("g4", [(first, "first_frame"), (last, "last_frame")],
+                        root=tmp_path)
+    monkeypatch.setattr(gen, "_image_size", lambda path: (1920, 1080))
+    r = runner.invoke(gen.app, ["submit", "--case", "g4", "--mode", "firstLastFrame",
+                                "--dry-run", "--cases-dir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+
+    case_mod.add_assets("g4", [(third, "first_frame")], root=tmp_path)
+    r = runner.invoke(gen.app, ["submit", "--case", "g4", "--mode", "firstLastFrame",
+                                "--dry-run", "--cases-dir", str(tmp_path)])
+    assert r.exit_code == 2, r.output
+    assert "多组候选" in r.output
+
+
+def _patch_16_9_case(tmp_path, src_video, *, size=(1920, 1080)):
+    case_mod.create("p1", "patch", src_video, root=tmp_path)
+    case_mod.set_extract_current("p1", "20261016T000000", root=tmp_path)
+    d = case_mod.case_dir("p1", tmp_path) / "extracts" / "20261016T000000"
+    d.mkdir(parents=True)
+    (d / "clip.mp4").write_bytes(b"clip")
+    (d / "clip_mask.png").write_bytes(b"mask")
+    from vrstudio.patch.sidecar import InnerRect, Segment, Sidecar, Viewport, save_sidecar
+    save_sidecar(Sidecar(
+        erp_width=4000, erp_height=2000, fps=30.0, version=1,
+        segments=[Segment(id="s0", frame_start=0, frame_end=239,
+                          viewport=Viewport(yaw_deg=0.0, pitch_deg=0.0, fov_h_deg=90.0,
+                                            width=size[0], height=size[1]),
+                          inner=InnerRect(x=400, y=200, width=600, height=500))]),
+        d / "clip.json")
+    return case_mod.load("p1", tmp_path)
+
+
+def test_patch_firstlast_branch_builds_refs(tmp_path, src_video, monkeypatch):
+    case = _patch_16_9_case(tmp_path, src_video)
+    first, last = _image_assets(tmp_path)
+    case_mod.add_assets("p1", [(first, "first_frame"), (last, "last_frame")],
+                        root=tmp_path)
+    r = runner.invoke(gen.app, ["submit", "--case", "p1", "--mode", "firstLastFrame",
+                                "--dry-run", "--cases-dir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    lines = [line.strip() for line in r.output.splitlines()]
+    assert "--refs" in lines and "--input" not in lines
+    assert "gen-multi" in lines
+    assert "1920x1080" in lines
+
+
+def test_patch_firstlast_requires_16_9_viewport(tmp_path, src_video):
+    case = _patch_16_9_case(tmp_path, src_video, size=(1920, 1052))
+    with pytest.raises(gen.GenError, match="16:9"):
+        gen.resolve_package(case, tmp_path, mode="firstLastFrame")
+
+
+def test_template_follows_flow_and_mode():
+    assert gen._template_for("patch", "firstLastFrame") == "gen-multi"
+    assert gen._template_for("patch", "videoEdit") == "character-repaint"
+    assert gen._template_for("gen", "firstLastFrame") == "gen-multi"
+    assert gen._template_for("fullredraw", "videoEdit") == "360-closure"
+
+
 # ── submit --dry-run ─────────────────────────────────────────────────────
 
 

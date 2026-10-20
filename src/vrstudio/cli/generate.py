@@ -40,6 +40,31 @@ TEMPLATE_BY_FLOW = {"fullredraw": "360-closure", "patch": "character-repaint",
 _ROUND_IN_OUTPUT = re.compile(r"round=([A-Za-z0-9._-]+)")
 
 
+def _template_for(flow: str, mode: str | None) -> str:
+    if flow == "gen" or (flow == "patch" and mode == "firstLastFrame"):
+        return "gen-multi"
+    return TEMPLATE_BY_FLOW[flow]
+
+
+def _image_size(path: Path) -> tuple[int, int]:
+    import cv2
+
+    image = cv2.imread(str(path))
+    if image is None:
+        raise GenError(f"读不出图片尺寸：{path}")
+    return int(image.shape[1]), int(image.shape[0])
+
+
+def _require_16_9(size: tuple[int, int], what: str) -> None:
+    width, height = int(size[0]), int(size[1])
+    ratio = width / height if height else 0.0
+    target = 16 / 9
+    if abs(ratio - target) > target * 0.001:
+        raise GenError(
+            f"{what} 的宽高比 {width}:{height} 不是 16:9；"
+            "firstLastFrame 首期只接受 16:9，请重新选区并 extract")
+
+
 class GenError(Exception):
     """参数/合约错 → 退出码 2。"""
 
@@ -78,32 +103,37 @@ def _capture(argv: list[str]) -> tuple[int, str]:
 # ── 输入包解析（flow 特有知识全部在这里）─────────────────────────────────
 
 
-def resolve_package(case: case_mod.Case,
-                    root: str | Path | None = None) -> tuple[Path, Path | None, str,
-                                                             tuple[int, int], tuple[int, int]]:
+def resolve_package(case: case_mod.Case, root: str | Path | None = None,
+                    mode: str | None = None) -> tuple[Path | None, Path | None, str,
+                                                      tuple[int, int], tuple[int, int]]:
     """→ (送生成的视频, mask, 模板 id, canvas 尺寸, source 尺寸)。
 
     fullredraw：manifest 读而不重推导——它记录的是 pad 当时真做了什么
     （此守卫连同理由一并继承自 vrpad 的 aigc/case.py）。canvas/source 是 vrgen
     提示词几何占位符的唯一来源（band = canvas_w - source_w）。
     patch：无冗余带概念，canvas=source=clip 实际尺寸（探测）。
-    gen：源视频直接上传，canvas=source=源实际尺寸（探测），无 mask。
+    gen：母版是视频时直接上传；母版是图片时只取宽高，生成走 ``--refs``。
+    ``mode=firstLastFrame`` 时首尾图都是文件名素材，视频位置返回 None。
     """
+    template = _template_for(case.flow, mode)
     if case.flow == "gen":
         if not case.assets:
             raise GenError(
                 f"case {case.name} 还没有素材——先在生成页的「素材」步骤添加视频与图片")
         master = case.master()
         if master is None:
-            raise GenError(f"case {case.name} 至少需要 1 个视频素材")
+            raise GenError(f"case {case.name} 至少需要 1 个素材")
         try:
-            case_mod.check_assets(case, root)
-            video = master.resolved(case, root)
-            info = probe(video)
-        except (CaseError, VideoIOError) as exc:
+            case_mod.check_assets(case, root, selected=[master.id])
+            path = master.resolved(case, root)
+            if master.kind == "video":
+                info = probe(path)
+                canvas_size = source_size = (info.width, info.height)
+                return path, None, template, canvas_size, source_size
+            canvas_size = source_size = _image_size(path)
+            return None, None, template, canvas_size, source_size
+        except (CaseError, VideoIOError, OSError) as exc:
             raise GenError(str(exc)) from exc
-        canvas_size = source_size = (info.width, info.height)
-        return video, None, TEMPLATE_BY_FLOW["gen"], canvas_size, source_size
     if case.flow == "fullredraw":
         manifests = sorted(case.dir(root).glob("*_pad.json"))
         if not manifests:
@@ -145,9 +175,14 @@ def resolve_package(case: case_mod.Case,
             raise GenError(f"{d / 'clip.json'}：patch 流契约是单段")
         vp = sidecar.segments[0].viewport
         canvas_size = source_size = (int(vp.width), int(vp.height))
+        if mode == "firstLastFrame":
+            _require_16_9(canvas_size, "patch viewport")
+            return None, None, template, canvas_size, source_size
+    if video is None:
+        raise GenError(f"case {case.name} 没有送生成的视频")
     if not video.is_file():
         raise GenError(f"输入包的视频不存在：{video}")
-    return video, mask, TEMPLATE_BY_FLOW[case.flow], canvas_size, source_size
+    return video, mask, template, canvas_size, source_size
 
 
 # ── 命令 ─────────────────────────────────────────────────────────────────
@@ -158,6 +193,29 @@ def _load_case(name: str, cases_dir) -> case_mod.Case:
         return case_mod.load(name, cases_dir)
     except CaseError as exc:
         raise GenError(str(exc)) from exc
+
+
+def _selected_assets(case: case_mod.Case, mode: str | None) -> list[case_mod.Asset]:
+    """本次提交集：显式勾选优先，否则按模式取默认集。"""
+    if case.submit_selected is not None:
+        if not case.submit_selected:
+            raise GenError("提交集为空——请在素材侧边栏至少勾选一项")
+        chosen = set(case.submit_selected)
+        return [asset for asset in case.assets if asset.id in chosen]
+    if mode == "firstLastFrame":
+        firsts = [a for a in case.assets if a.role == "first_frame"]
+        lasts = [a for a in case.assets if a.role == "last_frame"]
+        if len(firsts) == 1 and len(lasts) == 1:
+            return [firsts[0], lasts[0]]
+        if len(firsts) > 1 or len(lasts) > 1:
+            raise GenError("有多组候选定稿帧，请在素材侧边栏勾选首帧与尾帧")
+        raise GenError("先在工作台生成并挑选首帧与尾帧")
+    if mode in ("videoEdit", "videoExtend"):
+        picks = [a for a in case.assets
+                 if (a.kind == "video" and a.role == "edit_master")
+                 or (a.kind == "image" and a.role == "subject_ref")]
+        return picks or list(case.assets)
+    return list(case.assets)
 
 
 @app.command()
@@ -193,15 +251,30 @@ def submit(
     conf = load_config(overrides=overrides or [])
     case = _load_case(case_name, cases_dir)
     try:
-        video, mask, template, canvas_size, source_size = resolve_package(case, cases_dir)
+        video, mask, template, canvas_size, source_size = resolve_package(
+            case, cases_dir, mode=mode)
     except GenError as exc:
         _fail(exc)
+    refs_needed = case.flow == "gen" or (
+        case.flow == "patch" and mode == "firstLastFrame")
     refs_file: Path | None = None
-    if case.flow == "gen":
+    if refs_needed:
+        try:
+            selected = _selected_assets(case, mode)
+        except GenError as exc:
+            _fail(exc)
+        if not selected:
+            _fail(GenError("没有可提交的素材"))
+        try:
+            checked = case_mod.check_assets(
+                case, cases_dir, selected=[asset.id for asset in selected])
+        except CaseError as exc:
+            _fail(GenError(str(exc)))
+        by_id = {asset.id: (asset, path) for asset, path in checked}
         payload = {"assets": [
             {"id": asset.id, "kind": asset.kind, "role": asset.role,
-             "path": str(path.resolve()), "sha256": asset.sha256}
-            for asset, path in case_mod.check_assets(case, cases_dir)
+             "path": str(by_id[asset.id][1].resolve()), "sha256": asset.sha256}
+            for asset in selected if asset.id in by_id
         ]}
         fd, raw = tempfile.mkstemp(prefix=f"vrgen-{case.name}-", suffix=".json")
         os.close(fd)
@@ -213,6 +286,8 @@ def submit(
                 "--canvas", f"{canvas_size[0]}x{canvas_size[1]}",
                 "--source", f"{source_size[0]}x{source_size[1]}"]
     else:
+        if video is None:
+            _fail(GenError(f"case {case.name} 没有送生成的视频"))
         argv = [_vrgen_exe(conf), "submit", "--job", case.name,
                 "--input", str(video), "--template", template,
                 "--canvas", f"{canvas_size[0]}x{canvas_size[1]}",

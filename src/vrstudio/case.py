@@ -564,10 +564,17 @@ def check_source(case: Case, root: str | Path | None = None) -> Path:
     return src
 
 
-def check_assets(case: Case, root: str | Path | None = None) -> list[tuple[Asset, Path]]:
-    """三流程通用的守卫：每个素材都在、且内容与添加时一致。"""
+def check_assets(case: Case, root: str | Path | None = None,
+                 selected: list[str] | None = None) -> list[tuple[Asset, Path]]:
+    """三流程通用的守卫：每个素材都在、且内容与添加时一致。
+
+    ``selected`` 只校验本次提交集；``None`` 校验全部素材。
+    """
+    keep = None if selected is None else set(selected)
     out: list[tuple[Asset, Path]] = []
     for asset in case.assets:
+        if keep is not None and asset.id not in keep:
+            continue
         target = asset.resolved(case, root)
         if not target.is_file():
             raise CaseError(f"素材文件不在了：{target}（case.toml 记录的路径）")
