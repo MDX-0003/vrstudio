@@ -40,7 +40,7 @@ TEMPLATE_BY_FLOW = {"fullredraw": "360-closure", "patch": "character-repaint",
 _ROUND_IN_OUTPUT = re.compile(r"round=([A-Za-z0-9._-]+)")
 
 
-def _template_for(flow: str, mode: str | None) -> str:
+def template_for(flow: str, mode: str | None) -> str:
     if flow == "gen" or (flow == "patch" and mode == "firstLastFrame"):
         return "gen-multi"
     return TEMPLATE_BY_FLOW[flow]
@@ -115,7 +115,7 @@ def resolve_package(case: case_mod.Case, root: str | Path | None = None,
     gen：母版是视频时直接上传；母版是图片时只取宽高，生成走 ``--refs``。
     ``mode=firstLastFrame`` 时首尾图都是文件名素材，视频位置返回 None。
     """
-    template = _template_for(case.flow, mode)
+    template = template_for(case.flow, mode)
     if case.flow == "gen":
         if not case.assets:
             raise GenError(
@@ -195,7 +195,7 @@ def _load_case(name: str, cases_dir) -> case_mod.Case:
         raise GenError(str(exc)) from exc
 
 
-def _selected_assets(case: case_mod.Case, mode: str | None) -> list[case_mod.Asset]:
+def selected_assets(case: case_mod.Case, mode: str | None) -> list[case_mod.Asset]:
     """本次提交集：显式勾选优先，否则按模式取默认集。"""
     if case.submit_selected is not None:
         if not case.submit_selected:
@@ -260,7 +260,7 @@ def submit(
     refs_file: Path | None = None
     if refs_needed:
         try:
-            selected = _selected_assets(case, mode)
+            selected = selected_assets(case, mode)
         except GenError as exc:
             _fail(exc)
         if not selected:

@@ -9,12 +9,15 @@ from __future__ import annotations
 import json
 import os
 from fractions import Fraction
+from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
 
 from vrstudio import case as case_mod
 from vrstudio import config as config_mod
+from vrstudio.cli import generate as gen_mod
+from vrstudio.media.videoio import VideoInfo
 from vrstudio.redraw.geometry import PadSpec, plan_pad
 from vrstudio.redraw.manifest import VideoSettings, from_plan
 from vrstudio.web import app as web_app
@@ -478,12 +481,14 @@ def test_prompt_save_passes_through_to_vrgen(client, patch_case, monkeypatch):
     assert r.status_code == 200
     info = r.json()
     assert info["prompt"]["vars"]["theme"] == "黄昏"      # 回显进完整 info
-    assert calls[0][:3] == ["prompt", "save", "--job"]
-    assert "--set" in calls[0] and "theme=黄昏" in calls[0]
+    prompt_calls = [c for c in calls if c[:2] == ["prompt", "save"]]
+    assert prompt_calls[0][:3] == ["prompt", "save", "--job"]
+    assert "--set" in prompt_calls[0] and "theme=黄昏" in prompt_calls[0]
 
     assert client.post("/api/case/p1/prompt",
                        json={"unset": "theme"}).status_code == 200
-    assert "--unset" in calls[1] and "theme" in calls[1]
+    prompt_calls = [c for c in calls if c[:2] == ["prompt", "save"]]
+    assert "--unset" in prompt_calls[1] and "theme" in prompt_calls[1]
 
     r = client.post("/api/case/p1/prompt", json={})
     assert r.status_code == 400 and "没有要改" in r.text
@@ -636,3 +641,160 @@ def test_file_info_uses_repo_relative_path():
     assert info["exists"] is False
     assert info["rel"] == os.path.join("cases", "_rel_test", "x.mp4")
     assert info["path"].endswith(os.path.join("cases", "_rel_test", "x.mp4"))
+
+
+# ── WP3c：素材侧边栏、派生条目、抽帧、关键帧工作台 ─────────────────────
+
+
+def _add_image(case: str, tmp_path, name: str, role: str) -> Path:
+    image = tmp_path / f"{name}.png"
+    image.write_bytes(name.encode())
+    case_mod.add_assets(case, [(image, role)], root=tmp_path)
+    return image
+
+
+def test_asset_api_allows_patch(client, patch_case, tmp_path):
+    _add_image("p1", tmp_path, "ref", "subject_ref")
+    info = client.get("/api/case/p1").json()
+    assert [a["role"] for a in info["assets"]] == ["subject_ref"]
+    assert info["derived"][0]["label"] == "源视频"
+
+
+def test_derived_endpoint_lists_source_and_clip(client, patch_case, tmp_path):
+    d = _mk_extract("p1", tmp_path, "v1")
+    (d / "clip.mp4").write_bytes(b"c")
+    (d / "clip_mask.png").write_bytes(b"m")
+    case_mod.set_extract_current("p1", "v1", root=tmp_path)
+    rows = client.get("/api/case/p1/derived").json()["derived"]
+    labels = {row["label"] for row in rows}
+    assert {"源视频", "当前 clip", "当前 mask", "几何契约"} <= labels
+    assert all(row["editable"] is False for row in rows)
+
+
+def test_submit_set_roundtrip(client, gen_case, tmp_path):
+    _add_image("g1", tmp_path, "first", "first_frame")
+    _add_image("g1", tmp_path, "last", "last_frame")
+    r = client.put("/api/case/g1/submit", json={"selected": ["i1", "i2"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["submit_selected"] == ["i1", "i2"]
+    assert client.get("/api/case/g1/submit").json()["selected"] == ["i1", "i2"]
+
+
+def test_generation_params_image_case_omits_input(client, tmp_path, monkeypatch):
+    case_mod.create("g2", "gen", root=tmp_path)
+    _add_image("g2", tmp_path, "first", "first_frame")
+    _add_image("g2", tmp_path, "last", "last_frame")
+    monkeypatch.setattr(gen_mod, "_image_size", lambda path: (1920, 1080))
+    calls = []
+
+    def fake(argv):
+        calls.append(argv)
+        return {"modes": [], "current": {"mode": "firstLastFrame"}}
+
+    monkeypatch.setattr(web_app, "_vrgen_json", fake)
+    payload = web_app._generation_params("g2")
+    assert payload["current"]["mode"] == "firstLastFrame"
+    assert len(calls) == 1 and "--input" not in calls[0]
+
+
+def test_prompt_preview_image_case_no_crash(client, tmp_path, monkeypatch):
+    case_mod.create("g2", "gen", root=tmp_path)
+    _add_image("g2", tmp_path, "first", "first_frame")
+    _add_image("g2", tmp_path, "last", "last_frame")
+    monkeypatch.setattr(gen_mod, "_image_size", lambda path: (1920, 1080))
+    monkeypatch.setattr(web_app, "_vrgen_json", lambda argv: {"error": "vrgen down"})
+    r = client.get("/api/case/g2")
+    assert r.status_code == 200
+    assert "error" in r.json()["prompt"]
+
+
+def test_generate_gate_mode_aware(client, tmp_path, monkeypatch):
+    case_mod.create("g5", "gen", root=tmp_path)
+    _add_image("g5", tmp_path, "first", "first_frame")
+    monkeypatch.setattr(web_app, "_generation_params",
+                        lambda name: {"current": {"mode": "firstLastFrame"}})
+    monkeypatch.setattr(gen_mod, "_image_size", lambda path: (1920, 1080))
+    monkeypatch.setattr(web_app, "_vrgen_json", lambda argv: {"error": "vrgen down"})
+    info = client.get("/api/case/g5").json()
+    assert info["gates"]["generate"]["ready"] is False
+    assert "首帧" in info["gates"]["generate"]["reason"]
+
+
+def test_extract_frames_endpoint(client, patch_case, tmp_path, monkeypatch):
+    d = _mk_extract("p1", tmp_path, "v1")
+    (d / "clip.mp4").write_bytes(b"clip")
+    case_mod.set_extract_current("p1", "v1", root=tmp_path)
+    monkeypatch.setattr(web_app, "probe", lambda path: VideoInfo(
+        path=str(path), size=(320, 180), fps="30/1", fps_float=30.0,
+        frames=60, pix_fmt="yuv420p", codec="h264", has_audio=False,
+        duration_s=2.0))
+    monkeypatch.setattr(web_app, "extract_frame",
+                        lambda video, t, out: Path(out).write_bytes(b"png") or Path(out))
+    r = client.post("/api/case/p1/extract-frames",
+                    json={"t_first": 0.0, "t_last": 1.5})
+    assert r.status_code == 200, r.text
+    roles = [a["role"] for a in r.json()["assets"]]
+    assert roles == ["first_frame_raw", "last_frame_raw"]
+
+
+def test_keyframe_run_queues_image_argv(client, patch_case, tmp_path, monkeypatch):
+    _add_image("p1", tmp_path, "first", "first_frame")
+    _add_image("p1", tmp_path, "last", "last_frame")
+    captured = []
+    monkeypatch.setattr(web_app.QUEUE, "submit",
+                        lambda op, name, argv: captured.append((op, name, argv)))
+    r = client.post("/api/case/p1/keyframe/run", json={
+        "step": "first", "prompt": "换成高官", "assets": ["i1", "i2"],
+        "model_id": 44, "resolution": "2K"})
+    assert r.status_code == 200, r.text
+    op, name, argv = captured[0]
+    assert op == "keyframe" and name == "p1"
+    assert "image" in argv and "submit" in argv
+    assert "--ratio" in argv and "16:9" in argv
+    assert argv.count("--image") == 2
+
+
+def test_keyframe_rounds_lists_candidates(client, patch_case, tmp_path, monkeypatch):
+    monkeypatch.setattr(web_app, "_workdir", lambda: tmp_path / "runs")
+    run_dir = tmp_path / "runs" / "p1" / "img-abc12345"
+    run_dir.mkdir(parents=True)
+    a = run_dir / "result_1.png"
+    b = run_dir / "result_2.png"
+    a.write_bytes(b"a")
+    b.write_bytes(b"b")
+    (run_dir / "run.json").write_text(json.dumps({
+        "key": "abcdef123456", "stage": "checked",
+        "results": [str(a), str(b)], "gate": {"verdict": "ok"}}), encoding="utf-8")
+    data = client.get("/api/case/p1/keyframe/rounds").json()
+    assert data["rounds"][0]["round"] == "img-abc12345"
+    assert [row["index"] for row in data["rounds"][0]["results"]] == [1, 2]
+
+
+def test_keyframe_pick_rejects_mismatched_pair(client, tmp_path, monkeypatch):
+    case_mod.create("g6", "gen", root=tmp_path)
+    _add_image("g6", tmp_path, "first", "first_frame")
+    monkeypatch.setattr(web_app, "_workdir", lambda: tmp_path / "runs")
+    run_dir = tmp_path / "runs" / "g6" / "img-abc12345"
+    run_dir.mkdir(parents=True)
+    candidate = run_dir / "result_1.png"
+    candidate.write_bytes(b"c")
+    (run_dir / "run.json").write_text(json.dumps({
+        "key": "abcdef123456", "results": [str(candidate)]}),
+        encoding="utf-8")
+
+    def fake_capture(argv):
+        Path(argv[argv.index("--out") + 1]).write_bytes(b"picked")
+        return 0, "ok"
+
+    monkeypatch.setattr(web_app, "_capture", fake_capture)
+
+    def fake_meta(path, kind):
+        width, height = ((1280, 720) if Path(path).name.startswith("keyframe-")
+                         else (1920, 1080))
+        return {"width": width, "height": height, "duration": None, "fps": None}
+
+    monkeypatch.setattr(web_app, "_media_meta", fake_meta)
+    r = client.post("/api/case/g6/keyframe/pick",
+                    json={"round": "img-abc12345", "index": 1, "role": "last_frame"})
+    assert r.status_code == 400
+    assert "宽高不一致" in r.json()["error"]

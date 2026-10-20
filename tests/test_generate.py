@@ -258,10 +258,10 @@ def test_patch_firstlast_requires_16_9_viewport(tmp_path, src_video):
 
 
 def test_template_follows_flow_and_mode():
-    assert gen._template_for("patch", "firstLastFrame") == "gen-multi"
-    assert gen._template_for("patch", "videoEdit") == "character-repaint"
-    assert gen._template_for("gen", "firstLastFrame") == "gen-multi"
-    assert gen._template_for("fullredraw", "videoEdit") == "360-closure"
+    assert gen.template_for("patch", "firstLastFrame") == "gen-multi"
+    assert gen.template_for("patch", "videoEdit") == "character-repaint"
+    assert gen.template_for("gen", "firstLastFrame") == "gen-multi"
+    assert gen.template_for("fullredraw", "videoEdit") == "360-closure"
 
 
 # ── submit --dry-run ─────────────────────────────────────────────────────

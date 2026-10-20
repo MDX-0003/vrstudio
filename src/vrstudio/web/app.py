@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -30,7 +31,14 @@ from starlette.staticfiles import StaticFiles
 from .. import case as case_mod
 from .. import config as config_mod
 from ..case import CaseError
-from ..cli.generate import TEMPLATE_BY_FLOW, GenError, resolve_package
+from ..cli.generate import (
+    GenError,
+    resolve_package,
+    selected_assets,
+    template_for,
+)
+from ..media.frames import extract_frame
+from ..media.videoio import VideoIOError, probe
 from ..procenv import decode_text, utf8_env
 from ..redraw.manifest import Manifest
 from .render import PreviewStore
@@ -196,8 +204,38 @@ def _vrgen_json(argv: list[str]) -> dict:
         return {"error": "vrgen 的返回不是合法 JSON"}
 
 
-def _prompt_preview_args(name: str, flow: str) -> tuple[list[str], Path | None]:
-    """提示词展开所需的 CLI 参数：几何尺寸 + gen 的素材清单临时文件。
+def _capture(argv: list[str]) -> tuple[int, str]:
+    """短命令（result）：捕获输出文本，供关键帧挑选判断成功。"""
+    try:
+        r = subprocess.run(argv, capture_output=True, env=utf8_env(), timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 1, str(exc)
+    text = decode_text((r.stdout or b"") + (r.stderr or b""))
+    return r.returncode, text
+
+
+def _current_mode(name: str) -> str | None:
+    payload = _vrgen_json(["params", "show", "--job", name,
+                           "--workdir", str(_workdir())])
+    if "error" in payload:
+        return None
+    return (payload.get("current") or {}).get("mode")
+
+
+def _refs_payload(case: case_mod.Case, selected: list[case_mod.Asset]) -> dict:
+    checked = case_mod.check_assets(
+        case, _ctx["cases_root"], selected=[asset.id for asset in selected])
+    by_id = {asset.id: path for asset, path in checked}
+    return {"assets": [
+        {"id": asset.id, "kind": asset.kind, "role": asset.role,
+         "path": str(by_id[asset.id].resolve()), "sha256": asset.sha256}
+        for asset in selected if asset.id in by_id
+    ]}
+
+
+def _prompt_preview_args(name: str, flow: str,
+                         mode: str | None = None) -> tuple[list[str], Path | None]:
+    """提示词展开所需的 CLI 参数：几何尺寸 + 提交集素材清单临时文件。
 
     拿不到素材或尺寸时不报错，只返回已能拿到的部分；vrgen 会把缺的占位符
     报成 render_error，页面显示具体缺什么，而不是干瞪占位符。
@@ -207,21 +245,17 @@ def _prompt_preview_args(name: str, flow: str) -> tuple[list[str], Path | None]:
     try:
         case = case_mod.load(name, _ctx["cases_root"])
         _video, _mask, _template, canvas, source = resolve_package(
-            case, _ctx["cases_root"])
+            case, _ctx["cases_root"], mode=mode)
     except (CaseError, GenError, KeyError, ValueError, OSError):
         return args, None
     args += ["--canvas", f"{canvas[0]}x{canvas[1]}",
              "--source", f"{source[0]}x{source[1]}"]
-    if flow == "gen":
+    refs_needed = flow == "gen" or (flow == "patch" and mode == "firstLastFrame")
+    if refs_needed:
         try:
-            assets = case_mod.check_assets(case, _ctx["cases_root"])
-        except (CaseError, OSError):
+            payload = _refs_payload(case, selected_assets(case, mode))
+        except (CaseError, GenError, OSError):
             return args, None
-        payload = {"assets": [
-            {"id": asset.id, "kind": asset.kind, "role": asset.role,
-             "path": str(path.resolve()), "sha256": asset.sha256}
-            for asset, path in assets
-        ]}
         fd, raw = tempfile.mkstemp(prefix=f"vrgen-prompt-{name}-", suffix=".json")
         os.close(fd)
         refs_file = Path(raw)
@@ -231,12 +265,14 @@ def _prompt_preview_args(name: str, flow: str) -> tuple[list[str], Path | None]:
     return args, refs_file
 
 
-def _prompt(name: str, flow: str) -> dict:
+def _prompt(name: str, flow: str, mode: str | None = None) -> dict:
     """提示词模板 + 变量草稿 + 展开后的完整正文（决策 18；契约 case-model.md §4）。"""
+    if mode is None:
+        mode = _current_mode(name)
     argv = ["prompt", "show", "--job", name,
-            "--template", TEMPLATE_BY_FLOW[flow],
+            "--template", template_for(flow, mode),
             "--workdir", str(_workdir())]
-    preview_args, refs_file = _prompt_preview_args(name, flow)
+    preview_args, refs_file = _prompt_preview_args(name, flow, mode)
     try:
         return _vrgen_json([*argv, *preview_args])
     finally:
@@ -252,22 +288,23 @@ def _sessions_tree() -> dict:
 def _generation_params(name: str) -> dict:
     """生成页的输出/输入分辨率选项（决策 20；契约 case-model.md §4）。
 
-    gen case 还没有素材时，`resolve_package` 会拒绝；这里退回不带 `--input`
-    的 `params show`，页面仍能拿到模式列表，先完成素材步骤。
+    先不带 ``--input`` 读模式与当前草稿；只有确实有一个视频输入包、且当前
+    模式不是 ``firstLastFrame`` 时，才带上 ``--input`` 计算档位。这样纯图片
+    case 不会撞上 `params show` 的“不接受输入视频”闸门。
     """
+    base = _vrgen_json(["params", "show", "--job", name,
+                        "--workdir", str(_workdir())])
+    if "error" in base:
+        return base
+    mode = (base.get("current") or {}).get("mode")
     try:
         case = case_mod.load(name, _ctx["cases_root"])
         video, _mask, _template, canvas, source = resolve_package(
-            case, _ctx["cases_root"])
-    except (CaseError, GenError, KeyError, ValueError, OSError) as e:
-        try:
-            case = case_mod.load(name, _ctx["cases_root"])
-        except CaseError:
-            return {"error": str(e)}
-        if case.flow != "gen":
-            return {"error": str(e)}
-        return _vrgen_json(["params", "show", "--job", name,
-                            "--workdir", str(_workdir())])
+            case, _ctx["cases_root"], mode=mode)
+    except (CaseError, GenError, KeyError, ValueError, OSError):
+        return base
+    if video is None or mode == "firstLastFrame":
+        return base
     argv = ["params", "show", "--job", name,
             "--input", str(video),
             "--canvas", f"{canvas[0]}x{canvas[1]}",
@@ -586,13 +623,10 @@ def _gates(case: case_mod.Case, extracts: list[dict]) -> dict:
                         "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}"},
         }
     else:
-        has_video = any(a.kind == "video" for a in case.assets)
         roles_ok = bool(case.assets) and all(a.role in case_mod.ROLES for a in case.assets)
-        assets_ok = has_video and roles_ok
+        assets_ok = bool(case.assets) and roles_ok
         if not case.assets:
-            asset_reason = "先添加至少 1 个视频素材"
-        elif not has_video:
-            asset_reason = "至少需要 1 个视频素材"
+            asset_reason = "先添加至少 1 个素材"
         elif not roles_ok:
             asset_reason = "每个素材都要选择角色"
         else:
@@ -613,6 +647,47 @@ def _gates(case: case_mod.Case, extracts: list[dict]) -> dict:
     return steps
 
 
+def _derived(case: case_mod.Case) -> list[dict]:
+    """源视频与流程产物：只读派生条目，不进 ``[[assets]]``。"""
+    rows: list[dict] = []
+    cdir = case.dir(_ctx["cases_root"])
+    if case.source_path:
+        rows.append({
+            "kind": "video", "role": "source", "label": "源视频",
+            "editable": False, "submit": "videoEdit 自动作为输入，无需勾选",
+            **_file_info(Path(case.source_path)),
+        })
+    if case.flow == "patch" and case.extract_current:
+        d = cdir / "extracts" / case.extract_current
+        for name, kind, label, submit in (
+                ("clip.mp4", "video", "当前 clip", "videoEdit 自动作为输入；firstLastFrame 不提交流程视频"),
+                ("clip_mask.png", "image", "当前 mask", "仅 videoEdit 使用"),
+                ("clip.json", "file", "几何契约", "不提交"),
+                ("result.mp4", "video", "已采用结果", "流程产物，不提交")):
+            rows.append({"kind": kind, "role": "derived", "label": label,
+                         "editable": False, "submit": submit,
+                         **_file_info(d / name)})
+    elif case.flow == "fullredraw":
+        manifests = sorted(cdir.glob("*_pad.json"))
+        for name, kind, label, submit in (
+                ("seedance_input.mp4", "video", "pad 画布", "videoEdit 自动作为输入"),
+                ("seedance_input_mask.png", "image", "pad mask", "随画布提交"),
+                ("seedance_input_pad.json", "file", "pad 几何契约", "不提交"),
+                ("result.mp4", "video", "已采用结果", "流程产物，不提交")):
+            rows.append({"kind": kind, "role": "derived", "label": label,
+                         "editable": False, "submit": submit,
+                         **_file_info(cdir / name)})
+        for manifest in manifests:
+            rows.append({"kind": "file", "role": "derived", "label": "manifest",
+                         "editable": False, "submit": "recompose 的几何权威，不提交",
+                         **_file_info(manifest)})
+    elif case.flow == "gen":
+        rows.append({"kind": "video", "role": "derived", "label": "已采用结果",
+                     "editable": False, "submit": "流程产物，不提交",
+                     **_file_info(cdir / "result.mp4")})
+    return rows
+
+
 def _case_info(name: str) -> dict | None:
     try:
         case = case_mod.load(name, _ctx["cases_root"])
@@ -629,7 +704,9 @@ def _case_info(name: str) -> dict | None:
         "frame_count": store.frame_count if store else None,
         "extract_current": case.extract_current,
         "adopt_round": case.adopt_round,
-        "assets": _asset_details(case) if case.flow == "gen" else [],
+        "assets": _asset_details(case),
+        "submit_selected": case.submit_selected,
+        "derived": _derived(case),
         "extracts": extracts,
         "outputs": _outputs(case),
         "step_files": _step_files(case),
@@ -724,6 +801,45 @@ def _brief(name: str) -> dict | None:
             "gates": _gates(case, extracts)}
 
 
+def _is_16_9(width: int, height: int) -> bool:
+    ratio = width / height if height else 0.0
+    return abs(ratio - 16 / 9) <= (16 / 9) * 0.001
+
+
+def _mode_ready(case: case_mod.Case, mode: str | None) -> tuple[bool, str]:
+    """提交前按当前模式检查；页面用它决定生成按钮是否可用。"""
+    if mode == "firstLastFrame":
+        firsts = [a for a in case.assets if a.role == "first_frame"]
+        lasts = [a for a in case.assets if a.role == "last_frame"]
+        if len(firsts) != 1 or len(lasts) != 1:
+            return False, "firstLastFrame 需要恰好一张首帧与一张尾帧，先在工作台挑选"
+        if case.flow == "patch":
+            vp = case.viewport or {}
+            width, height = int(vp.get("width") or 0), int(vp.get("height") or 0)
+            if not _is_16_9(width, height):
+                return False, "patch viewport 不是 16:9；firstLastFrame 首期只接受 16:9"
+        return True, ""
+    if mode == "allMediaRef":
+        if not case.assets:
+            return False, "allMediaRef 至少需要 1 个素材"
+        return True, ""
+    if mode in ("videoEdit", "videoExtend"):
+        if case.flow == "gen" and not any(a.kind == "video" for a in case.assets):
+            return False, f"{mode} 需要 1 个视频母版"
+        return True, ""
+    return True, ""
+
+
+def _apply_mode_gate(info: dict, case: case_mod.Case, mode: str | None) -> None:
+    gate = (info.get("gates") or {}).get("generate")
+    if gate is None or not mode:
+        return
+    ready, reason = _mode_ready(case, mode)
+    if not ready:
+        gate["ready"] = False
+        gate["reason"] = reason
+
+
 async def api_case(request):
     name = request.path_params["name"]
     info = await asyncio.to_thread(_case_info, name)
@@ -731,8 +847,15 @@ async def api_case(request):
         return JSONResponse({"error": "no such case"}, status_code=404)
     # prompt / 生成参数只挂在这一个读端点上：draft/nudge 等高频路径不多 spawn
     # 两个子进程
-    info["prompt"] = await asyncio.to_thread(_prompt, name, info["flow"])
-    info["generation_params"] = await asyncio.to_thread(_generation_params, name)
+    try:
+        case = case_mod.load(name, _ctx["cases_root"])
+    except CaseError:
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    params = await asyncio.to_thread(_generation_params, name)
+    info["generation_params"] = params
+    mode = (params.get("current") or {}).get("mode")
+    _apply_mode_gate(info, case, mode)
+    info["prompt"] = await asyncio.to_thread(_prompt, name, info["flow"], mode)
     return JSONResponse(info)
 
 
@@ -792,14 +915,12 @@ async def asset_img(request):
 
 
 async def api_assets(request):
-    """gen 素材增删改排（唯一权威仍是 vrstudio.case 的素材函数）。"""
+    """三流程素材增删改排（唯一权威仍是 vrstudio.case 的素材函数）。"""
     name = request.path_params["name"]
     try:
         case = case_mod.load(name, _ctx["cases_root"])
     except CaseError:
         return JSONResponse({"error": "no such case"}, status_code=404)
-    if case.flow != "gen":
-        return JSONResponse({"error": f"{case.flow} 流没有素材列表"}, status_code=400)
     body = await request.json()
     op = body.get("op")
     try:
@@ -826,10 +947,256 @@ async def api_assets(request):
             return JSONResponse({"error": f"未知素材操作：{op}"}, status_code=400)
     except CaseError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    case = await asyncio.to_thread(case_mod.load, name, _ctx["cases_root"])
     info = await asyncio.to_thread(_case_info, name)
-    info["generation_params"] = await asyncio.to_thread(_generation_params, name)
-    info["prompt"] = await asyncio.to_thread(_prompt, name, case.flow)
+    params = await asyncio.to_thread(_generation_params, name)
+    info["generation_params"] = params
+    mode = (params.get("current") or {}).get("mode")
+    _apply_mode_gate(info, case, mode)
+    info["prompt"] = await asyncio.to_thread(_prompt, name, case.flow, mode)
     return JSONResponse(info)
+
+
+def _info_with_generation(name: str) -> dict:
+    case = case_mod.load(name, _ctx["cases_root"])
+    info = _case_info(name) or {}
+    params = _generation_params(name)
+    info["generation_params"] = params
+    mode = (params.get("current") or {}).get("mode")
+    _apply_mode_gate(info, case, mode)
+    info["prompt"] = _prompt(name, case.flow, mode)
+    return info
+
+
+async def api_derived(request):
+    name = request.path_params["name"]
+    try:
+        case = case_mod.load(name, _ctx["cases_root"])
+    except CaseError:
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    return JSONResponse({"derived": _derived(case)})
+
+
+async def api_submit_set(request):
+    """``[submit] selected`` 的读写（侧边栏勾选即时保存）。"""
+    name = request.path_params["name"]
+    try:
+        case = case_mod.load(name, _ctx["cases_root"])
+    except CaseError:
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    if request.method == "GET":
+        return JSONResponse({"selected": case.submit_selected})
+    body = await request.json()
+    if "selected" not in body:
+        return JSONResponse({"error": "缺少 selected"}, status_code=400)
+    selected = body.get("selected")
+    if selected is not None:
+        if not isinstance(selected, list):
+            return JSONResponse({"error": "selected 必须是数组"}, status_code=400)
+        selected = [str(item) for item in selected]
+    try:
+        await asyncio.to_thread(case_mod.set_submit_selected, name, selected,
+                                _ctx["cases_root"])
+    except CaseError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(await asyncio.to_thread(_info_with_generation, name))
+
+
+async def api_extract_frames(request):
+    """从当前 clip 抽首尾原始帧，按源分辨率导出，不缩放。"""
+    name = request.path_params["name"]
+    try:
+        case = case_mod.load(name, _ctx["cases_root"])
+    except CaseError:
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    if case.flow != "patch":
+        return JSONResponse({"error": "只有 patch 流可以从 clip 抽帧"}, status_code=400)
+    if not case.extract_current:
+        return JSONResponse({"error": "还没有抽取版本"}, status_code=400)
+    clip = (case.dir(_ctx["cases_root"]) / "extracts" / case.extract_current / "clip.mp4")
+    if not clip.is_file():
+        return JSONResponse({"error": f"clip 不存在：{clip}"}, status_code=400)
+    body = await request.json()
+    try:
+        info = await asyncio.to_thread(probe, clip)
+    except VideoIOError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    duration = info.duration_s
+    fps = info.fps_float or 30.0
+    try:
+        t_first = float(body.get("t_first", 0.0))
+        t_last = float(body.get("t_last", max(0.0, duration - 1.0 / fps)))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "t_first / t_last 必须是秒数"}, status_code=400)
+    t_first = min(max(0.0, t_first), duration)
+    t_last = min(max(0.0, t_last), max(0.0, duration - 1.0 / fps))
+    if t_last <= t_first:
+        return JSONResponse({"error": "t_last 必须大于 t_first"}, status_code=400)
+    tmpdir = Path(tempfile.mkdtemp(prefix=f"frames-{name}-"))
+    try:
+        pairs = []
+        for role, t in (("first_frame_raw", t_first), ("last_frame_raw", t_last)):
+            out = tmpdir / f"{role}.png"
+            await asyncio.to_thread(extract_frame, clip, t, out)
+            pairs.append((out, role))
+        await asyncio.to_thread(case_mod.add_assets, name, pairs, _ctx["cases_root"])
+    except (VideoIOError, CaseError, OSError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    return JSONResponse(await asyncio.to_thread(_info_with_generation, name))
+
+
+def _keyframe_ratio(case: case_mod.Case) -> str:
+    if case.flow == "patch":
+        vp = case.viewport or {}
+        if not _is_16_9(int(vp.get("width") or 0), int(vp.get("height") or 0)):
+            raise CaseError("patch viewport 不是 16:9；首期工作台只接受 16:9")
+    return "16:9"
+
+
+def _keyframe_argv(name: str, body: dict) -> list[str]:
+    case = case_mod.load(name, _ctx["cases_root"])
+    ids = [str(item) for item in (body.get("assets") or [])]
+    if not ids:
+        raise CaseError("工作台至少需要 1 张参考图")
+    paths = [case.asset(asset_id).resolved(case, _ctx["cases_root"]) for asset_id in ids]
+    for path in paths:
+        if not path.is_file():
+            raise CaseError(f"参考图不存在：{path}")
+    prompt = str(body.get("prompt") or "").strip()
+    if not prompt:
+        raise CaseError("提示词不能为空")
+    argv = [_vrgen_exe(), "image", "submit", "--job", name, "--prompt", prompt]
+    for path in paths:
+        argv += ["--image", str(path)]
+    argv += ["--ratio", _keyframe_ratio(case)]
+    if body.get("model_id") is not None:
+        argv += ["--model-id", str(body["model_id"])]
+    if body.get("resolution"):
+        argv += ["--resolution", str(body["resolution"])]
+    if body.get("num") is not None:
+        argv += ["--num", str(body["num"])]
+    argv += ["--workdir", str(_workdir())]
+    return argv
+
+
+def _keyframe_rounds(name: str) -> dict:
+    root = _workdir() / name
+    rows: list[dict] = []
+    if not root.is_dir():
+        return {"rounds": []}
+    for directory in sorted((p for p in root.glob("img-*") if p.is_dir()),
+                            key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            blob = json.loads((directory / "run.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        results = []
+        for index, raw in enumerate(blob.get("results") or [], start=1):
+            if Path(raw).is_file():
+                results.append({"index": index,
+                                "url": f"/img/keyframe/{name}/{directory.name}/{index}"})
+        rows.append({"round": directory.name, "key": blob.get("key", ""),
+                     "stage": blob.get("stage", ""),
+                     "gate": blob.get("gate") or {}, "results": results})
+    return {"rounds": rows}
+
+
+async def api_keyframe_run(request):
+    name = request.path_params["name"]
+    body = await request.json()
+    try:
+        argv = await asyncio.to_thread(_keyframe_argv, name, body)
+    except (CaseError, OSError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    QUEUE.submit("keyframe", name, argv)
+    return JSONResponse({"submitted": "keyframe", "case": name})
+
+
+async def api_keyframe_rounds(request):
+    name = request.path_params["name"]
+    if not case_mod.case_toml(name, _ctx["cases_root"]).is_file():
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    return JSONResponse(await asyncio.to_thread(_keyframe_rounds, name))
+
+
+async def api_keyframe_pick(request):
+    name = request.path_params["name"]
+    body = await request.json()
+    role = str(body.get("role") or "first_frame")
+    if role not in ("first_frame", "last_frame"):
+        return JSONResponse({"error": "角色只能是 first_frame 或 last_frame"},
+                            status_code=400)
+    round_name = str(body.get("round") or "")
+    directory = _workdir() / name / round_name
+    try:
+        blob = json.loads((directory / "run.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return JSONResponse({"error": "找不到这个图片轮次"}, status_code=404)
+    results = blob.get("results") or []
+    try:
+        index = int(body.get("index") or 1)
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "index 必须是整数"}, status_code=400)
+    if not 1 <= index <= len(results):
+        return JSONResponse({"error": f"这一轮没有第 {index} 张候选"}, status_code=400)
+    suffix = Path(results[index - 1]).suffix or ".png"
+    fd, raw = tempfile.mkstemp(prefix=f"keyframe-{name}-", suffix=suffix)
+    os.close(fd)
+    target = Path(raw)
+    argv = [_vrgen_exe(), "result", "--job", name, "--round",
+            str(blob.get("key") or round_name), "--index", str(index),
+            "--out", str(target), "--workdir", str(_workdir())]
+    try:
+        code, output = await asyncio.to_thread(_capture, argv)
+        if code != 0:
+            return JSONResponse({"error": output.strip() or "vrgen result 失败"},
+                                status_code=502)
+        meta = await asyncio.to_thread(_media_meta, target, "image")
+        width, height = int(meta.get("width") or 0), int(meta.get("height") or 0)
+        if not _is_16_9(width, height):
+            return JSONResponse({"error": f"候选图不是 16:9（{width}x{height}）"},
+                                status_code=400)
+        other_role = "last_frame" if role == "first_frame" else "first_frame"
+        existing = next((a for a in case_mod.load(name, _ctx["cases_root"]).assets
+                         if a.role == other_role), None)
+        if existing is not None:
+            other = await asyncio.to_thread(
+                _media_meta, existing.resolved(case_mod.load(name, _ctx["cases_root"]),
+                                               _ctx["cases_root"]), "image")
+            if (int(other.get("width") or 0), int(other.get("height") or 0)) != (width, height):
+                return JSONResponse(
+                    {"error": "首帧与尾帧宽高不一致，请重新出图"}, status_code=400)
+        await asyncio.to_thread(case_mod.add_assets, name, [(target, role)],
+                                _ctx["cases_root"])
+    except (CaseError, OSError, VideoIOError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    finally:
+        target.unlink(missing_ok=True)
+    return JSONResponse(await asyncio.to_thread(_info_with_generation, name))
+
+
+async def keyframe_img(request):
+    name = request.path_params["name"]
+    round_name = request.path_params["round"]
+    try:
+        index = int(request.path_params["index"])
+    except ValueError:
+        return JSONResponse({"error": "bad index"}, status_code=400)
+    directory = _workdir() / name / round_name
+    try:
+        blob = json.loads((directory / "run.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    results = blob.get("results") or []
+    if not 1 <= index <= len(results):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    path = Path(results[index - 1])
+    if not path.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    media = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+    return FileResponse(str(path), media_type=media)
 
 
 async def api_prompt(request):
@@ -841,9 +1208,10 @@ async def api_prompt(request):
     except CaseError:
         return JSONResponse({"error": "no such case"}, status_code=404)
     body = await request.json()
+    mode = await asyncio.to_thread(_current_mode, name)
     argv = ["prompt", "save", "--job", name,
-            "--template", TEMPLATE_BY_FLOW[case.flow], "--workdir", str(_workdir())]
-    preview_args, refs_file = _prompt_preview_args(name, case.flow)
+            "--template", template_for(case.flow, mode), "--workdir", str(_workdir())]
+    preview_args, refs_file = _prompt_preview_args(name, case.flow, mode)
     argv += preview_args
     if body.get("unset"):
         argv += ["--unset", str(body["unset"])]
@@ -896,8 +1264,11 @@ async def api_params(request):
     if "error" in payload:
         return JSONResponse(payload, status_code=400)
     info = await asyncio.to_thread(_case_info, name)
-    info["prompt"] = await asyncio.to_thread(_prompt, name, case.flow)
-    info["generation_params"] = await asyncio.to_thread(_generation_params, name)
+    params = await asyncio.to_thread(_generation_params, name)
+    info["generation_params"] = params
+    mode = (params.get("current") or {}).get("mode")
+    _apply_mode_gate(info, case, mode)
+    info["prompt"] = await asyncio.to_thread(_prompt, name, case.flow, mode)
     return JSONResponse(info)
 
 
@@ -1020,6 +1391,8 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
             argv += ["--scale", str(body["scale"])]
         if body.get("mode"):
             argv += ["--mode", str(body["mode"])]
+        if body.get("duration") is not None:
+            argv += ["--duration", str(body["duration"])]
         if body.get("aspect_ratio"):
             argv += ["--aspect-ratio", str(body["aspect_ratio"])]
         return argv
@@ -1096,6 +1469,7 @@ routes = [
     Route("/case/{name}", wizard),
     Route("/img/{name}/{file}", img),
     Route("/img/asset/{name}/{file}", asset_img),
+    Route("/img/keyframe/{name}/{round}/{index}", keyframe_img),
     Route("/video/source/{name}", video_source),
     Route("/video/out/{name}/{file}", video_out),
     Route("/api/cases", api_cases, methods=["GET", "POST"]),
@@ -1104,6 +1478,12 @@ routes = [
     Route("/api/case/{name}/prompt", api_prompt, methods=["POST"]),
     Route("/api/case/{name}/params", api_params, methods=["POST"]),
     Route("/api/case/{name}/assets", api_assets, methods=["POST"]),
+    Route("/api/case/{name}/derived", api_derived),
+    Route("/api/case/{name}/submit", api_submit_set, methods=["GET", "PUT"]),
+    Route("/api/case/{name}/extract-frames", api_extract_frames, methods=["POST"]),
+    Route("/api/case/{name}/keyframe/run", api_keyframe_run, methods=["POST"]),
+    Route("/api/case/{name}/keyframe/rounds", api_keyframe_rounds),
+    Route("/api/case/{name}/keyframe/pick", api_keyframe_pick, methods=["POST"]),
     Route("/api/sessions", api_sessions),
     Route("/api/modes", api_modes),
     Route("/api/case/{name}/viewport", api_viewport, methods=["POST"]),
