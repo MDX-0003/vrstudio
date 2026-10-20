@@ -177,3 +177,78 @@ def test_name_rules(tmp_path, src_video):
     for bad in ("船", "a/b", "..", "-x"):
         with pytest.raises(CaseError):
             case_mod.create(bad, "patch", src_video, root=tmp_path)
+
+
+def test_assets_allowed_for_all_flows(tmp_path, src_video):
+    case_mod.create("ship", "patch", src_video, root=tmp_path)
+    image = tmp_path / "ref.png"
+    image.write_bytes(b"fake png bytes")
+    case = case_mod.add_assets("ship", [(image, "subject_ref")], root=tmp_path)
+    assert [a.kind for a in case.assets] == ["image"]
+    assert case.source_path is not None
+    text = case_mod.case_toml("ship", tmp_path).read_text(encoding="utf-8")
+    assert "[[assets]]" in text and "[source]" in text
+    back = case_mod.load("ship", tmp_path)
+    assert back.assets[0].id == "i1" and back.source_path == case.source_path
+
+    case_mod.create("pano", "fullredraw", src_video, root=tmp_path)
+    case = case_mod.add_assets("pano", [(image, "scene_ref")], root=tmp_path)
+    assert [a.role for a in case.assets] == ["scene_ref"]
+    assert case_mod.load("pano", tmp_path).assets
+
+
+def test_asset_crud_all_flows(tmp_path, src_video):
+    case_mod.create("ship", "patch", src_video, root=tmp_path)
+    first = tmp_path / "first.png"
+    last = tmp_path / "last.png"
+    first.write_bytes(b"first")
+    last.write_bytes(b"last")
+    case = case_mod.add_assets("ship", [(first, "subject_ref")], root=tmp_path)
+    case = case_mod.add_assets("ship", [(last, "scene_ref")], root=tmp_path)
+    assert [a.id for a in case.assets] == ["i1", "i2"]
+    case = case_mod.set_asset_role("ship", "i1", "first_frame", root=tmp_path)
+    assert case.assets[0].role == "first_frame"
+    case = case_mod.reorder_assets("ship", ["i2", "i1"], root=tmp_path)
+    assert [a.id for a in case.assets] == ["i2", "i1"]
+    assert len(case_mod.check_assets(case, tmp_path)) == 2
+    case = case_mod.remove_asset("ship", "i1", root=tmp_path)
+    assert [a.id for a in case.assets] == ["i2"]
+
+
+def test_submit_selected_roundtrip(tmp_path, src_video):
+    case_mod.create("g", "gen", root=tmp_path)
+    first = tmp_path / "first.png"
+    last = tmp_path / "last.png"
+    first.write_bytes(b"first")
+    last.write_bytes(b"last")
+    case_mod.add_assets("g", [(first, "first_frame"), (last, "last_frame")],
+                        root=tmp_path)
+    case = case_mod.set_submit_selected("g", ["i1", "i2"], root=tmp_path)
+    assert case.submit_selected == ["i1", "i2"]
+    text = case_mod.case_toml("g", tmp_path).read_text(encoding="utf-8")
+    assert "[submit]" in text and 'selected = ["i1", "i2"]' in text
+    assert case_mod.load("g", tmp_path).submit_selected == ["i1", "i2"]
+
+    with pytest.raises(CaseError, match="不存在"):
+        case_mod.set_submit_selected("g", ["i9"], root=tmp_path)
+    case = case_mod.remove_asset("g", "i1", root=tmp_path)
+    assert case.submit_selected == ["i2"]
+
+
+def test_master_image_fallback(tmp_path):
+    case_mod.create("g", "gen", root=tmp_path)
+    first = tmp_path / "first.png"
+    first.write_bytes(b"first")
+    case = case_mod.add_assets("g", [(first, "first_frame")], root=tmp_path)
+    assert case.master().id == "i1"
+
+    scene = tmp_path / "scene.png"
+    scene.write_bytes(b"scene")
+    case = case_mod.add_assets("g", [(scene, "scene_ref")], root=tmp_path)
+    assert case.master().id == "i2"       # space/scene 先于 first_frame
+
+    case_mod.create("g2", "gen", root=tmp_path)
+    last = tmp_path / "last.png"
+    last.write_bytes(b"last")
+    case = case_mod.add_assets("g2", [(last, "last_frame")], root=tmp_path)
+    assert case.master().id == "i1"       # 兜底第一条图片

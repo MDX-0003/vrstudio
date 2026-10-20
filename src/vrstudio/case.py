@@ -37,16 +37,26 @@ ROLE_LABELS = {
     "space_ref": "空间参考（只提供机位、构图与起终点位置）",
     "scene_ref": "场景参考（只提供构图、背景与光照）",
     "subject_ref": "主体参考（只定义角色外观）",
+    "first_frame": "首帧定稿图（视频第一帧，锁起点构图与人物外观）",
+    "last_frame": "尾帧定稿图（视频最后一帧，锁终点位置、大小与朝向）",
+    "mid_frame": "中间过渡帧（首尾间距过大时补充，预留）",
+    "first_frame_raw": "首帧原始抽取图（工作台输入底图，不是生成素材）",
+    "last_frame_raw": "尾帧原始抽取图（工作台输入底图，不是生成素材）",
 }
 ROLES = tuple(ROLE_LABELS)
 
-#: 本期支持的三种生成模式，以及每种模式允许的角色。
+#: 本期支持的生成模式，以及每种模式允许的角色。
 #: 真正的提交前校验在 vrgen；这里是同一份规则的只读镜像，供页面列选项。
 MODE_ROLES: dict[str, dict[str, tuple[str, ...]]] = {
     "videoEdit": {"video": ("edit_master",), "image": ("subject_ref",)},
-    "allMediaRef": {"video": ("edit_master", "motion_ref", "space_ref", "scene_ref"),
-                    "image": ("subject_ref", "space_ref", "scene_ref")},
+    "allMediaRef": {
+        "video": ("edit_master", "motion_ref", "space_ref", "scene_ref"),
+        "image": ("subject_ref", "space_ref", "scene_ref",
+                  "first_frame", "last_frame", "mid_frame",
+                  "first_frame_raw", "last_frame_raw"),
+    },
     "videoExtend": {"video": ("edit_master",), "image": ("subject_ref",)},
+    "firstLastFrame": {"video": (), "image": ("first_frame", "last_frame")},
 }
 GEN_MODES = tuple(MODE_ROLES)
 
@@ -109,8 +119,10 @@ class Case:
     inner: dict | None = None
     frames: dict | None = None
     extract_current: str | None = None
-    # ── 仅 flow = gen：有序素材列表（顺序即 @VideoN / @ImageN 编号）──
+    # ── 三流程通用的文件素材列表（顺序即 @VideoN / @ImageN 编号）──
     assets: list[Asset] = field(default_factory=list)
+    # ── 可选提交集：素材 id 子集；None = 按模式取默认集 ──
+    submit_selected: list[str] | None = None
     # ── adopt 指针：vrgen 台账里被采用的轮次 ──
     adopt_round: str | None = None
 
@@ -124,12 +136,21 @@ class Case:
         raise CaseError(f"case {self.name} 没有素材 {asset_id!r}")
 
     def master(self) -> Asset | None:
-        """提示词几何与上传基准：第一条 edit_master，否则第一条视频。"""
+        """提示词几何与上传基准：按契约的回退链取第一条可用素材。"""
         videos = [a for a in self.assets if a.kind == "video"]
         for item in videos:
             if item.role == "edit_master":
                 return item
-        return videos[0] if videos else None
+        if videos:
+            return videos[0]
+        for item in self.assets:
+            if item.kind == "image" and item.role in ("space_ref", "scene_ref"):
+                return item
+        for item in self.assets:
+            if item.kind == "image" and item.role == "first_frame":
+                return item
+        images = [a for a in self.assets if a.kind == "image"]
+        return images[0] if images else None
 
 
 # ── 创建 ─────────────────────────────────────────────────────────────────
@@ -190,8 +211,7 @@ def load(name: str, root: str | Path | None = None) -> Case:
             isinstance(references, list) and all(isinstance(r, str) for r in references)):
         raise CaseError(f"{path}: [gen] reference_images 必须是字符串数组")
     assets = _parse_assets(raw.get("assets"), path)
-    if flow != "gen" and assets:
-        raise CaseError(f"{path}: [[assets]] 只属于 flow=gen")
+    selected = _parse_submit(raw.get("submit"), assets, path)
     case = Case(
         name=name, flow=flow,
         source_path=str(source.get("path", "")) or None,
@@ -199,6 +219,7 @@ def load(name: str, root: str | Path | None = None) -> Case:
         viewport=raw.get("viewport"), inner=raw.get("inner"),
         frames=raw.get("frames"), extract_current=raw.get("extract", {}).get("current"),
         assets=assets,
+        submit_selected=selected,
         adopt_round=raw.get("adopt", {}).get("round"),
     )
     if flow != "patch":
@@ -216,19 +237,20 @@ def load(name: str, root: str | Path | None = None) -> Case:
 
 def save(case: Case, root: str | Path | None = None) -> Case:
     lines = [f"schema = {SCHEMA}", f'flow = "{case.flow}"']
-    if case.flow == "gen":
-        for asset in case.assets:
-            lines += ["", "[[assets]]",
-                      f"id = {_s(asset.id)}",
-                      f"kind = {_s(asset.kind)}",
-                      f"path = {_s(asset.path)}",
-                      f"role = {_s(asset.role)}"]
-            if asset.sha256:
-                lines.append(f"sha256 = {_s(asset.sha256)}")
-    elif case.source_path is not None:
+    for asset in case.assets:
+        lines += ["", "[[assets]]",
+                  f"id = {_s(asset.id)}",
+                  f"kind = {_s(asset.kind)}",
+                  f"path = {_s(asset.path)}",
+                  f"role = {_s(asset.role)}"]
+        if asset.sha256:
+            lines.append(f"sha256 = {_s(asset.sha256)}")
+    if case.flow != "gen" and case.source_path is not None:
         lines += ["", "[source]", f"path = {_s(case.source_path)}"]
         if case.sha256:
             lines.append(f"sha256 = {_s(case.sha256)}")
+    if case.submit_selected is not None:
+        lines += ["", "[submit]", f"selected = {_toml_list(case.submit_selected)}"]
     if case.flow == "patch":
         for section, value in (("viewport", case.viewport), ("inner", case.inner),
                                ("frames", case.frames)):
@@ -268,6 +290,26 @@ def _parse_assets(raw, path: Path) -> list[Asset]:
         seen.add(asset.id)
         out.append(asset)
     return out
+
+
+def _parse_submit(raw, assets: list[Asset], path: Path) -> list[str] | None:
+    """``[submit] selected``：素材 id 子集；缺省表示按模式默认集。"""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise CaseError(f"{path}: [submit] 必须是表")
+    selected = raw.get("selected")
+    if selected is None:
+        return None
+    if not isinstance(selected, list) or not all(isinstance(item, str) for item in selected):
+        raise CaseError(f"{path}: [submit] selected 必须是字符串数组")
+    if len(set(selected)) != len(selected):
+        raise CaseError(f"{path}: [submit] selected 有重复 id")
+    known = {asset.id for asset in assets}
+    unknown = sorted(set(selected) - known)
+    if unknown:
+        raise CaseError(f"{path}: [submit] selected 引用了不存在的素材：{unknown}")
+    return list(selected)
 
 
 def _validate_asset(asset: Asset, path: Path) -> None:
@@ -329,8 +371,6 @@ def add_assets(name: str, pairs: list[tuple[str | Path, str]],
     复制中途失败时清掉本次已复制的文件，不留下半条记录。
     """
     case = load(name, root)
-    if case.flow != "gen":
-        raise CaseError(f"case {name} 是 {case.flow} 流，没有素材列表")
     return _add_assets_to(case, pairs, root)
 
 
@@ -382,22 +422,21 @@ def _add_assets_to(case: Case, pairs: list[tuple[str | Path, str]],
 
 def remove_asset(name: str, asset_id: str, root: str | Path | None = None) -> Case:
     case = load(name, root)
-    if case.flow != "gen":
-        raise CaseError(f"case {name} 是 {case.flow} 流，没有素材列表")
     target = case.asset(asset_id).resolved(case, root)
     try:
         target.unlink(missing_ok=True)
     except OSError as exc:
         raise CaseError(f"素材文件删不掉：{target}（{exc}）；记录未改动") from exc
     case.assets = [a for a in case.assets if a.id != asset_id]
+    if case.submit_selected is not None:
+        case.submit_selected = [item for item in case.submit_selected
+                                if item != asset_id]
     return save(case, root)
 
 
 def set_asset_role(name: str, asset_id: str, role: str,
                    root: str | Path | None = None) -> Case:
     case = load(name, root)
-    if case.flow != "gen":
-        raise CaseError(f"case {name} 是 {case.flow} 流，没有素材列表")
     if role not in ROLES:
         raise CaseError(f"角色 {role!r} 不合约；可选：{', '.join(ROLES)}")
     case.asset(asset_id).role = role
@@ -406,8 +445,6 @@ def set_asset_role(name: str, asset_id: str, role: str,
 
 def reorder_assets(name: str, ids: list[str], root: str | Path | None = None) -> Case:
     case = load(name, root)
-    if case.flow != "gen":
-        raise CaseError(f"case {name} 是 {case.flow} 流，没有素材列表")
     current = {a.id for a in case.assets}
     if sorted(ids) != sorted(current) or len(set(ids)) != len(ids):
         raise CaseError(f"排序必须给出全部素材 id，且不能重复；当前：{sorted(current)}")
@@ -445,6 +482,24 @@ def _safe_stem(stem: str) -> str:
 def set_adopt(name: str, round_key: str, root: str | Path | None = None) -> Case:
     case = load(name, root)
     case.adopt_round = round_key
+    return save(case, root)
+
+
+def set_submit_selected(name: str, selected: list[str] | None,
+                        root: str | Path | None = None) -> Case:
+    """写 ``[submit] selected``；``None`` 清除该段，回到按模式的默认集。"""
+    case = load(name, root)
+    if selected is not None:
+        if not all(isinstance(item, str) for item in selected):
+            raise CaseError("submit selected 必须是字符串数组")
+        if len(set(selected)) != len(selected):
+            raise CaseError("submit selected 有重复 id")
+        known = {asset.id for asset in case.assets}
+        unknown = sorted(set(selected) - known)
+        if unknown:
+            raise CaseError(f"submit selected 引用了不存在的素材：{unknown}")
+        selected = list(selected)
+    case.submit_selected = selected
     return save(case, root)
 
 
@@ -510,9 +565,7 @@ def check_source(case: Case, root: str | Path | None = None) -> Path:
 
 
 def check_assets(case: Case, root: str | Path | None = None) -> list[tuple[Asset, Path]]:
-    """gen 流的守卫：每个素材都在、且内容与添加时一致。"""
-    if case.flow != "gen":
-        raise CaseError(f"case {case.name} 是 {case.flow} 流，没有 assets")
+    """三流程通用的守卫：每个素材都在、且内容与添加时一致。"""
     out: list[tuple[Asset, Path]] = []
     for asset in case.assets:
         target = asset.resolved(case, root)
@@ -528,6 +581,10 @@ def check_assets(case: Case, root: str | Path | None = None) -> list[tuple[Asset
 
 def _s(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+def _toml_list(values: list[str]) -> str:
+    return "[" + ", ".join(_s(item) for item in values) + "]"
 
 
 def _kv(key: str, value) -> str:
