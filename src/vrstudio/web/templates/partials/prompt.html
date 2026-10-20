@@ -1,7 +1,11 @@
 <h3>提示词（这次发给 Seedance 的完整内容）</h3>
-<div class="meta">下面的模板正文是固定不动的部分，照原样发出去；模板里需要填的变量
-  在输入框里改，改动立即保存，下次打开这个 case 还在。模板自带的变量只能改值，
-  自己添加的变量可以删除。素材清单与模式规则由页面自动生成，不出现在输入框里。</div>
+<div class="meta">下面是把变量、素材角色、生成模式与画布尺寸代入后的完整提示词，
+  默认不再显示 {占位符}。模板骨架可以切换查看；变量改动会立即保存并刷新预览。
+  素材清单与模式规则由页面自动生成，不出现在输入框里。</div>
+<div class="row" style="align-items:center">
+  <button id="promptToggle" onclick="togglePromptView()">查看模板骨架</button>
+  <span class="meta" id="promptViewState">完整预览</span>
+</div>
 <pre id="promptBox">（加载中）</pre>
 <div id="varList"></div>
 <div class="row" style="align-items:center">

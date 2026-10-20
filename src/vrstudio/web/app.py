@@ -16,6 +16,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 import cv2
@@ -195,11 +196,52 @@ def _vrgen_json(argv: list[str]) -> dict:
         return {"error": "vrgen 的返回不是合法 JSON"}
 
 
+def _prompt_preview_args(name: str, flow: str) -> tuple[list[str], Path | None]:
+    """提示词展开所需的 CLI 参数：几何尺寸 + gen 的素材清单临时文件。
+
+    拿不到素材或尺寸时不报错，只返回已能拿到的部分；vrgen 会把缺的占位符
+    报成 render_error，页面显示具体缺什么，而不是干瞪占位符。
+    """
+    args: list[str] = []
+    refs_file: Path | None = None
+    try:
+        case = case_mod.load(name, _ctx["cases_root"])
+        _video, _mask, _template, canvas, source = resolve_package(
+            case, _ctx["cases_root"])
+    except (CaseError, GenError, KeyError, ValueError, OSError):
+        return args, None
+    args += ["--canvas", f"{canvas[0]}x{canvas[1]}",
+             "--source", f"{source[0]}x{source[1]}"]
+    if flow == "gen":
+        try:
+            assets = case_mod.check_assets(case, _ctx["cases_root"])
+        except (CaseError, OSError):
+            return args, None
+        payload = {"assets": [
+            {"id": asset.id, "kind": asset.kind, "role": asset.role,
+             "path": str(path.resolve()), "sha256": asset.sha256}
+            for asset, path in assets
+        ]}
+        fd, raw = tempfile.mkstemp(prefix=f"vrgen-prompt-{name}-", suffix=".json")
+        os.close(fd)
+        refs_file = Path(raw)
+        refs_file.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                             encoding="utf-8")
+        args += ["--refs", str(refs_file)]
+    return args, refs_file
+
+
 def _prompt(name: str, flow: str) -> dict:
-    """提示词模板 + 变量草稿（决策 18；契约 case-model.md §4）。"""
-    return _vrgen_json(["prompt", "show", "--job", name,
-                        "--template", TEMPLATE_BY_FLOW[flow],
-                        "--workdir", str(_workdir())])
+    """提示词模板 + 变量草稿 + 展开后的完整正文（决策 18；契约 case-model.md §4）。"""
+    argv = ["prompt", "show", "--job", name,
+            "--template", TEMPLATE_BY_FLOW[flow],
+            "--workdir", str(_workdir())]
+    preview_args, refs_file = _prompt_preview_args(name, flow)
+    try:
+        return _vrgen_json([*argv, *preview_args])
+    finally:
+        if refs_file is not None:
+            refs_file.unlink(missing_ok=True)
 
 
 def _sessions_tree() -> dict:
@@ -801,13 +843,21 @@ async def api_prompt(request):
     body = await request.json()
     argv = ["prompt", "save", "--job", name,
             "--template", TEMPLATE_BY_FLOW[case.flow], "--workdir", str(_workdir())]
+    preview_args, refs_file = _prompt_preview_args(name, case.flow)
+    argv += preview_args
     if body.get("unset"):
         argv += ["--unset", str(body["unset"])]
     elif body.get("set"):
         argv += ["--set", f"{body['set']}={body.get('value', '')}"]
     else:
+        if refs_file is not None:
+            refs_file.unlink(missing_ok=True)
         return JSONResponse({"error": "没有要改的内容"}, status_code=400)
-    payload = await asyncio.to_thread(_vrgen_json, argv)
+    try:
+        payload = await asyncio.to_thread(_vrgen_json, argv)
+    finally:
+        if refs_file is not None:
+            refs_file.unlink(missing_ok=True)
     if "error" in payload:
         return JSONResponse(payload, status_code=400)
     info = await asyncio.to_thread(_case_info, name)

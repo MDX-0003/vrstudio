@@ -5,23 +5,58 @@
  */
 "use strict";
 
-function renderPrompt() {
+let promptView = "rendered";   // rendered = 完整提示词；template = 含占位符的骨架
+
+function renderPromptBox() {
   const p = info && info.prompt;
-  const box = $("promptBox"), list = $("varList"), meta = $("promptMeta");
-  if (!box || !list || !meta) return;
+  const box = $("promptBox"), toggle = $("promptToggle"), state = $("promptViewState");
+  if (!box) return;
   if (!p || p.error) {
     box.textContent = (p && p.error) || "（提示词信息还没有加载）";
+    if (toggle) toggle.style.display = "none";
+    if (state) state.textContent = "";
+    return;
+  }
+  if (toggle) {
+    toggle.style.display = p.template_text ? "" : "none";
+    toggle.textContent = promptView === "template" ? "返回完整预览" : "查看模板骨架";
+  }
+  if (state) state.textContent = promptView === "template" ? "模板骨架（含占位符）" : "完整预览";
+  if (promptView === "template") {
+    box.textContent = p.template_text || "（还没有选定模板）";
+    return;
+  }
+  if (p.rendered) {
+    box.textContent = p.rendered;
+    return;
+  }
+  if (p.render_error) {
+    box.textContent = "还不能展开完整提示词：\n" + p.render_error;
+    return;
+  }
+  box.textContent = "（还没有可展开的提示词）";
+}
+
+function togglePromptView() {
+  promptView = promptView === "rendered" ? "template" : "rendered";
+  renderPromptBox();
+}
+
+function renderPrompt() {
+  const p = info && info.prompt;
+  const list = $("varList"), meta = $("promptMeta");
+  renderPromptBox();
+  if (!list || !meta) return;
+  if (!p || p.error) {
     list.innerHTML = "";
     meta.textContent = "";
     return;
   }
-  box.textContent = p.template_text || "（还没有选定模板）";
   const computed = p.computed_keys || [];
   const readOnly = [...(p.geometry_keys || []), ...computed];
   meta.textContent = p.template
-    ? `模板 ${p.template}。正文里 ${(p.geometry_keys || []).length} 个几何占位` +
-      (computed.length ? `、${computed.length} 个素材/模式自动键（${computed.join("、")}）` : "") +
-      "在提交时自动填入，不用手动改。"
+    ? `模板 ${p.template}。完整预览已代入当前变量、素材清单、模式规则与几何尺寸；` +
+      (computed.length ? `${computed.join("、")} 由页面自动填入。` : "")
     : "";
   const declared = (p.placeholders || []).filter(k => !readOnly.includes(k));
   const keys = [...new Set([...declared, ...Object.keys(p.vars || {})])];
@@ -54,8 +89,8 @@ function renderPrompt() {
 
 async function savePrompt(body) {
   // 不走 post()：它会重画整个提示词面板，连续改多个变量时后一次重画会把
-  // 前一个输入框的焦点/未失焦值冲掉。已有变量的值变化不改变模板正文，
-  // 只更新 info；新增/删除变量才重建列表。
+  // 前一个输入框的焦点/未失焦值冲掉。已有变量的值变化只刷新预览文本；
+  // 新增/删除变量才重建输入框列表。
   const existed = body.set && info && info.prompt && info.prompt.vars
     && Object.prototype.hasOwnProperty.call(info.prompt.vars, body.set);
   const r = await fetch(`/api/case/${encodeURIComponent(CASE)}/prompt`, {
@@ -65,6 +100,7 @@ async function savePrompt(body) {
   const d = await r.json();
   if (!r.ok) { alert(d.error || r.statusText); return; }
   info = d;
+  renderPromptBox();                 // 值改了也要立刻看到新的完整提示词
   if (body.unset || !existed) renderPrompt();
   if (body.set && !existed) {
     $("newVarKey").value = "";

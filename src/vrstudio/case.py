@@ -34,6 +34,7 @@ KINDS = ("video", "image")
 ROLE_LABELS = {
     "edit_master": "编辑母版（时间轴、构图与动作基准）",
     "motion_ref": "动作参考（只提供动作节奏与路径）",
+    "space_ref": "空间参考（只提供机位、构图与起终点位置）",
     "scene_ref": "场景参考（只提供构图、背景与光照）",
     "subject_ref": "主体参考（只定义角色外观）",
 }
@@ -43,8 +44,8 @@ ROLES = tuple(ROLE_LABELS)
 #: 真正的提交前校验在 vrgen；这里是同一份规则的只读镜像，供页面列选项。
 MODE_ROLES: dict[str, dict[str, tuple[str, ...]]] = {
     "videoEdit": {"video": ("edit_master",), "image": ("subject_ref",)},
-    "allMediaRef": {"video": ("edit_master", "motion_ref", "scene_ref"),
-                    "image": ("subject_ref", "scene_ref")},
+    "allMediaRef": {"video": ("edit_master", "motion_ref", "space_ref", "scene_ref"),
+                    "image": ("subject_ref", "space_ref", "scene_ref")},
     "videoExtend": {"video": ("edit_master",), "image": ("subject_ref",)},
 }
 GEN_MODES = tuple(MODE_ROLES)

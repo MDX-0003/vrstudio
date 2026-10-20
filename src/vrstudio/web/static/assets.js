@@ -8,6 +8,7 @@
 const ASSET_ROLE_LABELS = {
   edit_master: "编辑母版（时间轴、构图与动作基准）",
   motion_ref: "动作参考（只提供动作节奏与路径）",
+  space_ref: "空间参考（只提供机位、构图与起终点位置）",
   scene_ref: "场景参考（只提供构图、背景与光照）",
   subject_ref: "主体参考（只定义角色外观）",
 };
