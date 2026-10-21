@@ -657,17 +657,71 @@ def test_step_files_patch_uses_extract_version(client, patch_case, tmp_path):
     gen = sf["generate"]["groups"][0]
     assert [f["name"] for f in gen["inputs"]] == ["clip.mp4", "clip_mask.png", "clip.json"]
     assert gen["outputs"] == []
-    assert [f["name"] for f in sf["merge"]["outputs"]] == ["v1.mp4"]
+    assert sf["merge"]["outputs"] == []       # 还没合并：不猜产物名
 
 
-def test_step_files_patch_falls_back_to_migrated_space(client, patch_case, tmp_path):
+def test_step_files_patch_prefers_frame_then_space(client, patch_case, tmp_path):
     _mk_extract("p1", tmp_path, "v1", with_result=True)
     case_mod.set_extract_current("p1", "v1", root=tmp_path)
     out = tmp_path / "p1" / "out"
     out.mkdir()
-    (out / "v1_space.mp4").write_bytes(b"out")
+    (out / "v1_space.mp4").write_bytes(b"space")
     sf = client.get("/api/case/p1").json()["step_files"]
     assert [f["name"] for f in sf["merge"]["outputs"]] == ["v1_space.mp4"]
+    (out / "v1_frame.mp4").write_bytes(b"frame")
+    sf = client.get("/api/case/p1").json()["step_files"]
+    assert [f["name"] for f in sf["merge"]["outputs"]] == ["v1_frame.mp4"]
+
+
+def test_outputs_fallback_and_partial_flag(client, patch_case, tmp_path, monkeypatch):
+    _mk_extract("p1", tmp_path, "v1")
+    case_mod.set_extract_current("p1", "v1", root=tmp_path)
+    out = tmp_path / "p1" / "out"
+    out.mkdir()
+    (out / "v1_space.mp4").write_bytes(b"space")
+    # 源片 6 帧、区间 0..5 → 整片抽取：_space 就是整片，不标“仅中间段”。
+    monkeypatch.setattr(web_app, "_video_frames", lambda path: 6)
+    outs = client.get("/api/case/p1").json()["outputs"]
+    assert [o["file"] for o in outs] == ["v1_space.mp4"]
+    assert outs[0]["partial"] is False
+
+    # 区间 0..2 → 非整片且只有 _space：标注“仅中间段”。
+    d = tmp_path / "p1" / "extracts" / "v1"
+    blob = json.loads((d / "clip.json").read_text(encoding="utf-8"))
+    blob["segments"][0]["frame_end"] = 2
+    (d / "clip.json").write_text(json.dumps(blob), encoding="utf-8")
+    outs = client.get("/api/case/p1").json()["outputs"]
+    assert outs[0]["partial"] is True
+
+    # _frame 出现后优先使用，且不再是“仅中间段”。
+    (out / "v1_frame.mp4").write_bytes(b"frame")
+    outs = client.get("/api/case/p1").json()["outputs"]
+    assert [o["file"] for o in outs] == ["v1_frame.mp4"]
+    assert outs[0]["partial"] is False
+
+
+def test_old_out_names_are_not_in_the_fallback_chain(client, patch_case, tmp_path):
+    _mk_extract("p1", tmp_path, "v1")
+    case_mod.set_extract_current("p1", "v1", root=tmp_path)
+    out = tmp_path / "p1" / "out"
+    out.mkdir()
+    (out / "v1.mp4").write_bytes(b"old")
+    assert client.get("/api/case/p1").json()["outputs"] == []
+
+
+def test_merge_follow_up_skips_whole_extract(client, patch_case, tmp_path, monkeypatch):
+    _mk_extract("p1", tmp_path, "v1")
+    case_mod.set_extract_current("p1", "v1", root=tmp_path)
+    monkeypatch.setattr(web_app, "_video_frames", lambda path: 6)   # 0..5 = 整片
+    assert web_app._assemble_followup("p1") == []
+
+    d = tmp_path / "p1" / "extracts" / "v1"
+    blob = json.loads((d / "clip.json").read_text(encoding="utf-8"))
+    blob["segments"][0]["frame_end"] = 2
+    (d / "clip.json").write_text(json.dumps(blob), encoding="utf-8")
+    follow = web_app._assemble_followup("p1")
+    assert [item[0] for item in follow] == ["assemble"]
+    assert "assemble" in follow[0][2] and "--case" in follow[0][2]
 
 
 def test_file_info_uses_repo_relative_path():

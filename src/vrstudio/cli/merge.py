@@ -36,8 +36,9 @@ def resolve_case_inputs(case_name: str, cases_dir) -> dict:
     """统一 case 模型 → merge 的四元组（input/ai/sidecar/output）。
 
     纯路径解析，无 ffmpeg / 无解码——web 与单测共用。output 缺省落
-    ``out/<extract 版本>.mp4``；返回件在 extracts/<current>/result.mp4（generate
-    adopt 的落点），不在时明确报"先 adopt"而不是让下游报打不开文件。
+    ``out/<extract 版本>_space.mp4``（空间合并只管中段；时间拼接是 ``assemble``）；
+    返回件在 extracts/<current>/result.mp4（generate adopt 的落点），不在时明确
+    报"先 adopt"而不是让下游报打不开文件。
     """
     case = case_mod.load(case_name, cases_dir)
     if case.flow != "patch":
@@ -56,7 +57,7 @@ def resolve_case_inputs(case_name: str, cases_dir) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     return {
         "input": Path(src), "ai": ai, "sidecar": d / "clip.json",
-        "output": out_dir / f"{case.extract_current}.mp4",
+        "output": out_dir / f"{case.extract_current}_space.mp4",
     }
 
 

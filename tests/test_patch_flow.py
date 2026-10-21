@@ -94,7 +94,7 @@ def test_merge_resolve_full_chain(patch_case):
     assert got["sidecar"] == d / "clip.json"
     assert got["input"] == Path(case.source_path)
     assert got["output"].parent.name == "out"
-    assert got["output"].stem == "20261016T000000"       # out/<extract 版本>.mp4
+    assert got["output"].stem == "20261016T000000_space"   # 空间合并只写中段
 
 
 def test_merge_resolve_rejects_fullredraw(tmp_path):
@@ -158,7 +158,8 @@ def test_patch_extract_and_merge_by_case(tmp_path):
     r = runner.invoke(merge_cli.app, [
         "--case", "e2e", "-q", "--cases-dir", str(tmp_path)])
     assert r.exit_code == 0, r.output
-    out = case_mod.case_dir("e2e", tmp_path) / "out" / f"{case.extract_current}.mp4"
+    out = (case_mod.case_dir("e2e", tmp_path) / "out"
+           / f"{case.extract_current}_space.mp4")
     assert out.is_file()
     info = probe(out, conf)
     assert info.size == (W, H) and info.frames in (0, 6)   # 源尺寸/帧数不变

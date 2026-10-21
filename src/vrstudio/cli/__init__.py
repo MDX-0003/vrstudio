@@ -15,6 +15,7 @@ from __future__ import annotations
 import typer
 
 from .. import __version__
+from . import assemble as assemble_cli
 from . import calib as calib_cli
 from . import case as case_cli
 from . import extract as extract_cli
@@ -58,6 +59,7 @@ app.command(name="seam-center", help=seam_center_cli.main.__doc__)(seam_center_c
 # merge / restore 是单命令，摊平注册保持 `vrstudio merge --input ...` 的形态。
 app.add_typer(extract_cli.app, name="extract", help=extract_cli.app.info.help)
 app.command(name="merge", help=merge_cli.merge.__doc__)(merge_cli.merge)
+app.command(name="assemble", help=assemble_cli.assemble.__doc__)(assemble_cli.assemble)
 app.command(name="restore", help=restore_cli.restore.__doc__)(restore_cli.restore)
 
 # ── ★ 新增（M3 落地 case/generate；M4 落地 serve）───────────────────────

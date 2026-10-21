@@ -28,10 +28,14 @@ log = logging.getLogger(TASK_LOGGER)
 
 
 class Task:
-    def __init__(self, kind: str, case: str, argv: list[str]):
-        self.kind = kind          # extract | pad | register | submit | adopt | merge | recompose
+    def __init__(self, kind: str, case: str, argv: list[str],
+                 follow_up: list[tuple[str, str, list[str]]] | None = None):
+        self.kind = kind          # extract | pad | register | submit | adopt
+                                  # | merge | assemble | recompose
         self.case = case
         self.argv = argv
+        #: 成功后自动排到队首的后续任务（如 merge → assemble）：各自独立日志与重试。
+        self.follow_up = list(follow_up or [])
         self.state = "queued"     # queued -> running -> done | failed
         self.returncode: int | None = None
         self.submitted = time.strftime("%m-%d %H:%M:%S")   # 用户点按钮的时刻
@@ -98,9 +102,10 @@ class TaskQueue:
         self.pending: list[Task] = []
         self.history: list[Task] = []
 
-    def submit(self, kind: str, case: str, argv: list[str]) -> Task:
+    def submit(self, kind: str, case: str, argv: list[str],
+               follow_up: list[tuple[str, str, list[str]]] | None = None) -> Task:
         with self._lock:
-            task = Task(kind, case, argv)
+            task = Task(kind, case, argv, follow_up=follow_up)
             self.pending.append(task)
             log.info("task.submit", extra={"data": {
                 "event": "task.submit", "kind": kind, "case": case,
@@ -122,6 +127,10 @@ class TaskQueue:
             with self._lock:
                 self.history.append(task)
                 self.current = None
+                # 连续任务：merge 成功后才排 assemble；merge 失败就停在原地。
+                if task.state == "done" and task.follow_up:
+                    self.pending[:0] = [Task(kind, case, argv)
+                                        for kind, case, argv in task.follow_up]
 
     def status(self) -> dict:
         with self._lock:

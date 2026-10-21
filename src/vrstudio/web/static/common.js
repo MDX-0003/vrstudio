@@ -18,7 +18,8 @@ let sessionTree = null;     // /api/sessions 的项目/剧集/会话树
 const KIND_LABEL = {
   extract: "抽取", pad: "扩充两侧画面", register: "登记外部视频",
   submit: "提交生成", dry_run: "检查提交命令", keyframe: "关键帧图片生成",
-  adopt: "拷贝选中的视频到 case", merge: "合并", recompose: "裁回原尺寸",
+  adopt: "拷贝选中的视频到 case", merge: "空间合并", assemble: "时间拼接",
+  recompose: "裁回原尺寸",
 };
 
 const $ = (id) => document.getElementById(id);

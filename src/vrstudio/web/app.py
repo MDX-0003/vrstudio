@@ -376,13 +376,64 @@ def _extracts(case: case_mod.Case) -> list[dict]:
 
 
 def _outputs(case: case_mod.Case) -> list[dict]:
-    out = []
+    """成片列表。patch 按版本选一个：``_frame.mp4`` 优先，缺失时回退 ``_space.mp4``。
+
+    旧命名 ``<版本>.mp4`` 不进入回退链（由一次性迁移脚本改名）。
+    ``partial=True`` 表示只有空间合并段、时间轴不是整片，页面必须标注"仅中间段"。
+    """
     odir = case.dir(_ctx["cases_root"]) / "out"
-    if odir.is_dir():
-        for p in sorted(odir.glob("*.mp4")):
-            out.append({"file": p.name,
-                        "url": f"/video/out/{case.name}/{p.name}"})
+    if not odir.is_dir():
+        return []
+    files = sorted(odir.glob("*.mp4"))
+    if case.flow != "patch":
+        return [{"file": p.name, "url": f"/video/out/{case.name}/{p.name}"}
+                for p in files]
+    chosen: dict[str, tuple[str, Path]] = {}
+    for p in files:
+        stem = p.stem
+        if stem.endswith("_frame"):
+            chosen[stem[:-len("_frame")]] = ("frame", p)
+        elif stem.endswith("_space"):
+            version = stem[:-len("_space")]
+            if chosen.get(version, ("", None))[0] != "frame":
+                chosen[version] = ("space", p)
+    out = []
+    for version in sorted(chosen):
+        kind, path = chosen[version]
+        partial = kind == "space" and not _is_whole_extract(case, version)
+        out.append({"file": path.name, "url": f"/video/out/{case.name}/{path.name}",
+                    "version": version, "partial": partial})
     return out
+
+
+def _video_frames(path: Path) -> int | None:
+    """源片帧数；读不到返回 None（只影响"是否整片"的标注，不报错）。"""
+    try:
+        cap = cv2.VideoCapture(str(path))
+        if not cap.isOpened():
+            return None
+        frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        return frames if frames > 0 else None
+    except Exception:                                    # noqa: BLE001
+        return None
+
+
+def _is_whole_extract(case: case_mod.Case, version: str) -> bool:
+    """抽取区间是否覆盖整条源片（对比页据此决定是否标注"仅中间段"）。"""
+    from ..patch.case import load_sidecar_single_segment
+
+    sidecar = case.dir(_ctx["cases_root"]) / "extracts" / version / "clip.json"
+    try:
+        seg = load_sidecar_single_segment(sidecar)
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    if not case.source_path:
+        return False
+    frames = _video_frames(Path(case.source_path))
+    if frames is None:
+        return False
+    return seg.frame_start <= 0 and seg.frame_end >= frames - 1
 
 
 # ── 每步的输入/输出文件（按 flow 分流，两套规范不混用）──────────────────
@@ -579,11 +630,9 @@ def _patch_step_files(case: case_mod.Case, cdir: Path) -> dict:
     mask = d / "clip_mask.png"
     sidecar = d / "clip.json"
     ai = d / "result.mp4"
-    out = cdir / "out" / f"{case.extract_current}.mp4"
-    if not out.is_file():
-        migrated = cdir / "out" / f"{case.extract_current}_space.mp4"
-        if migrated.is_file():
-            out = migrated
+    frame = cdir / "out" / f"{case.extract_current}_frame.mp4"
+    space = cdir / "out" / f"{case.extract_current}_space.mp4"
+    outs = [frame] if frame.is_file() else ([space] if space.is_file() else [])
     steps["extract"] = {
         "inputs": [_file_info(source)],
         "outputs": [_file_info(clip), _file_info(mask), _file_info(sidecar)],
@@ -593,7 +642,7 @@ def _patch_step_files(case: case_mod.Case, cdir: Path) -> dict:
     steps["merge"] = {
         "inputs": [_file_info(source), _file_info(ai),
                    _file_info(sidecar), _file_info(clip)],
-        "outputs": [_file_info(out)],
+        "outputs": [_file_info(p) for p in outs],
     }
     return steps
 
@@ -637,6 +686,9 @@ def _gates(case: case_mod.Case, extracts: list[dict]) -> dict:
     outs = _outputs(case)
     has_out = bool(outs)
     out_names = "、".join(o["file"] for o in outs)
+    partial_names = [o["file"] for o in outs if o.get("partial")]
+    partial_note = (f"；{'、'.join(partial_names)} 仅中间段（时间拼接未完成）"
+                    if partial_names else "")
     if case.flow == "patch":
         cur = cdir / "extracts" / (case.extract_current or "")
         steps = {            "pick": {"ok": missing is None,
@@ -653,9 +705,9 @@ def _gates(case: case_mod.Case, extracts: list[dict]) -> dict:
                 "ready": extracted},
             "merge": {"ok": has_out, "ready": extracted and adopted,
                       "reason": "" if has_out else "采用一次生成结果后，才能合并出片",
-                      "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}；每次合并都会覆盖同名文件"},
+                      "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}；每次合并都会覆盖同名文件{partial_note}"},
             "compare": {"ok": has_out, "reason": "" if has_out else "合并出片后可以在这里对比",
-                        "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}"},
+                        "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}{partial_note}"},
         }
     elif case.flow == "fullredraw":
         # evidence 只在 ok 时被页面读到，但仍须防御求值——全新 case 没有
@@ -1492,6 +1544,21 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
     raise CaseError(f"未知操作：{op}")
 
 
+def _assemble_followup(name: str) -> list[tuple[str, str, list[str]]]:
+    """merge 成功后的时间拼接任务；整片抽取不排（决策 31/32）。"""
+    try:
+        case = case_mod.load(name, _ctx["cases_root"])
+    except CaseError:
+        return []
+    if case.flow != "patch" or not case.extract_current:
+        return []
+    if _is_whole_extract(case, case.extract_current):
+        return []
+    argv = vrstudio_argv("assemble", "--case", name,
+                         "--cases-dir", str(_root()))
+    return [("assemble", name, argv)]
+
+
 async def api_run(request):
     name = request.path_params["name"]
     body = await request.json()
@@ -1500,7 +1567,11 @@ async def api_run(request):
         argv = await asyncio.to_thread(_op_argv, name, op, body)
     except CaseError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    QUEUE.submit(op, name, argv)
+    follow = await asyncio.to_thread(_assemble_followup, name) if op == "merge" else None
+    if follow:
+        QUEUE.submit(op, name, argv, follow_up=follow)
+    else:
+        QUEUE.submit(op, name, argv)
     return JSONResponse({"submitted": op, "case": name})
 
 

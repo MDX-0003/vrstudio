@@ -517,7 +517,9 @@ function renderCompare() {
   const sel = $("outSel");
   const files = (info.outputs || []).map(o => o.file);
   const keep = sel.value;
-  sel.innerHTML = files.map(f => `<option>${f}</option>`).join("");
+  sel.innerHTML = (info.outputs || []).map(o =>
+    `<option value="${o.file}">${o.file}${o.partial ? "（仅中间段）" : ""}</option>`
+  ).join("");
   if (files.includes(keep)) sel.value = keep;
   if (files.length) loadCompare();
 }
