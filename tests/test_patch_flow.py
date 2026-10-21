@@ -147,7 +147,8 @@ def test_patch_extract_and_merge_by_case(tmp_path):
     case = case_mod.load("e2e", tmp_path)
     assert case.extract_current, "extract 应写 [extract] current"
     d = case_mod.case_dir("e2e", tmp_path) / "extracts" / case.extract_current
-    for f in ("clip.mp4", "clip.json", "clip_mask.png"):
+    for f in ("clip.mp4", "clip.json", "clip_mask.png",
+              "first_frame_raw.png", "last_frame_raw.png"):
         assert (d / f).is_file(), f
     assert (case_mod.case_dir("e2e", tmp_path) / "derived" / "clip.json").is_file()
 

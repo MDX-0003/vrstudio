@@ -29,7 +29,8 @@ _CASE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 _PATCH_SECTIONS = ("viewport", "inner", "frames", "extract")
 
-#: gen 的素材种类与角色受控词表。
+#: 素材种类与角色受控词表。mask 与首尾原始帧也在词表里（旧 case 与工作台需要
+#: 解析它们），但不能作为用户可添加的 ``[[assets]]`` 角色——它们由流程产物提供。
 KINDS = ("video", "image")
 ROLE_LABELS = {
     "edit_master": "编辑母版（时间轴、构图与动作基准）",
@@ -42,23 +43,15 @@ ROLE_LABELS = {
     "mid_frame": "中间过渡帧（首尾间距过大时补充，预留）",
     "first_frame_raw": "首帧原始抽取图（工作台输入底图，不是生成素材）",
     "last_frame_raw": "尾帧原始抽取图（工作台输入底图，不是生成素材）",
+    "mask": "编辑区域标注（流程产物，装配器自动附带）",
 }
 ROLES = tuple(ROLE_LABELS)
 
-#: 本期支持的生成模式，以及每种模式允许的角色。
-#: 真正的提交前校验在 vrgen；这里是同一份规则的只读镜像，供页面列选项。
-MODE_ROLES: dict[str, dict[str, tuple[str, ...]]] = {
-    "videoEdit": {"video": ("edit_master",), "image": ("subject_ref",)},
-    "allMediaRef": {
-        "video": ("edit_master", "motion_ref", "space_ref", "scene_ref"),
-        "image": ("subject_ref", "space_ref", "scene_ref",
-                  "first_frame", "last_frame", "mid_frame",
-                  "first_frame_raw", "last_frame_raw"),
-    },
-    "videoExtend": {"video": ("edit_master",), "image": ("subject_ref",)},
-    "firstLastFrame": {"video": (), "image": ("first_frame", "last_frame")},
-}
-GEN_MODES = tuple(MODE_ROLES)
+#: 用户不能给文件素材选的角色：由流程产物或工作台提供。
+RESERVED_ROLES = ("mask", "first_frame_raw", "last_frame_raw")
+
+#: 本期支持的生成模式；创建 gen case 与页面下拉框共用。
+GEN_MODES = ("videoEdit", "allMediaRef", "videoExtend", "firstLastFrame")
 
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 _VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm"}
@@ -96,7 +89,7 @@ def file_sha256(path: str | Path) -> str:
 
 @dataclass
 class Asset:
-    """一条 gen 素材；``path`` 是相对 case 目录的写法。"""
+    """一条文件素材；``path`` 是相对 case 目录的写法。"""
 
     id: str
     kind: str
@@ -121,7 +114,7 @@ class Case:
     extract_current: str | None = None
     # ── 三流程通用的文件素材列表（顺序即 @VideoN / @ImageN 编号）──
     assets: list[Asset] = field(default_factory=list)
-    # ── 可选提交集：素材 id 子集；None = 按模式取默认集 ──
+    # ── 可选提交集：候选 id 列表；None 或空列表 = 空集（没有默认集）──
     submit_selected: list[str] | None = None
     # ── adopt 指针：vrgen 台账里被采用的轮次 ──
     adopt_round: str | None = None
@@ -211,7 +204,7 @@ def load(name: str, root: str | Path | None = None) -> Case:
             isinstance(references, list) and all(isinstance(r, str) for r in references)):
         raise CaseError(f"{path}: [gen] reference_images 必须是字符串数组")
     assets = _parse_assets(raw.get("assets"), path)
-    selected = _parse_submit(raw.get("submit"), assets, path)
+    selected = _parse_submit(raw.get("submit"), assets, flow, path)
     case = Case(
         name=name, flow=flow,
         source_path=str(source.get("path", "")) or None,
@@ -292,8 +285,17 @@ def _parse_assets(raw, path: Path) -> list[Asset]:
     return out
 
 
-def _parse_submit(raw, assets: list[Asset], path: Path) -> list[str] | None:
-    """``[submit] selected``：素材 id 子集；缺省表示按模式默认集。"""
+def _flow_asset_ids(flow: str) -> set[str]:
+    """流程产物在 ``[submit] selected`` 里的固定 id（不进 ``[[assets]]``）。"""
+    if flow == "patch":
+        return {"clip"}
+    if flow == "fullredraw":
+        return {"pad"}
+    return set()
+
+
+def _parse_submit(raw, assets: list[Asset], flow: str, path: Path) -> list[str] | None:
+    """``[submit] selected``：候选 id 列表；缺省等于空集（没有默认集）。"""
     if raw is None:
         return None
     if not isinstance(raw, dict):
@@ -305,10 +307,10 @@ def _parse_submit(raw, assets: list[Asset], path: Path) -> list[str] | None:
         raise CaseError(f"{path}: [submit] selected 必须是字符串数组")
     if len(set(selected)) != len(selected):
         raise CaseError(f"{path}: [submit] selected 有重复 id")
-    known = {asset.id for asset in assets}
+    known = {asset.id for asset in assets} | _flow_asset_ids(flow)
     unknown = sorted(set(selected) - known)
     if unknown:
-        raise CaseError(f"{path}: [submit] selected 引用了不存在的素材：{unknown}")
+        raise CaseError(f"{path}: [submit] selected 引用了不存在的候选：{unknown}")
     return list(selected)
 
 
@@ -391,6 +393,9 @@ def _add_assets_to(case: Case, pairs: list[tuple[str | Path, str]],
         kind = _kind_of(src)
         if role not in ROLES:
             raise CaseError(f"素材 {src.name} 的角色 {role!r} 不合约；可选：{', '.join(ROLES)}")
+        if role in RESERVED_ROLES:
+            raise CaseError(
+                f"角色 {role} 由流程产物或关键帧工作台提供，不能给文件素材指定")
         prefix = "v" if kind == "video" else "i"
         asset_id = f"{prefix}{counters[kind]}"
         counters[kind] += 1
@@ -439,6 +444,8 @@ def set_asset_role(name: str, asset_id: str, role: str,
     case = load(name, root)
     if role not in ROLES:
         raise CaseError(f"角色 {role!r} 不合约；可选：{', '.join(ROLES)}")
+    if role in RESERVED_ROLES:
+        raise CaseError(f"角色 {role} 由流程产物或关键帧工作台提供，不能给文件素材指定")
     case.asset(asset_id).role = role
     return save(case, root)
 
@@ -487,17 +494,17 @@ def set_adopt(name: str, round_key: str, root: str | Path | None = None) -> Case
 
 def set_submit_selected(name: str, selected: list[str] | None,
                         root: str | Path | None = None) -> Case:
-    """写 ``[submit] selected``；``None`` 清除该段，回到按模式的默认集。"""
+    """写 ``[submit] selected``；``None`` 清除该段，等同于空集。"""
     case = load(name, root)
     if selected is not None:
         if not all(isinstance(item, str) for item in selected):
             raise CaseError("submit selected 必须是字符串数组")
         if len(set(selected)) != len(selected):
             raise CaseError("submit selected 有重复 id")
-        known = {asset.id for asset in case.assets}
+        known = {asset.id for asset in case.assets} | _flow_asset_ids(case.flow)
         unknown = sorted(set(selected) - known)
         if unknown:
-            raise CaseError(f"submit selected 引用了不存在的素材：{unknown}")
+            raise CaseError(f"submit selected 引用了不存在的候选：{unknown}")
         selected = list(selected)
     case.submit_selected = selected
     return save(case, root)

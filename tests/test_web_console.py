@@ -695,15 +695,20 @@ def test_asset_api_allows_patch(client, patch_case, tmp_path):
     assert info["derived"][0]["label"] == "源视频"
 
 
-def test_derived_endpoint_lists_source_and_clip(client, patch_case, tmp_path):
+def test_derived_endpoint_lists_source_and_geometry(client, patch_case, tmp_path):
     d = _mk_extract("p1", tmp_path, "v1")
     (d / "clip.mp4").write_bytes(b"c")
     (d / "clip_mask.png").write_bytes(b"m")
     case_mod.set_extract_current("p1", "v1", root=tmp_path)
     rows = client.get("/api/case/p1/derived").json()["derived"]
     labels = {row["label"] for row in rows}
-    assert {"源视频", "当前 clip", "当前 mask", "几何契约"} <= labels
+    assert {"源视频", "几何契约"} <= labels
+    assert "当前 mask" not in labels and "当前 clip" not in labels
     assert all(row["editable"] is False for row in rows)
+    # clip 是可勾选候选，mask 不出现在面板里。
+    info = client.get("/api/case/p1").json()
+    assert [a["id"] for a in info["assets"]] == ["clip"]
+    assert info["assets"][0]["source"] == "flow"
 
 
 def test_submit_set_roundtrip(client, gen_case, tmp_path):
@@ -752,27 +757,32 @@ def test_generate_gate_mode_aware(client, tmp_path, monkeypatch):
     monkeypatch.setattr(web_app, "_vrgen_json", lambda argv: {"error": "vrgen down"})
     info = client.get("/api/case/g5").json()
     assert info["gates"]["generate"]["ready"] is False
-    assert "首帧" in info["gates"]["generate"]["reason"]
+    assert "勾选" in info["gates"]["generate"]["reason"]
+
+    # 勾了首帧还缺尾帧：门禁给出具体缺什么。
+    case_mod.set_submit_selected("g5", ["i1"], root=tmp_path)
+    info = client.get("/api/case/g5").json()
+    assert "尾帧" in info["gates"]["generate"]["reason"]
 
 
-def test_extract_frames_endpoint(client, patch_case, tmp_path, monkeypatch):
+def test_raw_frames_come_from_extract_and_the_endpoint_is_retired(client, patch_case, tmp_path):
     d = _mk_extract("p1", tmp_path, "v1")
     (d / "clip.mp4").write_bytes(b"clip")
+    (d / "first_frame_raw.png").write_bytes(b"first")
+    (d / "last_frame_raw.png").write_bytes(b"last")
     case_mod.set_extract_current("p1", "v1", root=tmp_path)
-    monkeypatch.setattr(web_app, "probe", lambda path: VideoInfo(
-        path=str(path), size=(320, 180), fps="30/1", fps_float=30.0,
-        frames=60, pix_fmt="yuv420p", codec="h264", has_audio=False,
-        duration_s=2.0))
-    monkeypatch.setattr(web_app, "extract_frame",
-                        lambda video, t, out: Path(out).write_bytes(b"png") or Path(out))
-    r = client.post("/api/case/p1/extract-frames",
-                    json={"t_first": 0.0, "t_last": 1.5})
-    assert r.status_code == 200, r.text
-    roles = [a["role"] for a in r.json()["assets"]]
-    assert roles == ["first_frame_raw", "last_frame_raw"]
+    info = client.get("/api/case/p1").json()
+    assert [row["id"] for row in info["raw_frames"]] == ["first_raw", "last_raw"]
+    assert all(row["exists"] for row in info["raw_frames"])
+    # 原始帧只进工作台，不是 ``[[assets]]`` 候选。
+    assert info["assets"] == [] or all(a["id"] != "first_raw" for a in info["assets"])
+    r = client.post("/api/case/p1/extract-frames", json={})
+    assert r.status_code == 410
 
 
 def test_keyframe_run_queues_image_argv(client, patch_case, tmp_path, monkeypatch):
+    _mk_extract("p1", tmp_path, "v1")
+    case_mod.set_extract_current("p1", "v1", root=tmp_path)
     _add_image("p1", tmp_path, "first", "first_frame")
     _add_image("p1", tmp_path, "last", "last_frame")
     captured = []
@@ -849,7 +859,8 @@ def test_fullredraw_page_has_no_workbench(client, fullredraw_case):
     assert 'id="keyframeWorkbench"' not in text
 
 
-def test_patch_page_has_workbench_and_extract_button(client, patch_case):
+def test_patch_page_has_workbench_without_the_old_extract_button(client, patch_case):
     text = client.get("/case/p1").text
     assert "关键帧工作台" in text
-    assert "从当前 clip 抽首尾原始帧" in text
+    assert "从当前 clip 抽首尾原始帧" not in text
+    assert "首尾原始帧由 extract" in text

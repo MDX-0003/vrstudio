@@ -66,6 +66,33 @@ def _stream_extract(cap, fps, seg: Segment, clip_path: Path, sidecar_path: Path,
     log.phase(f"mask    -> {mask_path} (black=regenerate, white=anchor)")
 
 
+def _write_raw_frames(clip: Path, out_dir: Path, log: Log) -> None:
+    """从写完的 clip.mp4 导出首帧与末帧原始图（不缩放，工作台输入底图）。
+
+    决策 33：准备工作在 extract 阶段一次完成，firstLastFrame 不再依赖工作台里
+    的「从 clip 抽帧」按钮。这两张图只给工作台，不是生成候选。
+    """
+    cap = cv2.VideoCapture(str(clip))
+    if not cap.isOpened():
+        raise typer.Exit(f"cannot reopen clip for raw frames: {clip}")
+    ok, first = cap.read()
+    count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if count > 1:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, count - 1)
+        ok_last, last = cap.read()
+    else:
+        ok_last, last = ok, first
+    cap.release()
+    if not ok or not ok_last:
+        raise typer.Exit(f"cannot read first/last frame from {clip}")
+    for name, image in (("first_frame_raw.png", first),
+                        ("last_frame_raw.png", last)):
+        if not cv2.imwrite(str(out_dir / name), image):
+            raise typer.Exit(f"cannot write {out_dir / name}")
+    log.phase(f"raw     -> first/last frame ({first.shape[1]}x{first.shape[0]}, "
+              f"{count or '?'} frames)")
+
+
 @app.command("case")
 def from_case(
     case_file: Path = typer.Argument(..., exists=True, help="case.toml path"),
@@ -101,6 +128,7 @@ def from_case(
                         vdir / "clip_mask.png",
                         (case.erp_width, case.erp_height), log)
         cap.release()
+        _write_raw_frames(vdir / "clip.mp4", vdir, log)
         geometry_sha = _sha256_file(vdir / "clip.json")
         set_extract_version(case_file, version)
         derived = case_file.parent / "derived"
@@ -157,6 +185,7 @@ def from_case_name(
         _stream_extract(cap, fps, seg, vdir / "clip.mp4", vdir / "clip.json",
                         vdir / "clip_mask.png", (erp_w, erp_h), log)
         cap.release()
+        _write_raw_frames(vdir / "clip.mp4", vdir, log)
         geometry_sha = _sha256_file(vdir / "clip.json")
         case_mod.set_extract_current(case.name, version, root=cases_dir)
         derived = case.dir(cases_dir) / "derived"

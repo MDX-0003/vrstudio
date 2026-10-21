@@ -16,7 +16,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import uuid
@@ -35,12 +34,11 @@ from .. import config as config_mod
 from ..case import CaseError
 from ..cli.generate import (
     GenError,
-    resolve_package,
-    selected_assets,
+    assemble,
+    candidates,
     template_for,
 )
-from ..media.frames import extract_frame
-from ..media.videoio import VideoIOError, probe
+from ..media.videoio import VideoIOError
 from ..procenv import decode_text, utf8_env
 from ..redraw.manifest import Manifest
 from .logging import CLIENT_LOGGER, GEOMETRY_LOGGER, RequestLogMiddleware
@@ -267,46 +265,32 @@ def _current_mode(name: str) -> str | None:
     return (payload.get("current") or {}).get("mode")
 
 
-def _refs_payload(case: case_mod.Case, selected: list[case_mod.Asset]) -> dict:
-    checked = case_mod.check_assets(
-        case, _ctx["cases_root"], selected=[asset.id for asset in selected])
-    by_id = {asset.id: path for asset, path in checked}
-    return {"assets": [
-        {"id": asset.id, "kind": asset.kind, "role": asset.role,
-         "path": str(by_id[asset.id].resolve()), "sha256": asset.sha256}
-        for asset in selected if asset.id in by_id
-    ]}
+def _refs_payload(submission) -> dict:
+    return submission.payload()
 
 
-def _prompt_preview_args(name: str, flow: str,
-                         mode: str | None = None) -> tuple[list[str], Path | None]:
-    """提示词展开所需的 CLI 参数：几何尺寸 + 提交集素材清单临时文件。
+def _prompt_preview_args(name: str, mode: str | None = None) -> tuple[list[str], Path | None]:
+    """提示词展开所需的 CLI 参数：几何尺寸 + 提交清单临时文件。
 
-    拿不到素材或尺寸时不报错，只返回已能拿到的部分；vrgen 会把缺的占位符
+    拿不到候选或几何时不报错，只返回已能拿到的部分；vrgen 会把缺的占位符
     报成 render_error，页面显示具体缺什么，而不是干瞪占位符。
     """
     args: list[str] = []
     refs_file: Path | None = None
     try:
         case = case_mod.load(name, _ctx["cases_root"])
-        _video, _mask, _template, canvas, source = resolve_package(
-            case, _ctx["cases_root"], mode=mode)
+        submission = assemble(case, _ctx["cases_root"], mode=mode)
     except (CaseError, GenError, KeyError, ValueError, OSError):
         return args, None
-    args += ["--canvas", f"{canvas[0]}x{canvas[1]}",
-             "--source", f"{source[0]}x{source[1]}"]
-    refs_needed = flow == "gen" or (flow == "patch" and mode == "firstLastFrame")
-    if refs_needed:
-        try:
-            payload = _refs_payload(case, selected_assets(case, mode))
-        except (CaseError, GenError, OSError):
-            return args, None
-        fd, raw = tempfile.mkstemp(prefix=f"vrgen-prompt-{name}-", suffix=".json")
-        os.close(fd)
-        refs_file = Path(raw)
-        refs_file.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
-                             encoding="utf-8")
-        args += ["--refs", str(refs_file)]
+    args += ["--canvas", f"{submission.canvas_size[0]}x{submission.canvas_size[1]}",
+             "--source", f"{submission.source_size[0]}x{submission.source_size[1]}"]
+    payload = _refs_payload(submission)
+    fd, raw = tempfile.mkstemp(prefix=f"vrgen-prompt-{name}-", suffix=".json")
+    os.close(fd)
+    refs_file = Path(raw)
+    refs_file.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                         encoding="utf-8")
+    args += ["--refs", str(refs_file)]
     return args, refs_file
 
 
@@ -317,7 +301,7 @@ def _prompt(name: str, flow: str, mode: str | None = None) -> dict:
     argv = ["prompt", "show", "--job", name,
             "--template", template_for(flow, mode),
             "--workdir", str(_workdir())]
-    preview_args, refs_file = _prompt_preview_args(name, flow, mode)
+    preview_args, refs_file = _prompt_preview_args(name, mode)
     try:
         return _vrgen_json([*argv, *preview_args])
     finally:
@@ -331,31 +315,37 @@ def _sessions_tree() -> dict:
 
 
 def _generation_params(name: str) -> dict:
-    """生成页的输出/输入分辨率选项（决策 20；契约 case-model.md §4）。
+    """生成页的输出/输入分辨率选项（决策 20/34；契约 case-model.md §4）。
 
-    先不带 ``--input`` 读模式与当前草稿；只有确实有一个视频输入包、且当前
-    模式不是 ``firstLastFrame`` 时，才带上 ``--input`` 计算档位。这样纯图片
-    case 不会撞上 `params show` 的“不接受输入视频”闸门。
+    先不带 ``--refs`` 读模式与当前草稿；提交集齐了才带上清单计算档位。这样
+    纯图片 case 与空白 case 都不会撞上 `params show` 的“不接受输入视频”闸门。
     """
     base = _vrgen_json(["params", "show", "--job", name,
                         "--workdir", str(_workdir())])
     if "error" in base:
         return base
     mode = (base.get("current") or {}).get("mode")
+    refs_file: Path | None = None
     try:
         case = case_mod.load(name, _ctx["cases_root"])
-        video, _mask, _template, canvas, source = resolve_package(
-            case, _ctx["cases_root"], mode=mode)
+        submission = assemble(case, _ctx["cases_root"], mode=mode)
+        fd, raw = tempfile.mkstemp(prefix=f"vrgen-params-{name}-", suffix=".json")
+        os.close(fd)
+        refs_file = Path(raw)
+        refs_file.write_text(
+            json.dumps(submission.payload(), ensure_ascii=False, indent=1),
+            encoding="utf-8")
+        return _vrgen_json([
+            "params", "show", "--job", name,
+            "--refs", str(refs_file),
+            "--canvas", f"{submission.canvas_size[0]}x{submission.canvas_size[1]}",
+            "--source", f"{submission.source_size[0]}x{submission.source_size[1]}",
+            "--workdir", str(_workdir())])
     except (CaseError, GenError, KeyError, ValueError, OSError):
         return base
-    if video is None or mode == "firstLastFrame":
-        return base
-    argv = ["params", "show", "--job", name,
-            "--input", str(video),
-            "--canvas", f"{canvas[0]}x{canvas[1]}",
-            "--source", f"{source[0]}x{source[1]}",
-            "--workdir", str(_workdir())]
-    return _vrgen_json(argv)
+    finally:
+        if refs_file is not None:
+            refs_file.unlink(missing_ok=True)
 
 
 def _log_tail(name: str, round_key: str | None, lines: int = 24) -> list[str]:
@@ -449,26 +439,43 @@ def _media_meta(path: Path, kind: str) -> dict:
 
 
 def _asset_details(case: case_mod.Case) -> list[dict]:
-    """gen 素材卡片的数据源；文件缺失也照常返回，页面标红。
+    """候选卡片的数据源：流程母版（clip/pad）+ 文件素材；文件缺失也照常返回，页面标红。
 
     ``label`` 按当前顺序重新编号（@Video1/@Image1），不能拿素材 id 的数字代替：
-    拖动排序只改数组顺序，id 保持不变。
+    拖动排序只改数组顺序，id 保持不变。流程产物不可改角色、不可排序删除。
     """
     out = []
     counters = {"video": 0, "image": 0}
-    for asset in case.assets:
-        counters[asset.kind] += 1
-        prefix = "Video" if asset.kind == "video" else "Image"
-        path = asset.resolved(case, _ctx["cases_root"])
-        info = _file_info(path)
-        meta = _media_meta(path, asset.kind)
+    for cand in candidates(case, _ctx["cases_root"]):
+        counters[cand.kind] += 1
+        prefix = "Video" if cand.kind == "video" else "Image"
+        info = _file_info(cand.path)
+        meta = _media_meta(cand.path, cand.kind)
         out.append({
-            "id": asset.id, "kind": asset.kind, "role": asset.role,
-            "label": f"@{prefix}{counters[asset.kind]}", "path": asset.path,
-            "url": f"/img/asset/{case.name}/{asset.id}",
+            "id": cand.id, "kind": cand.kind, "role": cand.role,
+            "label": f"@{prefix}{counters[cand.kind]}", "path": cand.display,
+            "source": cand.source,
+            "role_fixed": cand.role_fixed,
+            "url": f"/img/asset/{case.name}/{cand.id}",
             **info, **meta,
         })
     return out
+
+
+def _raw_frames(case: case_mod.Case) -> list[dict]:
+    """patch 的当前 extract 导出的首尾原始帧：只进工作台输入区，不是提交候选。"""
+    if case.flow != "patch" or not case.extract_current:
+        return []
+    d = case.dir(_ctx["cases_root"]) / "extracts" / case.extract_current
+    rows = []
+    for asset_id, role, name, label in (
+            ("first_raw", "first_frame_raw", "first_frame_raw.png", "首帧原始帧"),
+            ("last_raw", "last_frame_raw", "last_frame_raw.png", "尾帧原始帧")):
+        path = d / name
+        rows.append({"id": asset_id, "role": role, "label": label,
+                     "path": str(path), "exists": path.is_file(),
+                     "url": f"/img/asset/{case.name}/{asset_id}"})
+    return rows
 
 
 def _round_dir(case: case_mod.Case) -> Path | None:
@@ -697,20 +704,21 @@ def _gates(case: case_mod.Case, extracts: list[dict]) -> dict:
 
 
 def _derived(case: case_mod.Case) -> list[dict]:
-    """源视频与流程产物：只读派生条目，不进 ``[[assets]]``。"""
+    """不参与提交的只读条目：源视频、几何契约、manifest、已采用结果。
+
+    clip/pad 已是可勾选候选（见 ``_asset_details``），mask 不出现在面板里。
+    """
     rows: list[dict] = []
     cdir = case.dir(_ctx["cases_root"])
     if case.source_path:
         rows.append({
             "kind": "video", "role": "source", "label": "源视频",
-            "editable": False, "submit": "videoEdit 自动作为输入，无需勾选",
+            "editable": False, "submit": "流程输入，不作为生成候选",
             **_file_info(Path(case.source_path)),
         })
     if case.flow == "patch" and case.extract_current:
         d = cdir / "extracts" / case.extract_current
         for name, kind, label, submit in (
-                ("clip.mp4", "video", "当前 clip", "videoEdit 自动作为输入；firstLastFrame 不提交流程视频"),
-                ("clip_mask.png", "image", "当前 mask", "仅 videoEdit 使用"),
                 ("clip.json", "file", "几何契约", "不提交"),
                 ("result.mp4", "video", "已采用结果", "流程产物，不提交")):
             rows.append({"kind": kind, "role": "derived", "label": label,
@@ -719,8 +727,6 @@ def _derived(case: case_mod.Case) -> list[dict]:
     elif case.flow == "fullredraw":
         manifests = sorted(cdir.glob("*_pad.json"))
         for name, kind, label, submit in (
-                ("seedance_input.mp4", "video", "pad 画布", "videoEdit 自动作为输入"),
-                ("seedance_input_mask.png", "image", "pad mask", "随画布提交"),
                 ("seedance_input_pad.json", "file", "pad 几何契约", "不提交"),
                 ("result.mp4", "video", "已采用结果", "流程产物，不提交")):
             rows.append({"kind": kind, "role": "derived", "label": label,
@@ -758,6 +764,7 @@ def _case_info(name: str) -> dict | None:
         "extract_current": case.extract_current,
         "adopt_round": case.adopt_round,
         "assets": _asset_details(case),
+        "raw_frames": _raw_frames(case),
         "submit_selected": case.submit_selected,
         "derived": _derived(case),
         "extracts": extracts,
@@ -859,25 +866,34 @@ def _is_16_9(width: int, height: int) -> bool:
     return abs(ratio - 16 / 9) <= (16 / 9) * 0.001
 
 
+def _selected_candidates(case: case_mod.Case) -> list:
+    ids = case.submit_selected or []
+    by_id = {c.id: c for c in candidates(case, _ctx["cases_root"])}
+    return [by_id[item] for item in ids if item in by_id]
+
+
 def _mode_ready(case: case_mod.Case, mode: str | None) -> tuple[bool, str]:
-    """提交前按当前模式检查；页面用它决定生成按钮是否可用。"""
+    """提交前按当前模式检查；页面用它决定生成按钮是否可用（决策 33）。"""
+    chosen = _selected_candidates(case)
+    if not chosen:
+        return False, "没有勾选任何素材——至少勾选一项再生成"
     if mode == "firstLastFrame":
-        firsts = [a for a in case.assets if a.role == "first_frame"]
-        lasts = [a for a in case.assets if a.role == "last_frame"]
+        firsts = [c for c in chosen if c.role == "first_frame"]
+        lasts = [c for c in chosen if c.role == "last_frame"]
         if len(firsts) != 1 or len(lasts) != 1:
-            return False, "firstLastFrame 需要恰好一张首帧与一张尾帧，先在工作台挑选"
+            return False, ("firstLastFrame 需要勾选恰好一张首帧定稿图与一张尾帧定稿图"
+                           f"（当前 {len(firsts)} 张首帧、{len(lasts)} 张尾帧）")
+        extras = [c.id for c in chosen if c.role not in ("first_frame", "last_frame")]
+        if extras:
+            return False, f"firstLastFrame 只用首尾定稿图；请取消勾选：{extras}"
         if case.flow == "patch":
             vp = case.viewport or {}
             width, height = int(vp.get("width") or 0), int(vp.get("height") or 0)
-            if not _is_16_9(width, height):
+            if width and height and not _is_16_9(width, height):
                 return False, "patch viewport 不是 16:9；firstLastFrame 首期只接受 16:9"
         return True, ""
-    if mode == "allMediaRef":
-        if not case.assets:
-            return False, "allMediaRef 至少需要 1 个素材"
-        return True, ""
     if mode in ("videoEdit", "videoExtend"):
-        if case.flow == "gen" and not any(a.kind == "video" for a in case.assets):
+        if case.flow == "gen" and not any(c.kind == "video" for c in chosen):
             return False, f"{mode} 需要 1 个视频母版"
         return True, ""
     return True, ""
@@ -951,17 +967,38 @@ def _thumb(path: Path, kind: str) -> bytes:
 
 
 async def asset_img(request):
-    """素材缩略图：视频取首帧，图片直接缩放；每次请求现算，不设缓存。"""
+    """候选缩略图：视频取首帧，图片直接缩放；每次请求现算，不设缓存。
+
+    同时服务流程母版（clip/pad）与工作台的首尾原始帧——它们的 id 不在
+    ``[[assets]]`` 里，所以先按候选/原始帧解析，再退回文件素材。
+    """
+    name = request.path_params["name"]
+    file_id = request.path_params["file"]
     try:
-        case = case_mod.load(request.path_params["name"], _ctx["cases_root"])
-        asset = case.asset(request.path_params["file"])
+        case = case_mod.load(name, _ctx["cases_root"])
     except CaseError:
         return JSONResponse({"error": "not found"}, status_code=404)
-    path = asset.resolved(case, _ctx["cases_root"])
-    if not path.is_file():
+    path = None
+    kind = "image"
+    for cand in candidates(case, _ctx["cases_root"]):
+        if cand.id == file_id:
+            path, kind = cand.path, cand.kind
+            break
+    if path is None:
+        for row in _raw_frames(case):
+            if row["id"] == file_id:
+                path, kind = Path(row["path"]), "image"
+                break
+    if path is None:
+        try:
+            asset = case.asset(file_id)
+        except CaseError:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        path, kind = asset.resolved(case, _ctx["cases_root"]), asset.kind
+    if path is None or not path.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
     try:
-        data = await asyncio.to_thread(_thumb, path, asset.kind)
+        data = await asyncio.to_thread(_thumb, path, kind)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     return Response(content=data, media_type="image/jpeg")
@@ -1056,48 +1093,9 @@ async def api_submit_set(request):
 
 
 async def api_extract_frames(request):
-    """从当前 clip 抽首尾原始帧，按源分辨率导出，不缩放。"""
-    name = request.path_params["name"]
-    try:
-        case = case_mod.load(name, _ctx["cases_root"])
-    except CaseError:
-        return JSONResponse({"error": "no such case"}, status_code=404)
-    if case.flow != "patch":
-        return JSONResponse({"error": "只有 patch 流可以从 clip 抽帧"}, status_code=400)
-    if not case.extract_current:
-        return JSONResponse({"error": "还没有抽取版本"}, status_code=400)
-    clip = (case.dir(_ctx["cases_root"]) / "extracts" / case.extract_current / "clip.mp4")
-    if not clip.is_file():
-        return JSONResponse({"error": f"clip 不存在：{clip}"}, status_code=400)
-    body = await request.json()
-    try:
-        info = await asyncio.to_thread(probe, clip)
-    except VideoIOError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    duration = info.duration_s
-    fps = info.fps_float or 30.0
-    try:
-        t_first = float(body.get("t_first", 0.0))
-        t_last = float(body.get("t_last", max(0.0, duration - 1.0 / fps)))
-    except (TypeError, ValueError):
-        return JSONResponse({"error": "t_first / t_last 必须是秒数"}, status_code=400)
-    t_first = min(max(0.0, t_first), duration)
-    t_last = min(max(0.0, t_last), max(0.0, duration - 1.0 / fps))
-    if t_last <= t_first:
-        return JSONResponse({"error": "t_last 必须大于 t_first"}, status_code=400)
-    tmpdir = Path(tempfile.mkdtemp(prefix=f"frames-{name}-"))
-    try:
-        pairs = []
-        for role, t in (("first_frame_raw", t_first), ("last_frame_raw", t_last)):
-            out = tmpdir / f"{role}.png"
-            await asyncio.to_thread(extract_frame, clip, t, out)
-            pairs.append((out, role))
-        await asyncio.to_thread(case_mod.add_assets, name, pairs, _ctx["cases_root"])
-    except (VideoIOError, CaseError, OSError) as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-    return JSONResponse(await asyncio.to_thread(_info_with_generation, name))
+    """已退役：extract 阶段直接产出首尾原始帧（决策 33），工作台不再单独抽帧。"""
+    return JSONResponse({"error": "抽帧已并入 extract；重新 extract 或直接使用当前 extract 的原始帧"},
+                        status_code=410)
 
 
 def _keyframe_ratio(case: case_mod.Case) -> str:
@@ -1108,15 +1106,28 @@ def _keyframe_ratio(case: case_mod.Case) -> str:
     return "16:9"
 
 
+#: 工作台的首尾原始帧：由 extract 写入当前版本目录，不是 ``[[assets]]``。
+RAW_FRAME_FILES = {"first_raw": "first_frame_raw.png",
+                   "last_raw": "last_frame_raw.png"}
+
+
 def _keyframe_argv(name: str, body: dict) -> list[str]:
     case = case_mod.load(name, _ctx["cases_root"])
     ids = [str(item) for item in (body.get("assets") or [])]
     if not ids:
         raise CaseError("工作台至少需要 1 张参考图")
-    paths = [case.asset(asset_id).resolved(case, _ctx["cases_root"]) for asset_id in ids]
-    for path in paths:
+    if case.flow != "patch" or not case.extract_current:
+        raise CaseError("工作台需要 patch 的当前 extract（首尾原始帧随 extract 产出）")
+    raw_dir = case.dir(_ctx["cases_root"]) / "extracts" / case.extract_current
+    paths = []
+    for asset_id in ids:
+        if asset_id in RAW_FRAME_FILES:
+            path = raw_dir / RAW_FRAME_FILES[asset_id]
+        else:
+            path = case.asset(asset_id).resolved(case, _ctx["cases_root"])
         if not path.is_file():
             raise CaseError(f"参考图不存在：{path}")
+        paths.append(path)
     prompt = str(body.get("prompt") or "").strip()
     if not prompt:
         raise CaseError("提示词不能为空")
@@ -1264,7 +1275,7 @@ async def api_prompt(request):
     mode = await asyncio.to_thread(_current_mode, name)
     argv = ["prompt", "save", "--job", name,
             "--template", template_for(case.flow, mode), "--workdir", str(_workdir())]
-    preview_args, refs_file = _prompt_preview_args(name, case.flow, mode)
+    preview_args, refs_file = _prompt_preview_args(name, mode)
     argv += preview_args
     if body.get("unset"):
         argv += ["--unset", str(body["unset"])]

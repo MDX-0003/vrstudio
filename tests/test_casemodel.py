@@ -215,6 +215,25 @@ def test_asset_crud_all_flows(tmp_path, src_video):
     assert [a.id for a in case.assets] == ["i2"]
 
 
+def test_reserved_roles_cannot_be_given_to_file_assets(tmp_path):
+    case_mod.create("g", "gen", root=tmp_path)
+    image = tmp_path / "x.png"
+    image.write_bytes(b"x")
+    with pytest.raises(CaseError, match="流程产物"):
+        case_mod.add_assets("g", [(image, "mask")], root=tmp_path)
+    case_mod.add_assets("g", [(image, "subject_ref")], root=tmp_path)
+    with pytest.raises(CaseError, match="流程产物"):
+        case_mod.set_asset_role("g", "i1", "first_frame_raw", root=tmp_path)
+
+
+def test_flow_asset_id_is_a_valid_selection(tmp_path, src_video):
+    case_mod.create("p", "patch", src_video, root=tmp_path)
+    case = case_mod.set_submit_selected("p", ["clip"], root=tmp_path)
+    assert case.submit_selected == ["clip"]
+    with pytest.raises(CaseError, match="不存在"):
+        case_mod.set_submit_selected("p", ["pad"], root=tmp_path)
+
+
 def test_submit_selected_roundtrip(tmp_path, src_video):
     case_mod.create("g", "gen", root=tmp_path)
     first = tmp_path / "first.png"

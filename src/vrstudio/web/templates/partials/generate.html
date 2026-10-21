@@ -22,13 +22,11 @@
     </label>
     <button onclick="runKeyframe()">运行图片生成</button>
     <button onclick="loadKeyframeRounds()">刷新候选</button>
-    {% if flow == "patch" %}
-    <button onclick="extractFrames()">从当前 clip 抽首尾原始帧</button>
-    {% endif %}
   </div>
   <div class="meta">参考图（勾选顺序即传给图片模型的 图1/图2/图3）：</div>
-  <div id="kfAssets" class="meta">（还没有图片素材）</div>
-  <div class="meta">勾选顺序按素材列表从上到下；首帧用原始首帧 + 三视图，尾帧再加首帧定稿图。点击候选缩略图可放大。</div>
+  <div id="kfAssets" class="meta">（还没有首尾原始帧）</div>
+  <div class="meta">首尾原始帧由 extract 从 clip 首末帧导出，只作为工作台输入；
+    勾选顺序按面板从上到下。首帧用原始首帧 + 三视图，尾帧再加首帧定稿图。点击候选缩略图可放大。</div>
   <textarea id="kfPrompt" style="width:100%;height:110px;margin-top:0.3rem"
     placeholder="粘贴首帧或尾帧提示词（首帧用场景起点图 + 三视图；尾帧再加首帧产物）"></textarea>
   <div class="meta" id="kfHint"></div>

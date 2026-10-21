@@ -1,6 +1,8 @@
-/** keyframe.js —— 关键帧工作台：抽帧、两步图片重绘、候选挑选。
+/** keyframe.js —— 关键帧工作台：两步图片重绘与候选挑选。
  *
- * 图片任务走 vrgen image submit，由 web 队列串行执行；候选结果从
+ * 输入底图来自当前 extract 导出的 first_frame_raw.png / last_frame_raw.png
+ * （决策 33：抽帧已并入 extract，不再单独点按钮）；其余参考图是 [[assets]]
+ * 里的图片。图片任务走 vrgen image submit，由 web 队列串行执行；候选结果从
  * /keyframe/rounds 读取，挑选时调 vrgen result --index 再写入素材列表。
  */
 "use strict";
@@ -41,38 +43,51 @@ function _kfStep() {
   return (($("kfStep") || {}).value) || "first";
 }
 
-function _kfDefaultRoles(step) {
-  return step === "first"
-    ? ["first_frame_raw", "subject_ref"]
-    : ["first_frame", "last_frame_raw", "subject_ref"];
+function _kfDefaultIds(step) {
+  // 首帧：原始首帧 + 所有主体参考图；尾帧：首帧定稿图 + 原始尾帧 + 主体参考图。
+  const raw = step === "first" ? "first_raw" : "last_raw";
+  const ids = [raw];
+  if (step === "last") ids.push("first_frame");
+  const roles = step === "first" ? ["subject_ref"] : ["subject_ref"];
+  for (const asset of ((info && info.assets) || [])) {
+    if (asset.source !== "flow" && asset.kind === "image" && roles.includes(asset.role)) {
+      ids.push(asset.id);
+    }
+  }
+  return ids;
 }
 
 function renderKeyframe() {
   const box = $("kfAssets");
   if (!box) return;
-  const assets = ((info && info.assets) || []).filter(a => a.kind === "image");
+  if (FLOW !== "patch") return;
+  const rawFrames = ((info && info.raw_frames) || []).filter(f => f.exists);
+  const assets = ((info && info.assets) || [])
+    .filter(a => a.kind === "image" && a.source !== "flow");
   const step = _kfStep();
-  const wanted = _kfDefaultRoles(step);
+  const wanted = _kfDefaultIds(step);
   const promptBox = $("kfPrompt");
   if (promptBox && promptBox.dataset.step !== step) {
     promptBox.value = KF_PROMPTS[step] || "";
     promptBox.dataset.step = step;
   }
   box.innerHTML = "";
-  if (!assets.length) {
-    box.innerHTML = '<span class="meta">（还没有图片素材；先把三视图或抽取帧加入素材）</span>';
+  if (!rawFrames.length) {
+    box.innerHTML = '<span class="meta">（还没有首尾原始帧；先完成 extract，' +
+      '它会和 clip 一起产出）</span>';
     return;
   }
-  for (const asset of assets) {
-    const label = document.createElement("label");
+  const addRow = (id, label) => {
+    const el = document.createElement("label");
     const cb = document.createElement("input");
     cb.type = "checkbox";
-    cb.value = asset.id;
-    cb.checked = wanted.includes(asset.role);
-    label.append(cb, document.createTextNode(
-      `${asset.label} · ${asset.role}`));
-    box.appendChild(label);
-  }
+    cb.value = id;
+    cb.checked = wanted.includes(id);
+    el.append(cb, document.createTextNode(label));
+    box.appendChild(el);
+  };
+  for (const frame of rawFrames) addRow(frame.id, ` ${frame.label}（extract 产出）`);
+  for (const asset of assets) addRow(asset.id, ` ${asset.label} · ${asset.role}`);
   if (!box.dataset.loaded) {
     box.dataset.loaded = "1";
     loadKeyframeRounds();
@@ -159,15 +174,4 @@ async function pickKeyframe(round, index, role) {
   info = d;
   renderAll();
   loadKeyframeRounds();
-}
-
-async function extractFrames() {
-  const r = await fetch(`/api/case/${encodeURIComponent(CASE)}/extract-frames`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
-  });
-  const d = await r.json();
-  if (!r.ok) { alert(d.error || r.statusText); return; }
-  info = d;
-  renderAll();
 }

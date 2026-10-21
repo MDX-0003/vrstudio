@@ -44,33 +44,56 @@ def _fullredraw_case(tmp_path, src_video) -> case_mod.Case:
     man.save(cdir / "seedance_input_pad.json")
     (cdir / "seedance_input.mp4").write_bytes(b"canvas")
     (cdir / "seedance_input_mask.png").write_bytes(b"mask")
+    case_mod.set_submit_selected("e2e", ["pad"], root=tmp_path)
     return case
 
 
-# ── resolve_package ──────────────────────────────────────────────────────
+# ── candidates / assemble（三流程统一清单）──────────────────────────────
 
 
-def test_resolve_fullredraw_reads_manifest(tmp_path, src_video):
-    case = _fullredraw_case(tmp_path, src_video)
-    video, mask, template, canvas, source = gen.resolve_package(case, tmp_path)
-    assert video.name == "seedance_input.mp4"
-    assert mask is not None and mask.name == "seedance_input_mask.png"
-    assert template == "360-closure" and canvas == (300, 128)
-    assert source == (256, 128)
+def test_candidates_list_pad_before_file_assets(tmp_path, src_video):
+    _fullredraw_case(tmp_path, src_video)
+    extra = tmp_path / "extra.png"
+    extra.write_bytes(b"x")
+    case_mod.add_assets("e2e", [(extra, "subject_ref")], root=tmp_path)
+    cands = gen.candidates(case_mod.load("e2e", tmp_path), tmp_path)
+    assert [c.id for c in cands] == ["pad", "i1"]
+    assert cands[0].source == "flow" and cands[0].role_fixed
+    assert cands[1].source == "asset"
 
 
-def test_resolve_rejects_ambiguous_manifest(tmp_path, src_video):
+def test_assemble_fullredraw_appends_mask_and_geometry(tmp_path, src_video):
+    _fullredraw_case(tmp_path, src_video)
+    sub = gen.assemble(case_mod.load("e2e", tmp_path), tmp_path)
+    assert [c.id for c in sub.refs] == ["pad"]
+    assert sub.mask is not None and sub.mask.name == "seedance_input_mask.png"
+    assert sub.template == "360-closure"
+    assert sub.canvas_size == (300, 128) and sub.source_size == (256, 128)
+    payload = sub.payload()
+    assert [a["role"] for a in payload["assets"]] == ["edit_master", "mask"]
+    assert payload["assets"][1]["id"] == "pad_mask"
+
+
+def test_assemble_without_selection_is_an_error(tmp_path, src_video):
+    _fullredraw_case(tmp_path, src_video)
+    case_mod.set_submit_selected("e2e", [], root=tmp_path)
+    with pytest.raises(gen.GenError, match="没有勾选"):
+        gen.assemble(case_mod.load("e2e", tmp_path), tmp_path)
+
+
+def test_assemble_rejects_ambiguous_manifest(tmp_path, src_video):
     case = _fullredraw_case(tmp_path, src_video)
     cdir = case.dir(tmp_path)
     (cdir / "other_pad.json").write_text("{}", encoding="utf-8")
     with pytest.raises(gen.GenError, match="指哪份"):
-        gen.resolve_package(case, tmp_path)
+        gen.assemble(case_mod.load("e2e", tmp_path), tmp_path)
 
 
-def test_resolve_patch_reads_extract_pointer(tmp_path, src_video):
+def test_assemble_patch_reads_extract_pointer(tmp_path, src_video):
     case = case_mod.create("p1", "patch", src_video, root=tmp_path)
+    case_mod.set_submit_selected("p1", ["clip"], root=tmp_path)
     with pytest.raises(gen.GenError, match="extract"):
-        gen.resolve_package(case, tmp_path)          # 没抽取版本 → 明确报错
+        gen.assemble(case_mod.load("p1", tmp_path), tmp_path)   # 没抽取版本 → 明确报错
     case_mod.set_extract_current("p1", "20261016T000000", root=tmp_path)
     d = case.dir(tmp_path) / "extracts" / "20261016T000000"
     d.mkdir(parents=True)
@@ -84,10 +107,11 @@ def test_resolve_patch_reads_extract_pointer(tmp_path, src_video):
                                             width=1470, height=630),
                           inner=InnerRect(x=400, y=200, width=600, height=500))]),
                 d / "clip.json")
-    video, mask, template, canvas, source = gen.resolve_package(case_mod.load("p1", tmp_path), tmp_path)
-    assert video.name == "clip.mp4" and mask is not None
-    assert template == "character-repaint"
-    assert canvas == (1470, 630) and source == (1470, 630)   # 来自 clip.json 契约
+    sub = gen.assemble(case_mod.load("p1", tmp_path), tmp_path)
+    assert sub.refs[0].id == "clip"
+    assert sub.mask is not None and sub.mask.name == "clip_mask.png"
+    assert sub.template == "character-repaint"
+    assert sub.canvas_size == (1470, 630) and sub.source_size == (1470, 630)
 
 
 # ── gen：素材清单 → vrgen --refs ───────────────────────────────────────
@@ -99,24 +123,27 @@ def _gen_info() -> VideoInfo:
                      codec="h264", has_audio=True, duration_s=12.23)
 
 
-def test_resolve_gen_uses_master_asset_and_probes_size(tmp_path, src_video, monkeypatch):
-    case = case_mod.create("g1", "gen", src_video, root=tmp_path)
+def test_assemble_gen_uses_master_asset_and_probes_size(tmp_path, src_video, monkeypatch):
+    case_mod.create("g1", "gen", src_video, root=tmp_path)
+    case_mod.set_submit_selected("g1", ["v1"], root=tmp_path)
     monkeypatch.setattr(gen, "probe", lambda path: _gen_info())
-    video, mask, template, canvas, source = gen.resolve_package(case, tmp_path)
-    assert video == case.assets[0].resolved(case, tmp_path)
-    assert mask is None
-    assert template == "gen-multi"
-    assert canvas == source == (1920, 1052)
+    sub = gen.assemble(case_mod.load("g1", tmp_path), tmp_path)
+    assert sub.refs[0].path == case_mod.load("g1", tmp_path).assets[0].resolved(
+        case_mod.load("g1", tmp_path), tmp_path)
+    assert sub.mask is None
+    assert sub.template == "gen-multi"
+    assert sub.canvas_size == sub.source_size == (1920, 1052)
 
 
-def test_resolve_gen_requires_assets(tmp_path):
+def test_assemble_gen_requires_a_selection(tmp_path):
     case_mod.create("g1", "gen", root=tmp_path)
-    with pytest.raises(gen.GenError, match="还没有素材"):
-        gen.resolve_package(case_mod.load("g1", tmp_path), tmp_path)
+    with pytest.raises(gen.GenError, match="没有勾选"):
+        gen.assemble(case_mod.load("g1", tmp_path), tmp_path)
 
 
 def test_submit_dry_run_gen_writes_refs_and_omits_input(tmp_path, src_video, monkeypatch):
     case_mod.create("g1", "gen", src_video, root=tmp_path)
+    case_mod.set_submit_selected("g1", ["v1"], root=tmp_path)
     monkeypatch.setattr(gen, "probe", lambda path: _gen_info())
     r = runner.invoke(gen.app, ["submit", "--case", "g1", "--dry-run",
                                 "--resolution", "1080p", "--scale", "auto",
@@ -137,6 +164,7 @@ def test_submit_dry_run_gen_writes_refs_and_omits_input(tmp_path, src_video, mon
 
 def test_submit_dry_run_gen_passes_explicit_aspect(tmp_path, src_video, monkeypatch):
     case_mod.create("g1", "gen", src_video, root=tmp_path)
+    case_mod.set_submit_selected("g1", ["v1"], root=tmp_path)
     monkeypatch.setattr(gen, "probe", lambda path: _gen_info())
     r = runner.invoke(gen.app, ["submit", "--case", "g1", "--dry-run",
                                 "--aspect-ratio", "16:9",
@@ -154,18 +182,18 @@ def _image_assets(tmp_path):
     return first, last
 
 
-def test_resolve_gen_image_master_omits_video(tmp_path, monkeypatch):
+def test_assemble_gen_image_master_omits_video(tmp_path, monkeypatch):
     first, last = _image_assets(tmp_path)
     case_mod.create("g2", "gen", root=tmp_path)
     case_mod.add_assets("g2", [(first, "first_frame"), (last, "last_frame")],
                         root=tmp_path)
+    case_mod.set_submit_selected("g2", ["i1", "i2"], root=tmp_path)
     monkeypatch.setattr(gen, "_image_size", lambda path: (1920, 1080))
-    case = case_mod.load("g2", tmp_path)
-    video, mask, template, canvas, source = gen.resolve_package(
-        case, tmp_path, mode="firstLastFrame")
-    assert video is None and mask is None
-    assert template == "gen-multi"
-    assert canvas == source == (1920, 1080)
+    sub = gen.assemble(case_mod.load("g2", tmp_path), tmp_path, mode="firstLastFrame")
+    assert [c.role for c in sub.refs] == ["first_frame", "last_frame"]
+    assert sub.mask is None
+    assert sub.template == "gen-multi"
+    assert sub.canvas_size == sub.source_size == (1920, 1080)
 
 
 def test_submit_gen_image_master_uses_refs(tmp_path, monkeypatch):
@@ -173,6 +201,7 @@ def test_submit_gen_image_master_uses_refs(tmp_path, monkeypatch):
     case_mod.create("g2", "gen", root=tmp_path)
     case_mod.add_assets("g2", [(first, "first_frame"), (last, "last_frame")],
                         root=tmp_path)
+    case_mod.set_submit_selected("g2", ["i1", "i2"], root=tmp_path)
     monkeypatch.setattr(gen, "_image_size", lambda path: (1920, 1080))
     r = runner.invoke(gen.app, ["submit", "--case", "g2", "--mode", "firstLastFrame",
                                 "--dry-run", "--cases-dir", str(tmp_path)])
@@ -200,23 +229,30 @@ def test_submit_refs_filtered_by_selected(tmp_path, src_video, monkeypatch):
     assert [a["id"] for a in data["assets"]] == ["v1"]
 
 
-def test_submit_firstlast_default_requires_exactly_one_pair(tmp_path, monkeypatch):
+def test_firstlast_requires_exactly_one_pair(tmp_path, monkeypatch):
     first, last = _image_assets(tmp_path)
     third = tmp_path / "third.png"
     third.write_bytes(b"third")
     case_mod.create("g4", "gen", root=tmp_path)
-    case_mod.add_assets("g4", [(first, "first_frame"), (last, "last_frame")],
-                        root=tmp_path)
+    case_mod.add_assets("g4", [(first, "first_frame")], root=tmp_path)
+    case_mod.set_submit_selected("g4", ["i1"], root=tmp_path)
     monkeypatch.setattr(gen, "_image_size", lambda path: (1920, 1080))
+    r = runner.invoke(gen.app, ["submit", "--case", "g4", "--mode", "firstLastFrame",
+                                "--dry-run", "--cases-dir", str(tmp_path)])
+    assert r.exit_code == 2, r.output
+    assert "首帧" in r.output and "尾帧" in r.output
+
+    case_mod.add_assets("g4", [(last, "last_frame")], root=tmp_path)
+    case_mod.set_submit_selected("g4", ["i1", "i2"], root=tmp_path)
     r = runner.invoke(gen.app, ["submit", "--case", "g4", "--mode", "firstLastFrame",
                                 "--dry-run", "--cases-dir", str(tmp_path)])
     assert r.exit_code == 0, r.output
 
-    case_mod.add_assets("g4", [(third, "first_frame")], root=tmp_path)
-    r = runner.invoke(gen.app, ["submit", "--case", "g4", "--mode", "firstLastFrame",
-                                "--dry-run", "--cases-dir", str(tmp_path)])
-    assert r.exit_code == 2, r.output
-    assert "多组候选" in r.output
+    # 多勾的素材由装配器忽略（契约：firstLastFrame 只取首尾两张）。
+    case_mod.add_assets("g4", [(third, "subject_ref")], root=tmp_path)
+    case_mod.set_submit_selected("g4", ["i1", "i2", "i3"], root=tmp_path)
+    sub = gen.assemble(case_mod.load("g4", tmp_path), tmp_path, mode="firstLastFrame")
+    assert [c.role for c in sub.refs] == ["first_frame", "last_frame"]
 
 
 def _patch_16_9_case(tmp_path, src_video, *, size=(1920, 1080)):
@@ -238,10 +274,11 @@ def _patch_16_9_case(tmp_path, src_video, *, size=(1920, 1080)):
 
 
 def test_patch_firstlast_branch_builds_refs(tmp_path, src_video, monkeypatch):
-    case = _patch_16_9_case(tmp_path, src_video)
+    _patch_16_9_case(tmp_path, src_video)
     first, last = _image_assets(tmp_path)
     case_mod.add_assets("p1", [(first, "first_frame"), (last, "last_frame")],
                         root=tmp_path)
+    case_mod.set_submit_selected("p1", ["i1", "i2"], root=tmp_path)
     r = runner.invoke(gen.app, ["submit", "--case", "p1", "--mode", "firstLastFrame",
                                 "--dry-run", "--cases-dir", str(tmp_path)])
     assert r.exit_code == 0, r.output
@@ -249,12 +286,20 @@ def test_patch_firstlast_branch_builds_refs(tmp_path, src_video, monkeypatch):
     assert "--refs" in lines and "--input" not in lines
     assert "gen-multi" in lines
     assert "1920x1080" in lines
+    refs_path = Path(lines[lines.index("--refs") + 1])
+    data = json.loads(refs_path.read_text(encoding="utf-8"))
+    # firstLastFrame 不附带 mask，也不提交流程视频。
+    assert [a["role"] for a in data["assets"]] == ["first_frame", "last_frame"]
 
 
 def test_patch_firstlast_requires_16_9_viewport(tmp_path, src_video):
-    case = _patch_16_9_case(tmp_path, src_video, size=(1920, 1052))
+    _patch_16_9_case(tmp_path, src_video, size=(1920, 1052))
+    first, last = _image_assets(tmp_path)
+    case_mod.add_assets("p1", [(first, "first_frame"), (last, "last_frame")],
+                        root=tmp_path)
+    case_mod.set_submit_selected("p1", ["i1", "i2"], root=tmp_path)
     with pytest.raises(gen.GenError, match="16:9"):
-        gen.resolve_package(case, tmp_path, mode="firstLastFrame")
+        gen.assemble(case_mod.load("p1", tmp_path), tmp_path, mode="firstLastFrame")
 
 
 def test_template_follows_flow_and_mode():
@@ -280,7 +325,7 @@ def test_submit_dry_run_prints_argv_without_calling(tmp_path, src_video, monkeyp
     # 本机 vrstudio.toml 可把 vrgen 覆盖成绝对路径（generate.vrgen），
     # 所以可执行文件那行断言"包含 vrgen"而不是全等
     assert "vrgen" in argv_lines[1], f"argv 缺 vrgen 可执行文件：{r.output}"
-    for token in ("submit", "--job", "e2e", "--input",
+    for token in ("submit", "--job", "e2e", "--refs",
                   "--template", "360-closure", "--set", "theme=夜晚"):
         assert token in argv_lines, f"argv 缺 {token!r}：{r.output}"
     assert not called                     # dry-run 绝不真调

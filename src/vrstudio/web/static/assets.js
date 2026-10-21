@@ -1,7 +1,8 @@
-/** assets.js —— gen 的素材步骤：卡片、角色、排序、删除与本地多选添加。
+/** assets.js —— 素材与本次提交集：候选卡片、勾选、角色、排序与删除。
  *
- * 角色词表与后端 vrstudio.case.ROLE_LABELS 一致；当前模式允许的角色来自
- * /api/case 的 generation_params.modes[].roles（模型能力 + 本地矩阵的只读回显）。
+ * 候选 = 流程母版（patch 的 clip / fullredraw 的 pad，只读）+ [[assets]] 文件素材。
+ * mask 与首尾原始帧不是候选，不出现在这里。提交集只认勾选（决策 33）：没有
+ * 默认集，勾选才提交；勾选结果即时写 [submit] selected。
  */
 "use strict";
 
@@ -14,43 +15,32 @@ const ASSET_ROLE_LABELS = {
   first_frame: "首帧定稿图（视频第一帧）",
   last_frame: "尾帧定稿图（视频最后一帧）",
   mid_frame: "中间过渡帧（预留）",
-  first_frame_raw: "首帧原始抽取图（工作台输入）",
-  last_frame_raw: "尾帧原始抽取图（工作台输入）",
 };
 
-let assetPick = { dir: null, selected: new Map() };   // path -> role
+// 用户能给文件素材选的角色；mask 与 *_raw 由流程产物/工作台提供。
+const USER_ROLES = Object.keys(ASSET_ROLE_LABELS);
 
-function _modeMetaFor(infoObj, value) {
-  const gp = (infoObj && infoObj.generation_params) || {};
-  return ((gp.modes) || []).find(m => m.value === value) || null;
-}
+let assetPick = { dir: null, selected: new Map() };   // path -> role
 
 function _currentMode() {
   const gp = (info && info.generation_params) || {};
   return ((gp.current || {}).mode) || "";
 }
 
-function _defaultSelection() {
-  const assets = (info && info.assets) || [];
-  if (info && info.submit_selected != null) return new Set(info.submit_selected);
-  const mode = _currentMode();
-  if (mode === "firstLastFrame") {
-    const firsts = assets.filter(a => a.role === "first_frame");
-    const lasts = assets.filter(a => a.role === "last_frame");
-    return firsts.length === 1 && lasts.length === 1
-      ? new Set([firsts[0].id, lasts[0].id])
-      : new Set();
-  }
-  if (mode === "videoEdit" || mode === "videoExtend") {
-    return new Set(assets.filter(a =>
-      (a.kind === "video" && a.role === "edit_master") ||
-      (a.kind === "image" && a.role === "subject_ref")).map(a => a.id));
-  }
-  return new Set(assets.map(a => a.id));
+function _selectedIds() {
+  return new Set((info && info.submit_selected) || []);
 }
 
 function _canEditAssets() {
-  return FLOW !== "fullredraw";
+  return true;      // 三条流程都可增删改排（决策 33）
+}
+
+function _fileAssets() {
+  return ((info && info.assets) || []).filter(a => a.source !== "flow");
+}
+
+function _flowAssets() {
+  return ((info && info.assets) || []).filter(a => a.source === "flow");
 }
 
 async function saveSubmitSelection() {
@@ -66,10 +56,16 @@ async function saveSubmitSelection() {
   renderAll();
 }
 
-function _allowedRoles(kind) {
-  const meta = _modeMetaFor(info, _currentMode());
-  const roles = meta && meta.roles && meta.roles[kind];
-  return roles && roles.length ? roles : Object.keys(ASSET_ROLE_LABELS);
+function _setAllSelected(on) {
+  const boxes = [...document.querySelectorAll("#assetList input[type=checkbox]")];
+  boxes.forEach(cb => { cb.checked = on; });
+  saveSubmitSelection();
+}
+
+function _invertSelection() {
+  const boxes = [...document.querySelectorAll("#assetList input[type=checkbox]")];
+  boxes.forEach(cb => { cb.checked = !cb.checked; });
+  saveSubmitSelection();
 }
 
 function _kindLabel(kind) {
@@ -82,8 +78,7 @@ function _fmtDuration(sec) {
 
 function _roleSelect(asset) {
   const sel = document.createElement("select");
-  const allowed = _allowedRoles(asset.kind);
-  const roles = allowed.includes(asset.role) ? allowed : [asset.role, ...allowed];
+  const roles = USER_ROLES.includes(asset.role) ? USER_ROLES : [asset.role, ...USER_ROLES];
   for (const role of roles) {
     const o = document.createElement("option");
     o.value = role;
@@ -95,11 +90,21 @@ function _roleSelect(asset) {
   return sel;
 }
 
-function _assetCard(asset, index, assets) {
-  const editable = _canEditAssets();
+function _checkBox(asset) {
+  const check = document.createElement("input");
+  check.type = "checkbox";
+  check.dataset.id = asset.id;
+  check.checked = _selectedIds().has(asset.id);
+  check.title = "勾选后参与本次提交";
+  check.onchange = saveSubmitSelection;
+  return check;
+}
+
+function _assetCard(asset, index, fileAssets) {
+  const flow = asset.source === "flow";
   const card = document.createElement("div");
-  card.className = "assetCard" + (asset.exists ? "" : " bad");
-  card.draggable = editable;
+  card.className = "assetCard" + (asset.exists ? "" : " bad") + (flow ? " flowAsset" : "");
+  card.draggable = !flow;
   card.dataset.id = asset.id;
 
   const img = document.createElement("img");
@@ -113,38 +118,37 @@ function _assetCard(asset, index, assets) {
     ? `${asset.width || "?"}×${asset.height || "?"}` +
       (asset.kind === "video" ? ` · ${_fmtDuration(asset.duration)} · ${asset.fps || "?"}fps` : "")
     : "文件不存在";
-  meta.innerHTML = `<b>${asset.label} · ${asset.id}</b> · ${_kindLabel(asset.kind)} · ${size}<br>` +
+  const tag = flow ? "流程产物 · " : "";
+  meta.innerHTML = `<b>${asset.label} · ${asset.id}</b> · ${tag}${_kindLabel(asset.kind)} · ${size}<br>` +
     `<span class="dim">${asset.rel || asset.path}</span>`;
 
-  let check = null;
-  if (editable) {
-    check = document.createElement("input");
-    check.type = "checkbox";
-    check.dataset.id = asset.id;
-    check.checked = _defaultSelection().has(asset.id);
-    check.title = "勾选后参与本次提交";
-    check.onchange = saveSubmitSelection;
-  }
+  const roleEl = asset.role_fixed
+    ? Object.assign(document.createElement("span"), {
+        className: "meta",
+        textContent: ASSET_ROLE_LABELS[asset.role] || asset.role,
+      })
+    : _roleSelect(asset);
 
-  const moves = document.createElement("span");
-  if (editable) {
+  let moves = null;
+  let del = null;
+  if (!flow) {
+    moves = document.createElement("span");
     const up = document.createElement("button");
     up.textContent = "↑"; up.title = "上移"; up.disabled = index === 0;
-    up.onclick = () => _moveAsset(assets, index, -1);
+    up.onclick = () => _moveAsset(fileAssets, index, -1);
     const down = document.createElement("button");
-    down.textContent = "↓"; down.title = "下移"; down.disabled = index === assets.length - 1;
-    down.onclick = () => _moveAsset(assets, index, 1);
+    down.textContent = "↓"; down.title = "下移";
+    down.disabled = index === fileAssets.length - 1;
+    down.onclick = () => _moveAsset(fileAssets, index, 1);
     moves.append(up, down);
-  }
 
-  const del = document.createElement("button");
-  del.textContent = "删除";
-  del.onclick = () => {
-    if (!confirm(`删除素材 ${asset.label}？文件也会从 case 的 assets/ 里删除。`)) return;
-    post("assets", { op: "remove", id: asset.id });
-  };
+    del = document.createElement("button");
+    del.textContent = "删除";
+    del.onclick = () => {
+      if (!confirm(`删除素材 ${asset.label}？文件也会从 case 的 assets/ 里删除。`)) return;
+      post("assets", { op: "remove", id: asset.id });
+    };
 
-  if (editable) {
     card.addEventListener("dragstart", (e) => {
       card.classList.add("dragging");
       e.dataTransfer.setData("text/plain", asset.id);
@@ -155,7 +159,7 @@ function _assetCard(asset, index, assets) {
       e.preventDefault();
       const from = e.dataTransfer.getData("text/plain");
       if (!from || from === asset.id) return;
-      const ids = assets.map(a => a.id);
+      const ids = fileAssets.map(a => a.id);
       const fromIndex = ids.indexOf(from);
       const toIndex = ids.indexOf(asset.id);
       if (fromIndex < 0 || toIndex < 0) return;
@@ -164,21 +168,13 @@ function _assetCard(asset, index, assets) {
     });
   }
 
-  const roleEl = editable ? _roleSelect(asset) :
-    Object.assign(document.createElement("span"), {
-      className: "meta",
-      textContent: ASSET_ROLE_LABELS[asset.role] || asset.role,
-    });
-  if (check) card.append(check);
-  card.append(img, meta, roleEl);
-  if (editable) {
-    card.append(moves, del);
-  }
+  card.append(_checkBox(asset), img, meta, roleEl);
+  if (moves) card.append(moves, del);
   return card;
 }
 
-function _moveAsset(assets, index, delta) {
-  const ids = assets.map(a => a.id);
+function _moveAsset(fileAssets, index, delta) {
+  const ids = fileAssets.map(a => a.id);
   const to = index + delta;
   if (to < 0 || to >= ids.length) return;
   [ids[index], ids[to]] = [ids[to], ids[index]];
@@ -210,19 +206,18 @@ function _renderSubmitHint() {
   const el = $("submitHint");
   if (!el) return;
   const mode = _currentMode();
-  if (FLOW === "fullredraw") {
-    el.textContent = "fullredraw 保持 videoEdit：文件素材只读展示，不参与提交。";
-    return;
-  }
+  const count = _selectedIds().size;
+  const head = `本次提交 ${count} 项（勾选即提交，没有默认集）。`;
   if (mode === "firstLastFrame") {
-    el.textContent = "firstLastFrame：勾选恰好一张 first_frame 与一张 last_frame；" +
-      "原始抽取帧和首尾定稿图不要混选。";
-  } else if (mode === "videoEdit" || mode === "videoExtend") {
-    el.textContent = "当前模式只重绘流程视频，文件素材不参与提交。";
+    el.textContent = head +
+      " firstLastFrame：只需要勾选恰好一张首帧定稿图与一张尾帧定稿图，" +
+      "流程视频与 mask 都不参与。";
   } else if (mode === "allMediaRef") {
-    el.textContent = "allMediaRef：勾选的素材会全部进入本次 refs 清单。";
+    el.textContent = head + " allMediaRef：勾选的素材会全部进入本次清单；" +
+      "区域标注 mask 由流程自动附加，不占 @ImageN。";
   } else {
-    el.textContent = "勾选参与本次提交的素材；提示词编号随之重算。";
+    el.textContent = head + " 视频按勾选顺序编 @VideoN，图片编 @ImageN；" +
+      "mask 由流程自动附加在图片末尾，不参与编号。";
   }
 }
 
@@ -231,24 +226,28 @@ function renderAssets() {
   _renderSubmitHint();
   const el = $("assetList");
   if (!el) return;
-  const assets = (info && info.assets) || [];
+  const flowAssets = _flowAssets();
+  const fileAssets = _fileAssets();
   el.innerHTML = "";
-  if (!assets.length) {
-    el.innerHTML = '<span class="meta">还没有素材。gen 可以只用图片，patch 还要有流程视频。</span>';
+  if (!flowAssets.length && !fileAssets.length) {
+    el.innerHTML = '<span class="meta">还没有素材。gen 可以只用图片；' +
+      'patch/fullredraw 的 clip 与 pad 会在对应步骤完成后出现在这里。</span>';
   } else {
-    assets.forEach((asset, index) => el.appendChild(_assetCard(asset, index, assets)));
+    // 流程母版排在前面，勾选顺序即编号顺序（@Video1 是母版）。
+    flowAssets.forEach(asset => el.appendChild(_assetCard(asset, 0, fileAssets)));
+    fileAssets.forEach((asset, index) => el.appendChild(_assetCard(asset, index, fileAssets)));
   }
   const addRow = $("assetAddRow");
   if (addRow) addRow.style.display = _canEditAssets() ? "" : "none";
-  const extractRow = $("assetExtractRow");
-  if (extractRow) extractRow.style.display = FLOW === "patch" ? "" : "none";
   const hint = $("assetHint");
   if (hint) {
-    const videos = assets.filter(a => a.kind === "video").length;
-    const images = assets.filter(a => a.kind === "image").length;
+    const all = flowAssets.concat(fileAssets);
+    const videos = all.filter(a => a.kind === "video").length;
+    const images = all.filter(a => a.kind === "image").length;
     const mode = _currentMode();
-    hint.textContent = assets.length
-      ? `当前模式 ${mode || "未设置"} · ${videos} 个视频 · ${images} 张图片`
+    hint.textContent = all.length
+      ? `当前模式 ${mode || "未设置"} · ${videos} 个视频 · ${images} 张图片 · ` +
+        `已勾选 ${_selectedIds().size} 项`
       : "先添加素材，再回到「生成」步骤";
     hint.className = "meta " + ((videos || images) ? "ok" : "bad");
   }
@@ -328,11 +327,9 @@ function renderAssetPicked() {
     name.textContent = path.split(/[\\/]/).pop();
     name.title = path;
     name.style.minWidth = "180px";
-    const kind = /\.(png|jpe?g|webp)$/i.test(path) ? "image" : "video";
     const sel = document.createElement("select");
-    const blank = new Option("请选择角色", "");
-    sel.appendChild(blank);
-    for (const r of _allowedRoles(kind)) {
+    sel.appendChild(new Option("请选择角色", ""));
+    for (const r of USER_ROLES) {
       sel.appendChild(new Option(ASSET_ROLE_LABELS[r] || r, r));
     }
     sel.value = role;
