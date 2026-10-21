@@ -52,34 +52,194 @@ async function loadInfo() {
 
 // ── pick（patch 第一步）────────────────────────────────────────────────
 
+// 拖框只影响页面上的 #innerBox，不影响视口图：拖拽中不拿服务端的旧 inner
+// 覆盖正在拖的框；连续提交用序号保证旧响应不会盖住新结果。
+let pickDrag = null;
+let innerSeq = 0;
+let previewTimer = null;     // 下方预览的防抖
+let proxyPoll = null;        // 预览代理生成中的轮询
+let pendingSeek = null;      // video 元数据未就绪时暂存的 seek
+
+function pickPreviewUrl() {
+  if (!info.previews || !info.previews.vp) return null;
+  return info.previews.vp + (vpFrame === null ? "" : "&frame=" + vpFrame);
+}
+
+function maxFrame() {
+  return Math.max(0, (info.frame_count || 1) - 1);
+}
+
+function fpsOf() {
+  if (info.fps) return +info.fps;
+  if (info.frame_count && info.duration_s)
+    return info.frame_count / info.duration_s;
+  return 0;
+}
+
+function frameNow() {
+  return vpFrame === null ? +$("frameSlider").value : vpFrame;
+}
+
+function updateFrameLabel() {
+  const max = maxFrame();
+  const frame = Math.max(0, Math.min(max, Math.round(frameNow())));
+  const fps = fpsOf();
+  const total = info.duration_s || (fps ? max / fps : 0);
+  const now = fps ? frame / fps : 0;
+  $("frameLabel").textContent =
+    `${frame}/${max} · ${now.toFixed(1)}s / ${total.toFixed(1)}s`;
+}
+
+function refreshPreview() {
+  const url = pickPreviewUrl();
+  if (!url) return;
+  const img = $("vpImg");
+  if (img.getAttribute("src") !== url) img.src = url;
+}
+
+function schedulePreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(refreshPreview, 150);
+}
+
+/** 顶部播放器优先用代理；代理没就绪时先用源片，Chrome 能播就先用着。 */
+function videoUrl() {
+  if (info.proxy && info.proxy.state === "ready") return info.proxy.url;
+  return info.source_url;
+}
+
+function setVideoUrl(url) {
+  const v = $("erpVid");
+  if (!url || v.getAttribute("src") === url) return;
+  const t = isFinite(v.currentTime) ? v.currentTime : 0;
+  const playing = !v.paused && !v.ended;
+  v.src = url;
+  v.addEventListener("loadedmetadata", () => {
+    if (t > 0 && isFinite(v.duration) && v.duration > 0)
+      v.currentTime = Math.min(t, v.duration);
+    if (playing) v.play().catch(() => {});
+  }, { once: true });
+}
+
+function seekVideo(t) {
+  const v = $("erpVid");
+  if (!isFinite(t)) return;
+  if (v.readyState >= 1) v.currentTime = t;
+  else pendingSeek = t;
+}
+
+/** 滑块/上下一帧：seek 顶部视频，并请求同一帧的下方预览。 */
+function seekToFrame(frame) {
+  const f = Math.max(0, Math.min(maxFrame(), Math.round(frame)));
+  vpFrame = f;
+  $("frameSlider").value = f;
+  updateFrameLabel();
+  const fps = fpsOf();
+  if (fps > 0) seekVideo(f / fps);
+  schedulePreview();
+}
+
+function updateProxyState() {
+  const el = $("proxyState");
+  if (!el) return;
+  const st = info.proxy && info.proxy.state;
+  if (st === "ready")
+    el.textContent = "预览代理：已就绪（顶部播放器与服务端预览共用）";
+  else if (st === "disabled")
+    el.textContent = "源片本身已是浏览器可播格式，使用原片预览";
+  else if (st === "building")
+    el.textContent = "预览代理：正在生成 4K 副本（首次访问约 10 秒）…";
+  else if (st === "failed")
+    el.textContent = "预览代理生成失败，详见服务日志";
+  else
+    el.textContent = "预览代理：准备中…";
+}
+
+/** 缺代理时触发一次生成并轮询；完成后重新取 info，顶部切到代理。 */
+async function ensureProxy() {
+  if (!info || !info.proxy) return;
+  const st = info.proxy.state;
+  if (st === "ready" || st === "disabled" || st === "failed") return;
+  if (proxyPoll) return;
+  const tick = async () => {
+    try {
+      const r = await fetch(`/api/case/${encodeURIComponent(CASE)}/proxy`,
+                            { method: "POST" });
+      const d = await r.json();
+      if (!r.ok) {
+        clearInterval(proxyPoll); proxyPoll = null;
+        const el = $("proxyState");
+        if (el) el.textContent = `预览代理生成失败：${d.error || r.statusText}`;
+        return;
+      }
+      if (info.proxy && d.state) info.proxy.state = d.state;
+      updateProxyState();
+      if (d.state === "ready" || d.state === "disabled") {
+        clearInterval(proxyPoll); proxyPoll = null;
+        await loadInfo();
+      } else if (d.state === "failed") {
+        clearInterval(proxyPoll); proxyPoll = null;
+        const el = $("proxyState");
+        if (el) el.textContent = "预览代理生成失败，详见服务日志";
+      }
+    } catch (_) { /* 网络间隙继续轮询 */ }
+  };
+  proxyPoll = setInterval(tick, 2000);
+  await tick();
+}
+
+/** 画唯一的那一个选区框：拖拽中虚线，保存后实线。 */
+function setInnerBox(inner, committed) {
+  const box = $("innerBox");
+  const vp = (info && info.viewport) || {};
+  if (!inner || !vp.width || !vp.height) {
+    box.style.display = "none";
+    return;
+  }
+  box.style.left = (inner.x / vp.width * 100) + "%";
+  box.style.top = (inner.y / vp.height * 100) + "%";
+  box.style.width = (inner.width / vp.width * 100) + "%";
+  box.style.height = (inner.height / vp.height * 100) + "%";
+  box.style.display = "block";
+  box.classList.toggle("committed", !!committed);
+}
+
+function setInnerMeta(inner) {
+  $("inMeta").textContent = inner
+    ? `inner x=${inner.x} y=${inner.y} w=${inner.width} h=${inner.height}`
+    : "inner -";
+}
+
 function renderPick() {
   if (FLOW !== "patch") return;
-  const vid = $("erpVid");
-  if (!vid.src) vid.src = info.source_url;
-  if (info.previews && info.previews.vp) {
-    $("vpImg").src = info.previews.vp + (vpFrame === null ? "" : "&frame=" + vpFrame);
-  }
+  setVideoUrl(videoUrl());
+  refreshPreview();
   const vp = info.viewport || {};
   $("vpMeta").textContent =
     `yaw ${vp.yaw_deg ?? "-"}  pitch ${vp.pitch_deg ?? "-"}  fov ${vp.fov_h_deg ?? "-"}  ` +
     `${vp.width ?? "?"}×${vp.height ?? "?"}`;
-  const inner = info.inner;
-  if (inner) {
-    $("inMeta").textContent = `inner x=${inner.x} y=${inner.y} w=${inner.width} h=${inner.height}`;
-    const box = $("innerBox");
-    box.style.left = (inner.x / vp.width * 100) + "%";
-    box.style.top = (inner.y / vp.height * 100) + "%";
-    box.style.width = (inner.width / vp.width * 100) + "%";
-    box.style.height = (inner.height / vp.height * 100) + "%";
-    box.style.display = "block";
+  if (info.inner && (!pickDrag || !pickDrag.active)) {
+    setInnerBox(info.inner, true);
+    setInnerMeta(info.inner);
+  } else if (!info.inner) {
+    setInnerBox(null);
+    setInnerMeta(null);
   }
   const fr = info.frames || {};
   if ($("fStart").value === "" && fr.start !== undefined) {
     $("fStart").value = fr.start; $("fEnd").value = fr.end;
   }
   const n = info.frame_count || 0;
-  $("frameSlider").max = Math.max(0, n - 1);
-  $("frameLabel").textContent = `${$("frameSlider").value}/${Math.max(0, n - 1)}`;
+  const slider = $("frameSlider");
+  slider.max = Math.max(0, n - 1);
+  if (+slider.value > +slider.max) slider.value = slider.max;
+  if (vpFrame !== null && vpFrame > maxFrame()) vpFrame = maxFrame();
+  updateFrameLabel();
+  updateProxyState();
+  if (!info.proxy || info.proxy.state === "missing"
+      || info.proxy.state === "building") {
+    ensureProxy();
+  }
 }
 
 async function erpClick(e) {
@@ -90,35 +250,96 @@ async function erpClick(e) {
 
 function setupPick() {
   if (FLOW !== "patch") return;
-  $("erpVid").addEventListener("click", erpClick);
-  $("frameSlider").addEventListener("input", () => {
-    vpFrame = +$("frameSlider").value;
-    $("frameLabel").textContent = `${vpFrame}/${Math.max(0, (info.frame_count || 1) - 1)}`;
-    if (info.previews && info.previews.vp)
-      $("vpImg").src = info.previews.vp + "&frame=" + vpFrame;
+  const v = $("erpVid");
+  v.addEventListener("click", erpClick);
+  v.addEventListener("error", () => {
+    const err = v.error;
+    if (window.reportClientError) {
+      window.reportClientError("warn", "erpVid decode failed", {
+        context: "erpVid",
+        code: err && err.code,
+        source: v.currentSrc,
+        detail: err && err.message,
+      });
+    }
+    ensureProxy();               // 源片解不了时，代理是唯一的可播路径
   });
-  $("btnPrev").onclick = () => { $("frameSlider").value--; $("frameSlider").dispatchEvent(new Event("input")); };
-  $("btnNext").onclick = () => { $("frameSlider").value++; $("frameSlider").dispatchEvent(new Event("input")); };
+  v.addEventListener("loadedmetadata", () => {
+    if (pendingSeek != null) {
+      v.currentTime = Math.min(pendingSeek, v.duration || pendingSeek);
+      pendingSeek = null;
+    }
+    updateFrameLabel();
+  });
+  v.addEventListener("seeked", () => {
+    const fps = fpsOf();
+    if (!fps) return;
+    const f = Math.max(0, Math.min(maxFrame(), Math.round(v.currentTime * fps)));
+    if (f !== vpFrame) {
+      vpFrame = f;
+      $("frameSlider").value = f;
+      updateFrameLabel();
+    }
+    schedulePreview();           // 用户 seek：下方预览跟上一次
+  });
+  v.addEventListener("timeupdate", () => {
+    if (v.paused) return;        // 播放中只让滑块跟视频，不逐帧请求预览
+    const fps = fpsOf();
+    if (!fps) return;
+    const f = Math.max(0, Math.min(maxFrame(), Math.round(v.currentTime * fps)));
+    vpFrame = f;
+    $("frameSlider").value = f;
+    updateFrameLabel();
+  });
+  v.addEventListener("play", () => {
+    clearTimeout(previewTimer);
+    $("btnPlay").textContent = "⏸";
+  });
+  v.addEventListener("pause", () => {
+    $("btnPlay").textContent = "▶";
+    schedulePreview();           // 暂停时补当前帧
+  });
+  $("frameSlider").addEventListener("input", () => {
+    seekToFrame(+$("frameSlider").value);
+  });
+  $("btnPrev").onclick = () => seekToFrame(frameNow() - 1);
+  $("btnNext").onclick = () => seekToFrame(frameNow() + 1);
   $("btnPlay").onclick = () => {
-    const v = $("erpVid");
-    v.paused ? v.play() : v.pause();
-    $("btnPlay").textContent = v.paused ? "▶" : "⏸";
+    if (v.paused) v.play().catch(() => {});
+    else v.pause();
   };
-  PickCoords.drag($("vpImg"), {
+  pickDrag = PickCoords.drag($("vpImg"), {
+    onBegin: () => $("innerBox").classList.remove("committed"),
     onMove: (r) => PickCoords.drawOverlay($("innerBox"), $("vpImg"), r.css),
     onCommit: async (r) => {
-      await post("inner", { fx: r.frac.x, fy: r.frac.y,
-                            fw: r.frac.w, fh: r.frac.h });
+      const vp = info.viewport || {};
+      if (!vp.width || !vp.height) return;
+      // 与服务端 int(fx * width) 的截断一致；界面立刻用这组值，不等写盘。
+      const inner = {
+        x: Math.floor(r.frac.x * vp.width),
+        y: Math.floor(r.frac.y * vp.height),
+        width: Math.floor(r.frac.w * vp.width),
+        height: Math.floor(r.frac.h * vp.height),
+      };
+      const seq = ++innerSeq;
+      setInnerBox(inner, true);
+      setInnerMeta(inner);
+      const d = await post("inner", { fx: r.frac.x, fy: r.frac.y,
+                                      fw: r.frac.w, fh: r.frac.h },
+                           { stale: () => seq !== innerSeq });
+      if (!d && seq === innerSeq) {   // 写盘失败：回到上一次保存的框
+        setInnerBox(info.inner, true);
+        setInnerMeta(info.inner);
+      }
     },
-    onCancel: () => {},
+    onCancel: () => {
+      setInnerBox(info.inner, true);
+      setInnerMeta(info.inner);
+    },
   });
   for (const b of document.querySelectorAll("#joy .jb")) {
     let timer = null;
-    const step = () => post("nudge", { dyaw: +b.dataset.dy, dpitch: +b.dataset.dp })
-      .then(() => {
-        if (info.previews && info.previews.vp)
-          $("vpImg").src = info.previews.vp + "&" + Date.now();
-      });
+    const step = () => post("nudge", { dyaw: +b.dataset.dy, dpitch: +b.dataset.dp });
     b.addEventListener("mousedown", () => { step(); timer = setInterval(step, 100); });
     window.addEventListener("mouseup", () => clearInterval(timer));
     b.addEventListener("mouseleave", () => clearInterval(timer));

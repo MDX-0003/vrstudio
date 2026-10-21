@@ -42,7 +42,7 @@ function renderAll() {
   }
 }
 
-async function post(path, body) {
+async function post(path, body, opts = {}) {
   const r = await fetch(`/api/case/${encodeURIComponent(CASE)}/${path}`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -50,6 +50,8 @@ async function post(path, body) {
   if (r.status === 404) { location.href = "/"; return null; }
   const d = await r.json();
   if (!r.ok) { alert(d.error || r.statusText); return null; }
+  // 连续拖框时旧请求可能后到；stale() 为真就不拿它覆盖更新的界面状态。
+  if (opts.stale && opts.stale()) return d;
   const prev = info;
   info = d;                                   // 这些端点都回新 info
   // draft/nudge 等高频端点不回 prompt / 生成参数；保留上一份，避免面板被清空。

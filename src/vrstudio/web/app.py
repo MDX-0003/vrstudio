@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 
 import cv2
@@ -41,6 +43,8 @@ from ..media.frames import extract_frame
 from ..media.videoio import VideoIOError, probe
 from ..procenv import decode_text, utf8_env
 from ..redraw.manifest import Manifest
+from .logging import CLIENT_LOGGER, GEOMETRY_LOGGER, RequestLogMiddleware
+from .proxy import ensure_proxy, proxy_path, proxy_ready, proxy_state
 from .render import PreviewStore
 from .tasks import QUEUE, vrstudio_argv
 
@@ -83,6 +87,31 @@ def get_store(name: str) -> PreviewStore | None:
     return store
 
 
+def _remember_store(name: str, store: PreviewStore) -> None:
+    """几何写入走 store 时保住它的解码缓存。
+
+    ``get_store`` 以 case.toml 的 mtime 失效；store 自己写盘会改这个 mtime。
+    不在这里同步缓存记录的话，下一次 ``get_store`` 会重建 PreviewStore，
+    已解码的 ERP 帧（LRU）随之丢掉，视口微调又要从 8K 源片重新解码。
+    """
+    mtime = case_mod.case_toml(name, _ctx["cases_root"]).stat().st_mtime
+    _stores[name] = (mtime, store)
+
+
+def _drop_store(name: str) -> None:
+    """代理生成完成后丢掉旧 PreviewStore，下一次预览请求切到代理解码。"""
+    _stores.pop(name, None)
+
+
+def _log_geometry(request, name: str, event: str, old: dict, new: dict) -> None:
+    """记录 pick 草稿的几何变更；请求 id 用来和访问日志对上。"""
+    logging.getLogger(GEOMETRY_LOGGER).info("geometry", extra={"data": {
+        "event": f"geometry.{event}", "case": name,
+        "rid": getattr(request.state, "rid", None),
+        "old": old, "new": new,
+    }})
+
+
 # ── 页面 ─────────────────────────────────────────────────────────────────
 
 
@@ -123,6 +152,22 @@ async def video_out(request):
     if not p.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
     return FileResponse(str(p), media_type="video/mp4")
+
+
+async def video_proxy(request):
+    """预览代理：只有 patch 流、代理已就绪时才发文件。"""
+    name = request.path_params["name"]
+    try:
+        case = case_mod.load(name, _ctx["cases_root"])
+    except CaseError:
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    if case.flow != "patch":
+        return JSONResponse({"error": "no pick proxy for this flow"},
+                            status_code=404)
+    if not proxy_ready(case, _ctx["cases_root"]):
+        return JSONResponse({"error": "proxy not ready"}, status_code=404)
+    return FileResponse(str(proxy_path(case, _ctx["cases_root"])),
+                        media_type="video/mp4")
 
 
 async def img(request):
@@ -702,6 +747,10 @@ def _case_info(name: str) -> dict | None:
         "source_path": case.source_path,
         "viewport": case.viewport, "inner": case.inner, "frames": case.frames,
         "frame_count": store.frame_count if store else None,
+        "fps": store.fps if store else None,
+        "duration_s": store.duration_s if store else None,
+        "proxy": ({"state": proxy_state(case, _ctx["cases_root"]),
+                   "url": f"/video/proxy/{case.name}"} if store else None),
         "extract_current": case.extract_current,
         "adopt_round": case.adopt_round,
         "assets": _asset_details(case),
@@ -1296,14 +1345,17 @@ async def api_draft(request):
 
 
 async def api_viewport(request):
-    store = get_store(request.path_params["name"])
+    name = request.path_params["name"]
+    store = get_store(name)
     if store is None:
         return JSONResponse({"error": "no such case"}, status_code=404)
     body = await request.json()
+    old = dict(store.case.viewport or {})
     await asyncio.to_thread(store.set_viewport_from_erp_click,
                             float(body["fx"]), float(body["fy"]))
-    _stores.pop(request.path_params["name"], None)
-    return JSONResponse(_case_info(request.path_params["name"]))
+    _remember_store(name, store)
+    _log_geometry(request, name, "viewport", old, dict(store.case.viewport or {}))
+    return JSONResponse(_case_info(name))
 
 
 async def api_inner(request):
@@ -1319,8 +1371,10 @@ async def api_inner(request):
     w, h = int(fw * vp["width"]), int(fh * vp["height"])
     if w <= 0 or h <= 0:
         return JSONResponse({"error": "width/height must be positive"}, status_code=400)
+    old = dict(store.case.inner or {})
     await asyncio.to_thread(store.set_inner, x, y, w, h)
-    _stores.pop(name, None)
+    _remember_store(name, store)
+    _log_geometry(request, name, "inner", old, dict(store.case.inner or {}))
     return JSONResponse(_case_info(name))
 
 
@@ -1330,9 +1384,11 @@ async def api_nudge(request):
     if store is None:
         return JSONResponse({"error": "no such case"}, status_code=404)
     body = await request.json()
+    old = dict(store.case.viewport or {})
     yaw, pitch = await asyncio.to_thread(
         store.nudge, float(body.get("dyaw", 0.0)), float(body.get("dpitch", 0.0)))
-    _stores.pop(name, None)
+    _remember_store(name, store)
+    _log_geometry(request, name, "nudge", old, dict(store.case.viewport or {}))
     info = _case_info(name)                  # 回完整 info：前端 post() 统一就地刷新
     info["nudged"] = {"yaw": yaw, "pitch": pitch}
     return JSONResponse(info)
@@ -1437,6 +1493,78 @@ async def api_task(request):
     return JSONResponse(QUEUE.status())
 
 
+_CLIENT_LOG_MAX = 16 * 1024
+_CLIENT_TEXT_LIMITS = {
+    "message": 4000, "detail": 4000, "source": 1000,
+    "stack": 4000, "url": 1000, "ua": 500, "context": 200, "case": 200,
+}
+_client_log = logging.getLogger(CLIENT_LOGGER)
+
+
+async def api_client_log(request):
+    """浏览器端错误入口：只写 client-*.jsonl，不混进服务日志。
+
+    浏览器用 ``navigator.sendBeacon`` 或 ``fetch(keepalive)`` 发送；字段全部
+    截断，避免一条异常堆栈把日志撑爆。重复上报由前端 helper 去重。
+    """
+    raw_len = request.headers.get("content-length")
+    if raw_len:
+        try:
+            if int(raw_len) > _CLIENT_LOG_MAX:
+                return Response(status_code=413)
+        except ValueError:
+            pass
+    raw = await request.body()
+    if len(raw) > _CLIENT_LOG_MAX:
+        return Response(status_code=413)
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        return JSONResponse({"error": "bad json"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "object expected"}, status_code=400)
+
+    name = str(body.get("level") or "error").lower()
+    level = {"error": logging.ERROR, "warn": logging.WARNING,
+             "warning": logging.WARNING, "info": logging.INFO}.get(
+                 name, logging.ERROR)
+    data = {"event": "client.error", "cid": uuid.uuid4().hex[:12]}
+    for key, limit in _CLIENT_TEXT_LIMITS.items():
+        value = body.get(key)
+        if value is not None:
+            data[key] = str(value)[:limit]
+    data.setdefault("message", "unknown client error")
+    for key in ("line", "col", "code"):
+        value = body.get(key)
+        if value is None:
+            continue
+        try:
+            data[key] = int(value)
+        except (TypeError, ValueError):
+            data[key] = str(value)[:100]
+    _client_log.log(level, "client.error", extra={"data": data})
+    return Response(status_code=204)
+
+
+async def api_proxy(request):
+    """预览代理状态：POST 缺文件时启动一次后台生成，GET 只查状态。"""
+    name = request.path_params["name"]
+    try:
+        case = case_mod.load(name, _ctx["cases_root"])
+    except CaseError:
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    if case.flow != "patch":
+        return JSONResponse({"error": "只有 patch 流有 pick 预览代理"},
+                            status_code=400)
+    if request.method == "POST":
+        state = await asyncio.to_thread(
+            ensure_proxy, case, _ctx["cases_root"], _drop_store)
+    else:
+        state = await asyncio.to_thread(
+            proxy_state, case, _ctx["cases_root"])
+    return JSONResponse({"state": state, "url": f"/video/proxy/{name}"})
+
+
 async def api_sources(request):
     vids = sorted(p for p in sources_dir().iterdir()
                   if p.is_file() and p.suffix.lower() in _VIDEO_EXTS)
@@ -1474,6 +1602,7 @@ routes = [
     Route("/img/asset/{name}/{file}", asset_img),
     Route("/img/keyframe/{name}/{round}/{index}", keyframe_img),
     Route("/video/source/{name}", video_source),
+    Route("/video/proxy/{name}", video_proxy),
     Route("/video/out/{name}/{file}", video_out),
     Route("/api/cases", api_cases, methods=["GET", "POST"]),
     Route("/api/case/{name}", api_case),
@@ -1494,7 +1623,9 @@ routes = [
     Route("/api/case/{name}/nudge", api_nudge, methods=["POST"]),
     Route("/api/case/{name}/reset-draft", api_reset_draft, methods=["POST"]),
     Route("/api/case/{name}/run", api_run, methods=["POST"]),
+    Route("/api/case/{name}/proxy", api_proxy, methods=["GET", "POST"]),
     Route("/api/task", api_task),
+    Route("/api/client-log", api_client_log, methods=["POST"]),
     Route("/api/browse", api_browse),
     Route("/api/sources", api_sources),
 ]
@@ -1525,6 +1656,7 @@ def build_app(cases_root: str | Path | None = None) -> Starlette:
     _ctx["cases_root"] = cases_root
     app = Starlette(routes=routes)
     app.add_middleware(NoStoreMiddleware)
+    app.add_middleware(RequestLogMiddleware)
     app.mount("/static", StaticFiles(directory=str(_WEB_DIR / "static")),
               name="static")
     return app

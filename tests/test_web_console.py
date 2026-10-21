@@ -29,6 +29,14 @@ INNER = {"x": 80, "y": 40, "width": 160, "height": 100}
 FRAMES = {"start": 0, "end": 5}
 
 
+@pytest.fixture(autouse=True)
+def _clear_preview_stores():
+    """PreviewStore 是模块级缓存；每个用例用自己的 tmp 目录，不能串。"""
+    web_app._stores.clear()
+    yield
+    web_app._stores.clear()
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch) -> TestClient:
     # vrgen 不存在：_rounds 走"不可用"分支而不是 FileNotFoundError
@@ -255,6 +263,23 @@ def test_inner_drag_submits_fractions(client, patch_case, tmp_path):
     inner = case_mod.load("p1", tmp_path).inner
     assert (inner["x"], inner["y"]) == (80, 90)            # 分数 × 视口像素
     assert (inner["width"], inner["height"]) == (160, 45)
+
+
+def test_inner_keeps_preview_store_and_url(client, patch_case, tmp_path):
+    """拖 inner 只写草稿：预览图 URL 不变（不触发浏览器重载），store 不重建。"""
+    before_info = client.get("/api/case/p1").json()
+    before_url = before_info["previews"]["vp"]
+    store = web_app.get_store("p1")
+
+    r = client.post("/api/case/p1/inner",
+                    json={"fx": 0.25, "fy": 0.5, "fw": 0.5, "fh": 0.25})
+    assert r.status_code == 200
+
+    assert web_app.get_store("p1") is store
+    after_info = client.get("/api/case/p1").json()
+    assert after_info["previews"]["vp"] == before_url
+    inner = case_mod.load("p1", tmp_path).inner
+    assert (inner["x"], inner["y"], inner["width"], inner["height"]) == (80, 90, 160, 45)
 
 
 def test_nudge_wraps_yaw_and_clamps_pitch(client, patch_case, tmp_path):

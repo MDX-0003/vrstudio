@@ -28,7 +28,10 @@
   img, video { border: 1px solid #d8cbb4; display: block; background: #000; }
   img { cursor: crosshair; }
   #vpWrap { position: relative; display: inline-block; }
-  #innerBox { position: absolute; border: 2px dashed #d33; pointer-events: none; display: none; }
+  /* 选区框只有一个：拖拽中虚线，保存后实线 */
+  #innerBox { position: absolute; border: 2px dashed #d33; pointer-events: none;
+              display: none; box-sizing: border-box; }
+  #innerBox.committed { border-style: solid; }
   #erpWrap { position: relative; display: inline-block; }
   #vpFoot, #vpCross { position: absolute; pointer-events: none; display: none; }
   #vpFoot { border: 1px solid #4a4; }
@@ -139,6 +142,7 @@
   </div>
   <div class="meta">逐帧走查：检查红框（inner）是否始终框住目标——下方视口图跟随当前帧刷新</div>
   <div class="meta" id="vpMeta">yaw - pitch -</div>
+  <div class="meta" id="proxyState">预览代理：准备中…</div>
   <div class="meta">视口：按住拖一个框圈住目标区域，松手保存</div>
   <div id="vpWrap"><img id="vpImg" style="width:512px" draggable="false"><div id="innerBox"></div></div>
   <div class="meta" id="inMeta">inner -</div>
@@ -233,14 +237,15 @@
   <div id="bList" style="max-height:300px;overflow-y:auto"></div>
 </div>
 
+<script src="/static/clientlog.js?v=1"></script>
 <script src="/static/pick.js?v=4"></script>
 <script src="/static/erp360.js?v=5"></script>
-<script src="/static/common.js?v=2"></script>
+<script src="/static/common.js?v=3"></script>
 <script src="/static/assets.js?v=2"></script>
 <script src="/static/params.js?v=2"></script>
 <script src="/static/prompt.js?v=1"></script>
 <script src="/static/keyframe.js?v=1"></script>
 <script src="/static/tasks.js?v=1"></script>
-<script src="/static/wizard.js?v=6"></script>
+<script src="/static/wizard.js?v=8"></script>
 </body>
 </html>

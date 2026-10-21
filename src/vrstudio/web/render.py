@@ -13,8 +13,10 @@ case 模型（``vrstudio.case.set_draft``），本模块不再拥有任何写 ca
 from __future__ import annotations
 
 import hashlib
+import logging
 import shutil
 import threading
+import time
 from pathlib import Path
 
 import cv2
@@ -22,6 +24,10 @@ import numpy as np
 
 from .. import case as case_mod
 from ..patch.projection import erp_to_rect
+from .logging import PREVIEW_LOGGER
+from .proxy import proxy_identity, proxy_path, proxy_ready
+
+log = logging.getLogger(PREVIEW_LOGGER)
 
 VIEWPORT_PREVIEW_W = 960  # 视口预览宽度上限
 MEDIUM_W = 4096        # 源帧的工作副本宽度上限
@@ -50,9 +56,23 @@ class PreviewStore:
         self.case = case_mod.load(name, cases_root)   # 失败抛 CaseError（404/400 由上层映射）
         self.dir = self.case.dir(cases_root) / "derived" / "pick"
         self.dir.mkdir(parents=True, exist_ok=True)
-        cap = cv2.VideoCapture(self._video())
+        self.proxy_file = proxy_path(self.case, cases_root)
+        if proxy_ready(self.case, cases_root):
+            self.source_kind = "proxy"
+            identity = proxy_identity(self.case, cases_root) or "ready"
+            self.source_key = f"proxy:{identity}"
+        else:
+            self.source_kind = "source"
+            self.source_key = "source"
+        # 元数据以源片为准：代理与源片帧数/帧率必须一致，滑块的帧号才不漂。
+        cap = cv2.VideoCapture(str(Path(self.case.source_path)))
         self.frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        self.source_size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
         cap.release()
+        self.duration_s = (self.frame_count / self.fps
+                           if self.fps and self.frame_count else 0.0)
         self.key = self._new_key()
         self._vp_bytes: tuple | None = None
         self._erp_lru: dict[int, np.ndarray] = {}
@@ -81,7 +101,8 @@ class PreviewStore:
     def set_inner(self, x: int, y: int, w: int, h: int) -> None:
         self.case.inner = {"x": int(x), "y": int(y), "width": int(w), "height": int(h)}
         self.save_geometry()
-        self.key = self._new_key()
+        # inner 由页面的 #innerBox 单独绘制，图片内容与它无关：不刷新 preview
+        # 标识，拖框就不会触发一次 8K 解码 + 重投影。
 
     def nudge(self, dyaw: float, dpitch: float) -> tuple[float, float]:
         """摇杆微调；服务端做算术并写回，case.toml 里永远是合法值
@@ -95,28 +116,52 @@ class PreviewStore:
         self.key = self._new_key()
         return vp["yaw_deg"], vp["pitch_deg"]
 
-    # ── 预览（便宜：在缓存底图上叠加）────────────────────────────────────
+    # ── 预览（缓存解码帧 + 重投影）──────────────────────────────────────
 
     def viewport_png(self, frame: int | None = None) -> bytes:
-        """视口预览 PNG 字节：当前帧重投影 + inner 红框叠加。
-        内存组合并按 (几何, 帧) 记忆化——共享 vp.png 文件曾在并发响应下被
+        """视口预览 PNG 字节：当前帧重投影。
+        红框由页面的 #innerBox 单独绘制；服务端不再把 inner 叠加进图片，
+        否则同一画面上会出现两个框，而且拖 inner 会强迫重画整张 8K 预览。
+        内存组合并按 (视口, 帧) 记忆化——共享 vp.png 文件曾在并发响应下被
         边写边读、发过撕裂的图。frame=None 用第 0 帧。"""
         stamp = (self.key, frame)
         if self._vp_bytes and self._vp_bytes[0] == stamp:
+            log.debug("preview.hit", extra={"data": {
+                "event": "preview.hit", "case": self.name, "frame": frame,
+                "key": self.key, "source": self.source_kind,
+            }})
             return self._vp_bytes[1]
+
+        started = time.perf_counter()
         if frame is None:
-            view = self._reproject(self._erp_medium(0))
+            t0 = time.perf_counter()
+            med = self._erp_medium(0)
+            t1 = time.perf_counter()
+            view = self._reproject(med)
+            t2 = time.perf_counter()
+            timing = {"decode_ms": round((t1 - t0) * 1000, 1),
+                      "reproject_ms": round((t2 - t1) * 1000, 1)}
         else:
+            t0 = time.perf_counter()
             cached = self.viewport_frame_path(frame)
             view = cv2.imread(str(cached))
+            t1 = time.perf_counter()
+            timing = {"frame_ms": round((t1 - t0) * 1000, 1)}
             if view is None:
                 raise RuntimeError(f"frame cache unreadable: {cached}")
-        self._draw_inner(view)
+        t2 = time.perf_counter()
         ok, buf = cv2.imencode(".png", view)
         if not ok:
             raise RuntimeError("viewport preview PNG encode failed")
+        t3 = time.perf_counter()
         data = buf.tobytes()
         self._vp_bytes = (stamp, data)
+        log.info("preview.render", extra={"data": {
+            "event": "preview.render", "case": self.name, "frame": frame,
+            "key": self.key, "source": self.source_kind, "hit": False, **timing,
+            "png_ms": round((t3 - t2) * 1000, 1),
+            "total_ms": round((t3 - started) * 1000, 1),
+        }})
         self._gc()
         return data
 
@@ -136,6 +181,8 @@ class PreviewStore:
         return out
 
     def _video(self) -> str:
+        if self.source_kind == "proxy" and self.proxy_file.is_file():
+            return str(self.proxy_file)
         return str(Path(self.case.source_path))
 
     def _reproject(self, med: np.ndarray) -> np.ndarray:
@@ -146,18 +193,6 @@ class PreviewStore:
         return erp_to_rect(med, np.radians(vp["yaw_deg"]),
                            np.radians(vp["pitch_deg"]),
                            np.radians(vp["fov_h_deg"]), vw, vh)
-
-    def _draw_inner(self, view: np.ndarray) -> None:
-        inner = self.case.inner
-        if not inner:
-            return
-        vp = self._vp()
-        scale = min(VIEWPORT_PREVIEW_W / vp["width"], 1.0)
-        cv2.rectangle(view,
-                      (int(inner["x"] * scale), int(inner["y"] * scale)),
-                      (int((inner["x"] + inner["width"]) * scale),
-                       int((inner["y"] + inner["height"]) * scale)),
-                      (0, 0, 255), 2)
 
     def _medium_of(self, frame: np.ndarray) -> np.ndarray:
         h, w = frame.shape[:2]
@@ -179,11 +214,15 @@ class PreviewStore:
         return med
 
     def _new_key(self) -> str:
+        """预览图的缓存标识：只随视口和预览源（源片/代理）变化。
+        inner 是页面叠加的框，不进图片，所以拖 inner 不应让预览失效；
+        代理就绪或重建后 source_key 变化，新 URL 让浏览器重新取图。"""
         return hashlib.sha1(
-            f"{self.case.viewport}|{self.case.inner}".encode()).hexdigest()[:10]
+            f"{self.source_key}|{self.case.viewport}".encode()).hexdigest()[:10]
 
     def _vp_geo_key(self) -> str:
-        return hashlib.sha1(str(self.case.viewport).encode()).hexdigest()[:10]
+        return hashlib.sha1(
+            f"{self.source_key}|{self.case.viewport}".encode()).hexdigest()[:10]
 
     def _gc(self):
         """derived/pick 是可再生成缓存：清掉旧方案遗留与旧几何的帧目录。"""

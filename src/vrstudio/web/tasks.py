@@ -11,6 +11,7 @@ submit 增参即可；调度策略已是单队列先进先出，无需改动。
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import sys
 import threading
@@ -20,8 +21,10 @@ from pathlib import Path
 from ..config import REPO_ROOT
 from ..procenv import decode_text, utf8_env
 from ..progress import logs_dir
+from .logging import TASK_LOGGER
 
 _TAIL_BYTES = 8 * 1024
+log = logging.getLogger(TASK_LOGGER)
 
 
 class Task:
@@ -39,6 +42,11 @@ class Task:
     def _run(self):
         self.out_path = (logs_dir() /
                          f"web_{self.kind}_{self.case}_{time.strftime('%Y%m%d-%H%M%S')}.log")
+        log.info("task.start", extra={"data": {
+            "event": "task.start", "kind": self.kind, "case": self.case,
+            "log": str(self.out_path),
+        }})
+        started = time.monotonic()
         with open(self.out_path, "w", encoding="utf-8", newline="") as fh:
             self.proc = subprocess.Popen(
                 self.argv, stdout=fh, stderr=subprocess.STDOUT,
@@ -47,6 +55,17 @@ class Task:
             self.started = time.time()
             self.returncode = self.proc.wait()
         self.state = "done" if self.returncode == 0 else "failed"
+        data = {
+            "event": "task.finish", "kind": self.kind, "case": self.case,
+            "rc": self.returncode,
+            "ms": round((time.monotonic() - started) * 1000, 1),
+            "log": str(self.out_path),
+        }
+        if self.returncode != 0:
+            tail = self.tail(5)
+            data["error"] = tail[-1] if tail else None
+        log.log(logging.INFO if self.returncode == 0 else logging.ERROR,
+                "task.finish", extra={"data": data})
 
     def tail(self, max_lines: int = 14) -> list[str]:
         if not self.out_path or not self.out_path.exists():
@@ -83,6 +102,10 @@ class TaskQueue:
         with self._lock:
             task = Task(kind, case, argv)
             self.pending.append(task)
+            log.info("task.submit", extra={"data": {
+                "event": "task.submit", "kind": kind, "case": case,
+                "queued": len(self.pending),
+            }})
             if self._thread is None or not self._thread.is_alive():
                 self._thread = threading.Thread(target=self._drain, daemon=True)
                 self._thread.start()
