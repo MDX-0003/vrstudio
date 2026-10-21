@@ -660,6 +660,16 @@ def test_step_files_patch_uses_extract_version(client, patch_case, tmp_path):
     assert [f["name"] for f in sf["merge"]["outputs"]] == ["v1.mp4"]
 
 
+def test_step_files_patch_falls_back_to_migrated_space(client, patch_case, tmp_path):
+    _mk_extract("p1", tmp_path, "v1", with_result=True)
+    case_mod.set_extract_current("p1", "v1", root=tmp_path)
+    out = tmp_path / "p1" / "out"
+    out.mkdir()
+    (out / "v1_space.mp4").write_bytes(b"out")
+    sf = client.get("/api/case/p1").json()["step_files"]
+    assert [f["name"] for f in sf["merge"]["outputs"]] == ["v1_space.mp4"]
+
+
 def test_file_info_uses_repo_relative_path():
     p = config_mod.REPO_ROOT / "cases" / "_rel_test" / "x.mp4"
     info = web_app._file_info(p)

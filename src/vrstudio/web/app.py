@@ -573,6 +573,10 @@ def _patch_step_files(case: case_mod.Case, cdir: Path) -> dict:
     sidecar = d / "clip.json"
     ai = d / "result.mp4"
     out = cdir / "out" / f"{case.extract_current}.mp4"
+    if not out.is_file():
+        migrated = cdir / "out" / f"{case.extract_current}_space.mp4"
+        if migrated.is_file():
+            out = migrated
     steps["extract"] = {
         "inputs": [_file_info(source)],
         "outputs": [_file_info(clip), _file_info(mask), _file_info(sidecar)],
