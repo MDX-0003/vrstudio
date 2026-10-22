@@ -115,7 +115,6 @@
   .resultStrip { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
     background: #fffdf8; border: 1px solid #cfe0c4; border-radius: 8px;
     padding: 0.45rem 0.8rem; margin-bottom: 0.8rem; font-size: 0.85rem; }
-  .resultStrip.adopted { border-color: #e7ddcc; color: #8a7c66; }
   .resultStrip.failed { border-color: #e3c4bc; color: #b5533c; }
   .resultStrip b { color: #4f7343; }
   /* 底部提交条：生成设置、扣费额度与提交操作的唯一位置 */
@@ -151,21 +150,18 @@
   .promptActions { margin: 0.2rem 0; }
   .varCard { border-top: 1px dashed #ece4d4; padding: 0.3rem 0; }
   .varCard > summary { cursor: pointer; display: flex; align-items: baseline;
-    gap: 0.45rem; flex-wrap: wrap; }
-  .varCard .vname { font-weight: 600; color: #5a4a30; }
-  .varCard .vkey { font-size: 0.72rem; color: #a89a82;
+    gap: 0.5rem; flex-wrap: wrap; }
+  .varCard .vname { font-size: 0.88rem; font-weight: 600; color: #5a4a30; }
+  .varCard .vkey { font-size: 0.82rem; color: #7a5c33;
     font-family: ui-monospace, monospace; }
-  .varCard .vsum { flex: 1; min-width: 160px; font-size: 0.76rem; color: #8a7c66;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .varCard .vhelp { flex-basis: 100%; font-size: 0.78rem; color: #6b5d48;
+    line-height: 1.55; }
   .varCard textarea { width: 100%; box-sizing: border-box; min-height: 4.5em;
     max-height: 40vh; resize: vertical; margin: 0.3rem 0; font: inherit;
     line-height: 1.6; background: #fffdf8; color: #3d362c;
     border: 1px solid #d8cbb4; border-radius: 4px; padding: 0.35rem; }
   .varCard .varOps { display: flex; gap: 0.4rem; align-items: center;
     font-size: 0.74rem; color: #8a7c66; }
-  .readonlyVars { display: flex; flex-wrap: wrap; gap: 0.2rem 0.8rem;
-    font-size: 0.76rem; color: #8a7c66; margin: 0.3rem 0; }
-  .readonlyVars b { color: #6b5d48; font-weight: 500; }
   #derivedList { display: flex; flex-direction: column; gap: 0.15rem; margin: 0.3rem 0; }
   .derivedRow { display: flex; gap: 0.6rem; font-size: 0.76rem; color: #6b5d48;
     border-bottom: 1px dashed #ece4d4; padding: 0.12rem 0; }
@@ -305,9 +301,9 @@
 <script src="/static/common.js?v=4"></script>
 <script src="/static/assets.js?v=3"></script>
 <script src="/static/params.js?v=3"></script>
-<script src="/static/prompt.js?v=2"></script>
+<script src="/static/prompt.js?v=3"></script>
 <script src="/static/keyframe.js?v=1"></script>
 <script src="/static/tasks.js?v=2"></script>
-<script src="/static/wizard.js?v=9"></script>
+<script src="/static/wizard.js?v=10"></script>
 </body>
 </html>

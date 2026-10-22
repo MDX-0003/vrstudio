@@ -415,9 +415,8 @@ function renderResultStrip() {
   if (latest) {
     const t = _fmtRoundTime(latest.updated);
     if (latest.round === adopted && _targetPresent()) {
-      el.classList.add("adopted");
-      el.append(`已选用最新成片 · ${t}（来自 ${_roundSource(latest)}）`);
-      el.style.display = "flex";
+      // 已经采用且目标文件在：没有可执行的动作，整行不显示。
+      el.style.display = "none";
       return;
     }
     const label = document.createElement("span");

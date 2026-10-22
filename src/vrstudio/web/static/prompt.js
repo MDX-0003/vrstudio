@@ -71,15 +71,8 @@ function autoGrow(el) {
   el.style.height = (el.scrollHeight + 2) + "px";
 }
 
-function _varSummary(value) {
-  const text = String(value || "");
-  const head = text.replace(/\s+/g, " ").trim().slice(0, 40);
-  return `${text.length} 字${head ? " · " + head : ""}`;
-}
-
-function _refreshVarSummary(card, value) {
-  const sum = card.querySelector(".vsum");
-  if (sum) sum.textContent = _varSummary(value);
+function _help(p, key) {
+  return ((p && p.help) || {})[key] || "";
 }
 
 function _varCard(p, key, declared) {
@@ -94,9 +87,14 @@ function _varCard(p, key, declared) {
   const keyEl = document.createElement("span");
   keyEl.className = "vkey";
   keyEl.textContent = key;
-  const sum = document.createElement("span");
-  sum.className = "vsum";
-  summary.append(name, keyEl, sum);
+  summary.append(name, keyEl);
+  const help = _help(p, key);
+  if (help) {
+    const helpEl = document.createElement("span");
+    helpEl.className = "vhelp";
+    helpEl.textContent = help;
+    summary.appendChild(helpEl);
+  }
   card.appendChild(summary);
 
   const ta = document.createElement("textarea");
@@ -105,11 +103,9 @@ function _varCard(p, key, declared) {
   ta.placeholder = "（还没填）";
   ta.oninput = () => {
     autoGrow(ta);
-    _refreshVarSummary(card, ta.value);
     schedulePromptSave(key, ta.value);
   };
   card.appendChild(ta);
-  _refreshVarSummary(card, ta.value);
   card.addEventListener("toggle", () => { if (card.open) autoGrow(ta); });
 
   const ops = document.createElement("div");
@@ -131,15 +127,13 @@ function _varCard(p, key, declared) {
 
 function renderPrompt() {
   const p = info && info.prompt;
-  const list = $("varList"), meta = $("promptMeta"), ro = $("readonlyVars");
+  const list = $("varList");
   renderPromptBox();
-  if (!list || !meta) return;
+  if (!list) return;
   const summaryEl = $("promptSummary");
   if (!p || p.error) {
     list.innerHTML = "";
-    if (ro) ro.innerHTML = "";
     list.dataset.sig = "";
-    meta.textContent = "";
     if (summaryEl) summaryEl.textContent = p && p.error ? "读取失败" : "";
     return;
   }
@@ -152,10 +146,6 @@ function renderPrompt() {
     summaryEl.textContent = `${p.template || "未选择模板"} · ${declared.length} 个可编辑变量` +
       (p.render_error ? " · 有变量待补齐" : "");
   }
-  meta.textContent = p.template
-    ? `模板 ${p.template}。完整预览已代入当前变量、素材清单、模式规则与几何尺寸；` +
-      (computed.length ? `${computed.join("、")} 由页面自动填入。` : "")
-    : "";
 
   const sig = JSON.stringify([keys, readOnly, p.template]);
   if (list.dataset.sig === sig && list.children.length) {
@@ -166,7 +156,6 @@ function renderPrompt() {
       if (document.activeElement !== ta) {
         ta.value = (p.vars || {})[card.dataset.key] ?? "";
       }
-      _refreshVarSummary(card, ta.value);
     }
     return;
   }
@@ -175,19 +164,6 @@ function renderPrompt() {
   list.innerHTML = "";
   for (const k of keys) list.appendChild(_varCard(p, k, declared));
   for (const ta of list.querySelectorAll("textarea")) autoGrow(ta);
-
-  if (ro) {
-    ro.innerHTML = "";
-    for (const k of readOnly) {
-      const item = document.createElement("span");
-      const name = document.createElement("b");
-      name.textContent = _label(p, k);
-      item.append(name);
-      if (_label(p, k) !== k) item.append(` · ${k}`);
-      item.append(" · 自动填入");
-      ro.appendChild(item);
-    }
-  }
 }
 
 /** 防抖保存：连续输入只在停顿 400ms 后发一次。 */
