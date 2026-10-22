@@ -43,13 +43,17 @@ function _fillDuration(mode) {
   sel.innerHTML = "";
   const d = (mode && mode.duration) || {};
   if (d.type === "range" && d.min != null && d.max != null) {
-    sel.appendChild(new Option("自动", "auto"));
+    const auto = new Option("自动", "auto");
+    auto.title = "不指定时长，由母版或素材推导";
+    sel.appendChild(auto);
     for (let i = Number(d.min); i <= Number(d.max); i++) {
       sel.appendChild(new Option(`${i} 秒`, String(i)));
     }
     sel.disabled = false;
   } else {
-    sel.appendChild(new Option("自动（由母版/素材推导）", "auto"));
+    const auto = new Option("自动", "auto");
+    auto.title = "由母版/素材推导";
+    sel.appendChild(auto);
     sel.disabled = true;
   }
   sel.value = "auto";
@@ -66,12 +70,13 @@ function renderGenParams() {
       sel.innerHTML = "";
       sel.disabled = true;
     }
-    hint.style.display = "block";
+    hint.style.display = "none";
     hint.textContent = "生成参数暂时读不到：" + gp.error;
     if (fixed) fixed.textContent = "";
     return;
   }
   hint.style.display = "none";
+  hint.textContent = "";
   for (const sel of [resSel, scaleSel, modeSel, aspectSel, durSel]) sel.disabled = false;
   const cur = gp.current || {};
   const modes = gp.modes || [];
@@ -86,19 +91,17 @@ function renderGenParams() {
   _fillAspect(mode, cur.aspect_ratio);
   _fillDuration(mode);
 
-  const label = (o) => `${o.value}（${o.width}×${o.height}）`;
-  resSel.innerHTML = (gp.output || []).map(o =>
-    `<option value="${o.value}">${label(o)}</option>`).join("");
-  scaleSel.innerHTML = (gp.input || []).map(o =>
-    `<option value="${o.value}" title="${o.reason || ""}"` +
-    `${o.ok === false ? " disabled" : ""}>` +
-    `${label(o)}${o.ok === false ? "　超限" : ""}</option>`).join("");
+  const inputLabel = (o) => ({ auto: "自动", full: "原尺寸", half: "半尺寸" })[o.value] || o.value;
+  const option = (o, text, extra = "") =>
+    `<option value="${o.value}" title="${o.width}×${o.height}${o.reason ? "；" + o.reason : ""}"` +
+    `${o.ok === false ? " disabled" : ""}>${text}${o.ok === false ? "　超限" : ""}${extra}</option>`;
+  resSel.innerHTML = (gp.output || []).map(o => option(o, o.value)).join("");
+  scaleSel.innerHTML = (gp.input || []).map(o => option(o, inputLabel(o))).join("");
   // 纯图片模式两者都是空数组：保持空下拉，等素材补齐后重新计算。
   const noAssets = !(gp.output || []).length || !(gp.input || []).length;
   if (noAssets) {
     resSel.disabled = true;
     scaleSel.disabled = true;
-    hint.style.display = "block";
     hint.textContent = "先添加素材，再计算输入/输出尺寸；纯图片模式不需要视频。";
   } else {
     if (cur.resolution) resSel.value = cur.resolution;
@@ -107,6 +110,10 @@ function renderGenParams() {
     else scaleSel.value = ((gp.input || []).find(o => o.ok !== false) || {}).value || "auto";
   }
   const f = gp.fixed || {};
+  if (durSel.disabled && durSel.options.length && f.duration_s) {
+    durSel.options[0].textContent = `自动（${f.duration_s} 秒）`;
+    durSel.options[0].title = `由母版/素材推导，本次实际为 ${f.duration_s} 秒`;
+  }
   fixed.textContent =
     `模型 ${f.model_id}（Seedance 2.5）· 时长 ${f.duration_s || "由输入/素材推导"}` +
     ` · 数量 ${f.num}` +
@@ -179,10 +186,10 @@ function fillSessions(project, episodeNo, wantedSession) {
   const episode = _episode(project, episodeNo);
   const sessions = (episode && episode.sessions) || [];
   for (const s of sessions) {
-    _option(sel, s.id, `${s.name || "未命名"}（${s.id}）`);
+    _option(sel, s.id, s.name || "未命名", `会话 ID ${s.id}`);
   }
   if (wantedSession && !sessions.some(s => s.id === wantedSession)) {
-    _option(sel, wantedSession, `⚠ 已失效：${wantedSession}`);
+    _option(sel, wantedSession, `⚠ 已失效：${wantedSession}`, "这个会话已不在平台返回的列表里");
   }
   sel.value = String(wantedSession || 0);
 }
@@ -216,24 +223,30 @@ function renderSessions() {
   const project = _project(pid);
   ep = fillEpisodes(project, ep);
   fillSessions(project, ep, sid);
+  if (typeof renderSubmitBar === "function") renderSubmitBar();
+}
+
+function _setHint(el, text, cls = "meta") {
+  if (!el) return;
+  el.className = cls;
+  el.textContent = text;
+  el.title = text;
 }
 
 async function loadSessions() {
   const hint = $("sessionHint");
   if (!hint) return;
-  hint.className = "meta";
-  hint.textContent = "正在获取项目与会话…";
+  _setHint(hint, "正在获取项目与会话…");
   try {
     const r = await fetch("/api/sessions");
     const d = await r.json();
     if (!r.ok || d.error) throw new Error(d.error || r.statusText);
     sessionTree = d;
     renderSessions();
-    hint.textContent = `已获取 ${(d.projects || []).length} 个项目 · ${d.fetched_at || ""}`;
+    _setHint(hint, `已获取 ${(d.projects || []).length} 个项目`);
   } catch (e) {
     renderSessions();
-    hint.className = "meta bad";
-    hint.textContent = "会话列表获取失败：" + (e.message || e);
+    _setHint(hint, "会话列表获取失败：" + (e.message || e), "meta bad");
   }
 }
 
@@ -241,15 +254,13 @@ function onProjectChange() {
   const project = _project(+$("sessProject").value || 0);
   const ep = fillEpisodes(project, 0);
   fillSessions(project, ep, 0);
-  $("sessionHint").className = "meta";
-  $("sessionHint").textContent = "选好生成会话后自动保存";
+  _setHint($("sessionHint"), "选好生成会话后自动保存");
 }
 
 function onEpisodeChange() {
   const project = _project(+$("sessProject").value || 0);
   fillSessions(project, +$("sessEpisode").value || 0, 0);
-  $("sessionHint").className = "meta";
-  $("sessionHint").textContent = "选好生成会话后自动保存";
+  _setHint($("sessionHint"), "选好生成会话后自动保存");
 }
 
 async function onSessionChange() {
@@ -264,8 +275,9 @@ async function onSessionChange() {
   if (scale) body.scale = scale;
   const d = await post("params", body);
   if (!d) return;
-  hint.className = "meta " + (sid ? "ok" : "");
-  hint.textContent = sid
-    ? `已保存项目会话 ${sid}；下次提交扣项目额度`
-    : "已切换为个人额度";
+  const picked = $("sessSession").selectedOptions[0];
+  const sname = picked ? picked.textContent : String(sid);
+  _setHint(hint, sid
+    ? `已保存项目会话「${sname}」；下次提交扣项目额度`
+    : "已切换为个人额度", "meta " + (sid ? "ok" : ""));
 }

@@ -1,7 +1,9 @@
+<div id="resultStrip" class="resultStrip" style="display:none"></div>
+
 {% include "partials/assets.html" %}
 
 {% if flow != "fullredraw" %}
-<details id="keyframeWorkbench">
+<details id="keyframeWorkbench" class="fold">
   <summary>关键帧工作台（首帧 / 尾帧重绘）</summary>
   <div class="meta">图片模型每次出 4 张候选，人工挑 1 张落成 first_frame / last_frame。
     首期比例固定 16:9；首帧与尾帧必须同宽高，工作台会在挑选时校验。</div>
@@ -34,22 +36,12 @@
 </details>
 {% endif %}
 
-<h3>生成画面</h3>
-<div class="row">
-  <div style="min-width:300px">
-    <h3>用 Seedance 生成</h3>
-    <button class="big" onclick="runSubmit()">提交生成（用下面保存的提示词）</button>
-    <button onclick="runSubmit(true)">检查提交命令（不花钱）</button>
-    <div class="meta">提交会消耗平台配额；中途断了重新提交会接着上次的进度走，不会重复扣。
-      “检查提交命令”只做本地准备与参数检查，不提交、不花钱。</div>
-  </div>
-  <div style="min-width:300px">
-    <h3>用别的工具做好的视频</h3>
-    <button onclick="openBrowse()">选用非 Seedance 生成的视频执行后续步骤</button>
-    <div class="meta">从电脑里挑一个已经在别处生成好的视频文件，交给后面的步骤用</div>
-  </div>
-</div>
-{% include "partials/params.html" %}
-{% include "partials/sessions.html" %}
 {% include "partials/prompt.html" %}
-{% include "partials/rounds.html" %}
+
+<details id="externalPanel" class="fold">
+  <summary>外部成片 <span class="sum">用别的工具做好的视频</span></summary>
+  <div class="meta">从电脑里挑一个已经在别处生成好的视频文件，交给后面的步骤用。</div>
+  <button onclick="openBrowse()">选用外部视频执行后续步骤</button>
+</details>
+
+{% include "partials/submitbar.html" %}

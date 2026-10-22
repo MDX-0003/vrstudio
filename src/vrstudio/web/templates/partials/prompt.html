@@ -1,16 +1,27 @@
-<h3>提示词（这次发给 Seedance 的完整内容）</h3>
-<div class="meta">下面是把变量、素材角色、生成模式与画布尺寸代入后的完整提示词，
-  默认不再显示 {占位符}。模板骨架可以切换查看；变量改动会立即保存并刷新预览。
-  素材清单与模式规则由页面自动生成，不出现在输入框里。</div>
-<div class="row" style="align-items:center">
-  <button id="promptToggle" onclick="togglePromptView()">查看模板骨架</button>
-  <span class="meta" id="promptViewState">完整预览</span>
-</div>
-<pre id="promptBox">（加载中）</pre>
-<div id="varList"></div>
-<div class="row" style="align-items:center">
-  <input id="newVarKey" placeholder="新变量名（英文）" style="width:170px">
-  <input id="newVarVal" placeholder="新变量的值" style="width:300px">
-  <button onclick="addVar()">添加变量</button>
-</div>
-<div class="meta" id="promptMeta"></div>
+<details id="promptPanel" class="fold">
+  <summary>提示词 <span class="sum" id="promptSummary"></span></summary>
+  <div class="meta">完整提示词已代入当前变量、素材角色、生成模式与画布尺寸；
+    模板骨架可以切换查看。变量改动会自动保存并刷新预览。</div>
+
+  <details id="promptPreviewFold" class="fold inner" open>
+    <summary>完整提示词 <span class="sum" id="promptPreviewSummary"></span></summary>
+    <div class="row promptActions">
+      <button id="promptToggle" onclick="togglePromptView()">查看模板骨架</button>
+      <span class="meta" id="promptViewState">完整预览</span>
+    </div>
+    <pre id="promptBox">（加载中）</pre>
+  </details>
+
+  <div id="varList"></div>
+  <div id="readonlyVars" class="readonlyVars"></div>
+
+  <details id="addVarFold" class="fold inner">
+    <summary>＋ 添加变量</summary>
+    <div class="row" style="align-items:center">
+      <input id="newVarKey" placeholder="新变量名（英文）" style="width:170px">
+      <input id="newVarVal" placeholder="新变量的值" style="width:300px">
+      <button onclick="addVar()">添加变量</button>
+    </div>
+  </details>
+  <div class="meta" id="promptMeta"></div>
+</details>

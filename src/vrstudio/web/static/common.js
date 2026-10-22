@@ -17,8 +17,8 @@ let sessionTree = null;     // /api/sessions 的项目/剧集/会话树
 // 任务类型 → 页面上的说法（op id 是内部标识，不出现在页面上）
 const KIND_LABEL = {
   extract: "抽取", pad: "扩充两侧画面", register: "登记外部视频",
-  submit: "提交生成", dry_run: "检查提交命令", keyframe: "关键帧图片生成",
-  adopt: "拷贝选中的视频到 case", merge: "空间合并", assemble: "时间拼接",
+  submit: "提交生成", dry_run: "预演检查", keyframe: "关键帧图片生成",
+  adopt: "采用成片", merge: "空间合并", assemble: "时间拼接",
   recompose: "裁回原尺寸",
 };
 
@@ -36,9 +36,9 @@ function gateText(id, elId) {
 /** 依次调用已定义在各脚本里的渲染函数；未加载的面板自动跳过。 */
 function renderAll() {
   for (const name of ["renderSteps", "renderAssets", "renderPick", "renderExtract",
-                      "renderGenerate", "renderFinish", "renderGenParams",
-                      "renderStepFiles", "renderPrompt", "renderCompare",
-                      "renderKeyframe"]) {
+                      "renderResultStrip", "renderGenParams", "renderSubmitBar",
+                      "renderFinish", "renderStepFiles", "renderPrompt",
+                      "renderCompare", "renderKeyframe"]) {
     if (typeof window[name] === "function") window[name]();
   }
 }
@@ -69,8 +69,9 @@ async function run(op, params = {}) {
     body: JSON.stringify({ op, ...params }),
   });
   const d = await r.json();
-  if (!r.ok) { alert(d.error || r.statusText); return; }
+  if (!r.ok) { alert(d.error || r.statusText); return null; }
   wasRunning = true;
   pollTasks();
+  return d;
 }
 function runOp(op, params) { run(op, params); }

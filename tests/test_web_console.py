@@ -131,7 +131,11 @@ def test_fullredraw_wizard_page_renders_partials(client, fullredraw_case):
     r = client.get("/case/f1")
     assert r.status_code == 200
     assert "扩充原视频两侧画面" in r.text and "裁回原尺寸" in r.text
-    assert "生成参数" in r.text and "提交生成" in r.text
+    assert "生成设置" in r.text and "提交生成" in r.text
+    assert 'id="submitBar"' in r.text and 'id="genMode"' in r.text
+    assert 'id="sessProject"' in r.text
+    assert 'id="resultStrip"' in r.text
+    assert "Session 列表与选用" not in r.text and "logBox" not in r.text
 
 
 def test_gen_wizard_page_has_assets_and_generate(client, gen_case):
@@ -903,7 +907,10 @@ def test_gen_page_has_sidebar_workbench_and_duration(client, gen_case):
     text = client.get("/case/g1").text
     assert "素材与本次提交集" in text
     assert "关键帧工作台" in text
-    assert "生成时长" in text and "genDuration" in text
+    assert "时长" in text and "genDuration" in text
+    assert "最近成片" in text and "扣费额度" in text
+    assert text.count('id="genMode"') == 1        # 控件只在底栏出现
+    assert text.count('id="sessProject"') == 1
     assert "pnl-assets" not in text       # 素材步骤已并入生成页侧边栏
 
 

@@ -239,11 +239,17 @@ function renderAssets() {
   }
   const addRow = $("assetAddRow");
   if (addRow) addRow.style.display = _canEditAssets() ? "" : "none";
+  const all = flowAssets.concat(fileAssets);
+  const videos = all.filter(a => a.kind === "video").length;
+  const images = all.filter(a => a.kind === "image").length;
+  const sum = $("assetSummary");
+  if (sum) {
+    sum.textContent = all.length
+      ? `已勾选 ${_selectedIds().size} 项 · ${videos} 视频 / ${images} 图片`
+      : "还没有素材";
+  }
   const hint = $("assetHint");
   if (hint) {
-    const all = flowAssets.concat(fileAssets);
-    const videos = all.filter(a => a.kind === "video").length;
-    const images = all.filter(a => a.kind === "image").length;
     const mode = _currentMode();
     hint.textContent = all.length
       ? `当前模式 ${mode || "未设置"} · ${videos} 个视频 · ${images} 张图片 · ` +

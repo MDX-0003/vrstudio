@@ -33,11 +33,14 @@ function renderSteps() {
 
 function showStep(id) {
   curStep = id;
+  document.body.classList.toggle("gen-step", id === "generate");
   for (const [sid] of STEPS) {
     const panel = $("pnl-" + sid);
     if (panel) panel.classList.toggle("cur", sid === id);
   }
   renderSteps();
+  syncSubmitBarHeight();
+  if (id === "generate") renderSubmitBar();
 }
 
 // ── info 加载 ────────────────────────────────────────────────────────────
@@ -372,52 +375,212 @@ function renderExtract() {
 
 // ── generate（三条流程共用）───────────────────────────────────────────
 
-function renderGenerate() {
-  const rounds = (info.rounds && info.rounds.rounds) || [];
-  const el = $("roundList");
+function _roundSource(r) {
+  return { mglc: "Seedance", manual: "外部视频" }[r.backend] || r.backend || "";
+}
+
+function _fmtRoundTime(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const p = (x) => String(x).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+         `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function _roundsSorted() {
+  return ((info && info.rounds && info.rounds.rounds) || []).slice()
+    .sort((a, b) => String(b.updated || "").localeCompare(String(a.updated || "")));
+}
+
+/** patch 看当前抽取版本有没有结果；fullredraw/gen 看 case/result.mp4。 */
+function _targetPresent() {
+  if (!info) return false;
+  if (info.flow === "patch") {
+    const cur = (info.extracts || []).find(v => v.version === info.extract_current);
+    return !!(cur && cur.has_result);
+  }
+  return !!(((info.gates || {}).generate) || {}).ok;
+}
+
+/** 最近成片：只在需要采用或最近一次失败时占一行。 */
+function renderResultStrip() {
+  const el = $("resultStrip");
   if (!el) return;
-  el.innerHTML = rounds.length ? "" : `<span class="meta">${(info.rounds && info.rounds.hint) || "还没有生成记录"}</span>`;
-  const from = { mglc: "Seedance", manual: "外部视频" };
-  // 轮次路径含反斜杠，拼进 HTML 属性会被转义吞掉——按钮只带序号，
-  // 路径从 info 里按序号取（2026-10-16 反复失败事故的原因）
-  rounds.forEach((r) => {
-    const mine = r.round === info.adopt_round;
-    const usable = r.result && r.result !== "no";
-    const div = document.createElement("div");
-    div.className = "verline";
-    const b = document.createElement("b");
-    if (mine) b.className = "ok";
-    b.textContent = `${usable ? "✓" : "✗"} ${r.round}${mine ? " · 已选用" : ""}`;
-    const span = document.createElement("span");
-    span.className = "meta";
-    span.textContent = ` ${from[r.backend] || r.backend} 生成 · ` +
-      (usable ? "视频已生成，可选用" : "未生成视频，无法被后续流程使用");
+  el.className = "resultStrip";
+  el.innerHTML = "";
+  const rows = _roundsSorted();
+  const latest = rows.find(r => r.result === "yes");
+  const adopted = (info && info.adopt_round) || "";
+  if (latest) {
+    const t = _fmtRoundTime(latest.updated);
+    if (latest.round === adopted && _targetPresent()) {
+      el.classList.add("adopted");
+      el.append(`已选用最新成片 · ${t}（来自 ${_roundSource(latest)}）`);
+      el.style.display = "flex";
+      return;
+    }
+    const label = document.createElement("span");
+    const strong = document.createElement("b");
+    strong.textContent = "成片已生成";
+    label.append(strong, ` · ${t} · ${_roundSource(latest)}`);
     const btn = document.createElement("button");
-    btn.textContent = "选用";
-    btn.disabled = !usable;
-    btn.onclick = () => run("adopt", { round: r.round_dir });
-    div.append(b, span, btn);
-    el.appendChild(div);
-  });
-  $("logBox").textContent = (info.log_tail && info.log_tail.length)
-    ? info.log_tail.join("\n") : "（空）";
+    btn.textContent = "选用成片";
+    btn.onclick = () => run("adopt", { round: latest.round_dir });
+    el.append(label, btn);
+    el.style.display = "flex";
+    return;
+  }
+  const meaningful = rows.find(r => r.stage !== "prepared");
+  if (meaningful && meaningful.stage === "failed") {
+    el.classList.add("failed");
+    el.append(`上次生成失败 · ${_fmtRoundTime(meaningful.updated)} · ` +
+              `失败原因见页面底部任务记录`);
+    el.style.display = "flex";
+    return;
+  }
+  el.style.display = "none";
+}
+
+// ── 预演状态与提交条 ───────────────────────────────────────────────────
+
+// sig = 点击预演那一刻的页面输入快照；state: none | pending | ok | failed
+let preview = { sig: null, state: "none" };
+let submitBarObserver = null;
+
+function _selectValue(id) {
+  const el = $(id);
+  return el ? el.value : "";
+}
+
+/** 页面可控输入的签名；不试图复刻服务端的 run_key。 */
+function submissionSignature() {
+  if (!info) return null;
+  const sel = info.submit_selected || [];
+  const assets = (info.assets || [])
+    .filter(a => sel.includes(a.id))
+    .map(a => [a.id, a.role, a.mtime, a.size]);
+  const p = info.prompt || {};
+  return {
+    assets: JSON.stringify(assets),
+    params: JSON.stringify([
+      _selectValue("genMode"), _selectValue("genAspect"),
+      _selectValue("genResolution"), _selectValue("genScale"),
+      _selectValue("genDuration"),
+    ]),
+    prompt: JSON.stringify([p.template || "", p.vars || {},
+                            p.rendered || p.render_error || ""]),
+    quota: JSON.stringify([
+      _selectValue("sessProject"), _selectValue("sessEpisode"),
+      _selectValue("sessSession"),
+    ]),
+  };
+}
+
+const SIG_LABELS = { assets: "素材", params: "参数", prompt: "提示词", quota: "扣费额度" };
+
+function _sigChanges(before, now) {
+  if (!before || !now) return [];
+  return Object.keys(SIG_LABELS)
+    .filter(k => before[k] !== now[k])
+    .map(k => SIG_LABELS[k]);
+}
+
+function _previewStatus(now) {
+  if (!preview.sig) return null;
+  if (preview.state === "pending") return { text: "预演中…", cls: "" };
+  if (preview.state === "failed") {
+    return { text: "✗ 预演未通过 · 详见任务记录", cls: "bad" };
+  }
+  const changed = _sigChanges(preview.sig, now);
+  if (changed.length) {
+    return { text: `预演已过期 · ${changed.join("、")}有改动`, cls: "bad" };
+  }
+  return { text: "✓ 预演通过 · 当前选择未改动", cls: "ok" };
+}
+
+function _barStatusText() {
+  const gp = (info && info.generation_params) || {};
+  if (gp.error) return { text: "生成参数暂时读不到：" + gp.error, cls: "bad" };
+  const gate = ((info && info.gates) || {}).generate || {};
+  if (!gate.ready) return { text: gate.reason || "还不能提交", cls: "bad" };
+  const hint = $("genParamsHint");
+  if (hint && hint.textContent.trim()) {
+    return { text: hint.textContent.trim(), cls: "bad" };
+  }
+  const pv = _previewStatus(submissionSignature());
+  if (pv) return pv;
+  const n = ((info && info.submit_selected) || []).length;
+  return { text: `素材 ${n} 项`, cls: n ? "ok" : "bad" };
+}
+
+function renderSubmitBar() {
+  const bar = $("submitBar");
+  if (!bar) return;
+  const fixed = $("genFixed"), label = $("settingsLabel");
+  if (label && fixed) label.title = fixed.textContent || "";
+  const gate = ((info && info.gates) || {}).generate || {};
+  const ready = !!gate.ready;
+  for (const id of ["btnDryRun", "btnSubmit"]) {
+    const btn = $(id);
+    if (btn) btn.disabled = !ready;
+  }
+  const st = $("barStatus");
+  if (st) {
+    const s = _barStatusText();
+    st.textContent = s.text;
+    st.className = "barStatus " + (s.cls || "");
+    st.title = s.text;
+  }
+}
+
+function syncSubmitBarHeight() {
+  const bar = $("submitBar");
+  const h = bar && bar.offsetHeight ? bar.offsetHeight : 0;
+  document.documentElement.style.setProperty("--submit-bar-h", h + "px");
+}
+
+function setupSubmitBar() {
+  const bar = $("submitBar");
+  if (!bar) return;
+  if (window.ResizeObserver) {
+    submitBarObserver = new ResizeObserver(syncSubmitBarHeight);
+    submitBarObserver.observe(bar);
+  }
+  window.addEventListener("resize", syncSubmitBarHeight);
+  syncSubmitBarHeight();
+}
+
+/** 任务队列收尾：把 pending 的预演标记成通过/失败，下一次渲染再比对签名。 */
+function onTasksSettled(s) {
+  if (!preview.sig || preview.state !== "pending") return;
+  const last = ((s && s.last) || []).slice().reverse()
+    .find(h => h.kind === "dry_run" && h.case === CASE);
+  if (!last) return;
+  preview.state = last.state === "done" ? "ok" : "failed";
 }
 
 async function runSubmit(dryRun = false) {
-  const gate = (info.gates || {}).generate || {};
-  if (!gate.ready) {
-    alert(gate.reason || "当前模式还不能提交；先补齐素材或抽取版本");
-    return;
-  }
+  const gate = ((info && info.gates) || {}).generate || {};
+  if (!gate.ready) return;
+  if (typeof flushPromptSaves === "function" && !(await flushPromptSaves())) return;
+  const sig = submissionSignature();
   const body = {
-    mode: ($("genMode") || {}).value || "",
-    aspect_ratio: ($("genAspect") || {}).value || "",
-    resolution: ($("genResolution") || {}).value || "",
-    scale: ($("genScale") || {}).value || "",
+    mode: _selectValue("genMode"),
+    aspect_ratio: _selectValue("genAspect"),
+    resolution: _selectValue("genResolution"),
+    scale: _selectValue("genScale"),
   };
-  const duration = ($("genDuration") || {}).value || "auto";
+  const duration = _selectValue("genDuration") || "auto";
   if (duration !== "auto") body.duration = +duration;
-  await run(dryRun ? "dry_run" : "submit", body);
+  if (dryRun) preview = { sig, state: "pending" };
+  else preview = { sig: null, state: "none" };
+  renderSubmitBar();
+  const d = await run(dryRun ? "dry_run" : "submit", body);
+  if (!d && dryRun) {
+    preview = { sig: null, state: "none" };
+    renderSubmitBar();
+  }
 }
 
 // ── merge / pad / recompose ─────────────────────────────────────────────
@@ -710,6 +873,7 @@ function closeBrowse() { $("browseBox").style.display = "none"; }
 
 setupPick();
 setupCompare();
+setupSubmitBar();
 loadInfo().then(() => showStep(STEPS[0][0]));
 setInterval(pollTasks, 2000);
 pollTasks();

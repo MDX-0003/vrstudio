@@ -27,7 +27,10 @@ async function pollTasks() {
     const box = $("taskBox");
     if (box) box.textContent = lines.join("\n");
     const busy = !!(s.current || s.queued.length);
-    if (wasRunning && !busy) loadInfo();      // 任务收尾 → 刷新门控与列表
+    if (wasRunning && !busy) {
+      if (typeof onTasksSettled === "function") onTasksSettled(s);
+      loadInfo();                             // 任务收尾 → 刷新门控与列表
+    }
     wasRunning = busy;
   } catch (_) { /* 服务重启间隙忽略 */ }
 }

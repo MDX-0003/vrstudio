@@ -371,22 +371,6 @@ def _generation_params(name: str) -> dict:
             refs_file.unlink(missing_ok=True)
 
 
-def _log_tail(name: str, round_key: str | None, lines: int = 24) -> list[str]:
-    """vrgen 台账里的调用日志尾部（决策 15：generate 页日志 tail）。
-    台账文件是两仓库的对外接口（case-model.md），读它不越契约。"""
-    if not round_key:
-        return []
-    p = _workdir() / name / round_key / "mglc.log"
-    if not p.is_file():
-        return []
-    try:
-        with open(p, "rb") as f:
-            data = f.read()
-        return decode_text(data).splitlines()[-lines:]
-    except OSError:
-        return []
-
-
 def _extracts(case: case_mod.Case) -> list[dict]:
     vroot = case.dir(_ctx["cases_root"]) / "extracts"
     out = []
@@ -854,7 +838,6 @@ def _case_info(name: str) -> dict | None:
         "gates": _gates(case, extracts),
         "previews": {"vp": f"/img/{case.name}/vp.png?k={store.key}"} if store else {},
         "rounds": _rounds(case.name),
-        "log_tail": _log_tail(case.name, case.adopt_round),
     }
     return info
 
