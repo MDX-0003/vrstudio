@@ -9,7 +9,8 @@ the encode parameters are byte-compatible with the project's verified baseline
 (see docs/knowledge/verification.md): rawvideo bgr24 stdin -> libx264
 crf/preset -> yuv420p, audio carried over in a second ``-c copy`` remux pass
 (remuxing a copied stream cannot change the frame count; encoding with the
-audio input present can).
+audio input present can). Keyframes are pinned to ``KEYFRAME_INTERVAL_S``
+instead of x264's 250-frame default so 8K deliverables stay seekable.
 """
 
 from __future__ import annotations
@@ -17,12 +18,29 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
 
 _FFMPEG: str | None = None
 _RESOLVED = False
+
+#: 关键帧间隔（秒）。源素材本身是 0.5 秒；x264 默认 250 帧，在 60fps 下等于
+#: 4.17 秒，8K 成片 seek 一次要解码上百帧，播放器会卡死（对比页实测）。
+#: 只影响关键帧位置，不改变解码后的像素，像素基线不受影响。
+KEYFRAME_INTERVAL_S = 0.5
+
+
+def gop_frames(fps) -> int:
+    """关键帧间隔换算成帧数；fps 可以是 float 或 "30000/1001" 这类写法。"""
+    try:
+        value = float(Fraction(str(fps)))
+    except (ValueError, ZeroDivisionError):
+        return 250
+    if value <= 0:
+        return 250
+    return max(1, int(round(value * KEYFRAME_INTERVAL_S)))
 
 
 def bundled_ffmpeg() -> Path:
@@ -71,11 +89,13 @@ class FfmpegSink:
         self.path = path
         self.audio_from = audio_from
         self.tmp = (path + ".video-only.mp4") if audio_from else path
+        gop = gop_frames(fps)
         cmd = [ff, "-y", "-hide_banner", "-loglevel", "warning",
                "-f", "rawvideo", "-pix_fmt", "bgr24",
                "-s", f"{size[0]}x{size[1]}", "-r", f"{fps}",
                "-i", "-",
                "-c:v", "libx264", "-crf", str(crf), "-preset", preset,
+               "-g", str(gop), "-keyint_min", str(gop),
                "-pix_fmt", "yuv420p", "-threads", "0", self.tmp]
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                                      stderr=subprocess.PIPE)

@@ -143,6 +143,10 @@ class Erp360Compare {
   _upload(gl, i) {
     const v = this.videos[i];
     if (!v.videoWidth || v.readyState < 2) return;
+    // seek 进行中 currentTime 已经跳到目标值，但元素里还是旧帧。此时上传会把
+    // “新时间”记成已上传；暂停状态下再没有事件触发重传，画面就停在旧帧，
+    // 必须点一次播放让时间前进才会刷新。等 seek 完成（seeking=false）再上传。
+    if (v.seeking) return;
     const key = v.currentSrc + ":" + v.currentTime;
     if (key === this._lastKey[i]) return;
     this._lastKey[i] = key;

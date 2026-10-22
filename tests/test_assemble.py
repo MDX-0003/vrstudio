@@ -62,6 +62,18 @@ def _run(src, space, sidecar, output):
         "--output", str(output), "--crf", "0", "--preset", "ultrafast", "-q"])
 
 
+def _keyframes(path) -> list[int]:
+    import subprocess
+
+    r = subprocess.run(
+        [find_tool("ffprobe.exe"), "-v", "error", "-select_streams", "v:0",
+         "-show_frames", "-show_entries", "frame=key_frame", "-of", "csv=p=0",
+         str(path)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert r.returncode == 0, r.stderr
+    return [i for i, line in enumerate(r.stdout.splitlines()) if line.startswith("1")]
+
+
 def test_assemble_stitches_prefix_segment_suffix(tmp_path):
     conf = _conf()
     src = tmp_path / "src.mp4"
@@ -92,6 +104,8 @@ def test_assemble_stitches_prefix_segment_suffix(tmp_path):
     report = json.loads((tmp_path / "out_frame.assemble.json").read_text(encoding="utf-8"))
     assert report["frames_prefix"] == 2 and report["frames_segment"] == 3
     assert report["frames_suffix"] == 1 and report["frames_written"] == 6
+    # 10fps × 0.5s = 每 5 帧一个关键帧：seek 不再需要解整段。
+    assert _keyframes(out) == [0, 5]
 
 
 def test_whole_segment_is_skipped(tmp_path):

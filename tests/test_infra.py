@@ -351,3 +351,15 @@ def test_chain_order_is_config_order(erp):
 def test_unknown_transform_names_the_offender():
     with pytest.raises(ValueError, match="unknown transform"):
         build_chain(["pad_h", "burn_marker"])
+
+
+# --------------------------------------------------------------- encoding
+def test_gop_frames_pins_keyframes_half_a_second_apart():
+    from vrstudio.media.ffmpeg import KEYFRAME_INTERVAL_S, gop_frames
+
+    assert KEYFRAME_INTERVAL_S == 0.5
+    assert gop_frames(60) == 30
+    assert gop_frames(30) == 15
+    assert gop_frames(10) == 5
+    assert gop_frames("30000/1001") == 15
+    assert gop_frames(0) == 250          # 读不到 fps 时退回 x264 默认
