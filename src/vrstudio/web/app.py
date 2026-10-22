@@ -42,7 +42,15 @@ from ..media.videoio import VideoIOError
 from ..procenv import decode_text, utf8_env
 from ..redraw.manifest import Manifest
 from .logging import CLIENT_LOGGER, GEOMETRY_LOGGER, RequestLogMiddleware
-from .proxy import ensure_proxy, proxy_path, proxy_ready, proxy_state
+from .proxy import (
+    ensure_file_proxy,
+    ensure_proxy,
+    file_proxy,
+    file_proxy_state,
+    proxy_path,
+    proxy_ready,
+    proxy_state,
+)
 from .render import PreviewStore
 from .tasks import QUEUE, vrstudio_argv
 
@@ -153,19 +161,34 @@ async def video_out(request):
 
 
 async def video_proxy(request):
-    """预览代理：只有 patch 流、代理已就绪时才发文件。"""
-    name = request.path_params["name"]
+    """源片代理：pick 顶部播放器与对比页左路共用（首次访问时后台生成）。"""
     try:
-        case = case_mod.load(name, _ctx["cases_root"])
+        case = case_mod.load(request.path_params["name"], _ctx["cases_root"])
     except CaseError:
         return JSONResponse({"error": "no such case"}, status_code=404)
-    if case.flow != "patch":
-        return JSONResponse({"error": "no pick proxy for this flow"},
-                            status_code=404)
     if not proxy_ready(case, _ctx["cases_root"]):
         return JSONResponse({"error": "proxy not ready"}, status_code=404)
     return FileResponse(str(proxy_path(case, _ctx["cases_root"])),
                         media_type="video/mp4")
+
+
+async def video_out_proxy(request):
+    """成片的 4K 预览代理：对比页右路；代理没就绪时 404，由前端触发构建。"""
+    name = request.path_params["name"]
+    fn = request.path_params["file"]
+    if "/" in fn or "\\" in fn or ".." in fn:
+        return JSONResponse({"error": "bad name"}, status_code=400)
+    p = case_mod.case_dir(name, _ctx["cases_root"]) / "out" / fn
+    if not p.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        case = case_mod.load(name, _ctx["cases_root"])
+    except CaseError:
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    if file_proxy_state(case, p, _ctx["cases_root"]) != "ready":
+        return JSONResponse({"error": "proxy not ready"}, status_code=404)
+    fp = file_proxy(case, p, _ctx["cases_root"])
+    return FileResponse(str(fp.video), media_type="video/mp4")
 
 
 async def img(request):
@@ -386,7 +409,9 @@ def _outputs(case: case_mod.Case) -> list[dict]:
         return []
     files = sorted(odir.glob("*.mp4"))
     if case.flow != "patch":
-        return [{"file": p.name, "url": f"/video/out/{case.name}/{p.name}"}
+        return [{"file": p.name, "url": f"/video/out/{case.name}/{p.name}",
+                 "proxy_url": f"/video/outproxy/{case.name}/{p.name}",
+                 "proxy_state": file_proxy_state(case, p, _ctx["cases_root"])}
                 for p in files]
     chosen: dict[str, tuple[str, Path]] = {}
     for p in files:
@@ -402,6 +427,8 @@ def _outputs(case: case_mod.Case) -> list[dict]:
         kind, path = chosen[version]
         partial = kind == "space" and not _is_whole_extract(case, version)
         out.append({"file": path.name, "url": f"/video/out/{case.name}/{path.name}",
+                    "proxy_url": f"/video/outproxy/{case.name}/{path.name}",
+                    "proxy_state": file_proxy_state(case, path, _ctx["cases_root"]),
                     "version": version, "partial": partial})
     return out
 
@@ -812,7 +839,9 @@ def _case_info(name: str) -> dict | None:
         "fps": store.fps if store else None,
         "duration_s": store.duration_s if store else None,
         "proxy": ({"state": proxy_state(case, _ctx["cases_root"]),
-                   "url": f"/video/proxy/{case.name}"} if store else None),
+                   "url": f"/video/proxy/{case.name}"}
+                  if case.flow in ("patch", "fullredraw") and case.source_path
+                  else None),
         "extract_current": case.extract_current,
         "adopt_round": case.adopt_round,
         "assets": _asset_details(case),
@@ -1633,15 +1662,37 @@ async def api_client_log(request):
 
 
 async def api_proxy(request):
-    """预览代理状态：POST 缺文件时启动一次后台生成，GET 只查状态。"""
+    """预览代理：源片（pick/对比左路）或指定成片（对比右路）。
+
+    POST 缺代理时启动一次后台生成，GET 只查状态。``file`` 指向 ``out/`` 下的
+    成片文件名；省略时是源片代理。
+    """
     name = request.path_params["name"]
     try:
         case = case_mod.load(name, _ctx["cases_root"])
     except CaseError:
         return JSONResponse({"error": "no such case"}, status_code=404)
-    if case.flow != "patch":
-        return JSONResponse({"error": "只有 patch 流有 pick 预览代理"},
-                            status_code=400)
+    file = request.query_params.get("file")
+    if file is None and request.method == "POST":
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        file = str(body.get("file") or "")
+    if file:
+        if "/" in file or "\\" in file or ".." in file:
+            return JSONResponse({"error": "bad file name"}, status_code=400)
+        target = case.dir(_ctx["cases_root"]) / "out" / file
+        if not target.is_file():
+            return JSONResponse({"error": f"out/ 里没有 {file}"}, status_code=404)
+        if request.method == "POST":
+            state = await asyncio.to_thread(
+                ensure_file_proxy, case, target, _ctx["cases_root"], _drop_store)
+        else:
+            state = await asyncio.to_thread(
+                file_proxy_state, case, target, _ctx["cases_root"])
+        return JSONResponse({"state": state,
+                             "url": f"/video/outproxy/{name}/{file}"})
     if request.method == "POST":
         state = await asyncio.to_thread(
             ensure_proxy, case, _ctx["cases_root"], _drop_store)
@@ -1690,6 +1741,7 @@ routes = [
     Route("/video/source/{name}", video_source),
     Route("/video/proxy/{name}", video_proxy),
     Route("/video/out/{name}/{file}", video_out),
+    Route("/video/outproxy/{name}/{file}", video_out_proxy),
     Route("/api/cases", api_cases, methods=["GET", "POST"]),
     Route("/api/case/{name}", api_case),
     Route("/api/case/{name}/draft", api_draft, methods=["POST"]),

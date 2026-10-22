@@ -511,6 +511,78 @@ function renderStepFiles() {
 
 // ── compare ─────────────────────────────────────────────────────────────
 
+let outProxyPoll = null;
+let outProxyFile = null;
+
+function _cmpSetSrc(v, url) {
+  if (!url || v.dataset.want === url) return;
+  v.dataset.want = url;
+  const t = isFinite(v.currentTime) ? v.currentTime : 0;
+  const playing = !v.paused && !v.ended;
+  v.src = url;
+  v.addEventListener("loadedmetadata", () => {
+    if (t > 0 && isFinite(v.duration) && v.duration > 0)
+      v.currentTime = Math.min(t, v.duration);
+    if (playing) v.play().catch(() => {});
+  }, { once: true });
+}
+
+function _updateOutProxyHint(out) {
+  const el = $("cmpProxyHint");
+  if (!el) return;
+  if (!out) { el.textContent = ""; return; }
+  const st = out.proxy_state;
+  if (st === "ready")
+    el.textContent = "右侧：4K 预览代理（与交付文件同帧率、同帧数）";
+  else if (st === "disabled")
+    el.textContent = "右侧：原片本身就是浏览器可播的 4K 以内文件";
+  else if (st === "building")
+    el.textContent = "右侧：正在生成 4K 预览代理（首次约 10 秒），当前先用原片";
+  else if (st === "failed")
+    el.textContent = "右侧：4K 预览生成失败，继续用原片；详见服务日志";
+  else
+    el.textContent = "右侧：准备 4K 预览代理…";
+}
+
+/** 成片代理缺失时触发一次构建；就绪后把右侧切到代理并保留进度。 */
+async function ensureOutProxy(out) {
+  if (!out || !out.file) return;
+  if (outProxyFile === out.file && outProxyPoll) return;
+  clearInterval(outProxyPoll);
+  outProxyPoll = null;
+  outProxyFile = out.file;
+  const tick = async () => {
+    try {
+      const r = await fetch(`/api/case/${encodeURIComponent(CASE)}/proxy`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file: out.file }),
+      });
+      const d = await r.json();
+      if (!r.ok) {
+        clearInterval(outProxyPoll); outProxyPoll = null;
+        out.proxy_state = "failed";
+        _updateOutProxyHint(out);
+        return;
+      }
+      out.proxy_state = d.state;
+      _updateOutProxyHint(out);
+      if (d.state === "ready") {
+        clearInterval(outProxyPoll); outProxyPoll = null;
+        const sel = $("outSel");
+        if (sel && sel.value === out.file) _cmpSetSrc($("cmpB"), out.proxy_url);
+      } else if (d.state === "disabled") {
+        clearInterval(outProxyPoll); outProxyPoll = null;
+        const sel = $("outSel");
+        if (sel && sel.value === out.file) _cmpSetSrc($("cmpB"), out.url);
+      } else if (d.state === "failed") {
+        clearInterval(outProxyPoll); outProxyPoll = null;
+      }
+    } catch (_) { /* 网络间隙继续轮询 */ }
+  };
+  outProxyPoll = setInterval(tick, 2000);
+  await tick();
+}
+
 function renderCompare() {
   if (FLOW === "gen") return;
   gateText("compare", "cmpGate");
@@ -529,8 +601,18 @@ function loadCompare() {
   const out = (info.outputs || []).find(o => o.file === f);
   if (!out) return;
   const a = $("cmpA"), b = $("cmpB");
-  if (a.dataset.src !== info.source_url) { a.src = info.source_url; a.dataset.src = info.source_url; }
-  if (b.dataset.src !== out.url) { b.src = out.url; b.dataset.src = out.url; }
+  // 左路：源片代理就绪就用代理，否则先用原片（ensureProxy 就绪后会重新进来）。
+  _cmpSetSrc(a, videoUrl());
+  // 右路：有 4K 代理就用代理；没有先播原片并触发后台构建。
+  _cmpSetSrc(b, out.proxy_state === "ready" ? out.proxy_url : out.url);
+  _updateOutProxyHint(out);
+  if (out.proxy_state !== "ready" && out.proxy_state !== "disabled") {
+    ensureOutProxy(out);
+  }
+  if (info.proxy && (info.proxy.state === "missing"
+      || info.proxy.state === "building")) {
+    ensureProxy();
+  }
 }
 
 function _fmtTime(s) {
