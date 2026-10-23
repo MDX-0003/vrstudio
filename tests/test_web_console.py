@@ -1191,3 +1191,23 @@ def test_patch_page_has_footprint_and_size_control(client, patch_case):
     text = client.get("/case/p1").text
     assert 'id="vpFoots"' in text and 'class="vpFoot"' in text
     assert 'id="vpSize"' in text
+
+
+def test_next_frontend_reports_missing_build(tmp_path, monkeypatch):
+    monkeypatch.setattr(web_app, "_NEXT_DIR", tmp_path / "missing-next")
+    client = TestClient(web_app.build_app(cases_root=tmp_path))
+    response = client.get("/next/")
+    assert response.status_code == 503
+    assert "尚未构建" in response.text
+
+
+def test_next_frontend_serves_spa_and_assets(tmp_path, monkeypatch):
+    next_dir = tmp_path / "next"
+    (next_dir / "assets").mkdir(parents=True)
+    (next_dir / "index.html").write_text("<html>next</html>", encoding="utf-8")
+    (next_dir / "assets" / "app.js").write_text("console.log(1)", encoding="utf-8")
+    monkeypatch.setattr(web_app, "_NEXT_DIR", next_dir)
+    client = TestClient(web_app.build_app(cases_root=tmp_path))
+    assert client.get("/next/").text == "<html>next</html>"
+    assert client.get("/next/case/dacne/generate").text == "<html>next</html>"
+    assert client.get("/next/assets/app.js").text == "console.log(1)"

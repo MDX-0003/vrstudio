@@ -25,6 +25,7 @@ import cv2
 import jinja2
 import numpy as np
 from starlette.applications import Starlette
+from starlette.exceptions import HTTPException
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 from starlette.staticfiles import StaticFiles
@@ -188,6 +189,35 @@ async def wizard(request):
         return JSONResponse({"error": f"没有这个 case：{name}"}, status_code=404)
     return HTMLResponse(_env.get_template("wizard.html").render(
         name=case.name, flow=case.flow))
+
+
+_NEXT_DIR = _WEB_DIR / "static" / "next"
+
+
+class NextFrontendFiles(StaticFiles):
+    """托管 /next 的 Vite 产物；未匹配的路径回退到 index.html，交给 Vue Router。"""
+
+    async def check_config(self) -> None:
+        if self.directory is None or Path(self.directory).exists():
+            await super().check_config()
+
+    async def get_response(self, path, scope):
+        index_file = Path(self.directory) / "index.html"
+        if not index_file.exists():
+            return Response(
+                "新前端尚未构建：请在 vrstudio/frontend 执行 npm install && npm run build",
+                status_code=503,
+                media_type="text/plain; charset=utf-8",
+            )
+        try:
+            response = await super().get_response(path, scope)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            return FileResponse(index_file)
+        if response.status_code == 404:
+            return FileResponse(index_file)
+        return response
 
 
 # ── 媒体：源片 / 成片 / 预览图 ──────────────────────────────────────────
@@ -2213,4 +2243,6 @@ def build_app(cases_root: str | Path | None = None) -> Starlette:
     app.add_middleware(RequestLogMiddleware)
     app.mount("/static", StaticFiles(directory=str(_WEB_DIR / "static")),
               name="static")
+    app.mount("/next", NextFrontendFiles(directory=str(_NEXT_DIR), html=True,
+                                         check_dir=False), name="next")
     return app
