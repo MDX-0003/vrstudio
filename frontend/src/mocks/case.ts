@@ -1,49 +1,10 @@
-import type { AssetRow, CandidateRound, Flow, PromptVariable } from '@/types/case'
+import type { CandidateRound, Flow, PromptVariable } from '@/types/case'
 
 export const flowMeta: Record<Flow, { label: string; tag: 'primary' | 'success' | 'warning' }> = {
   patch: { label: '局部重绘', tag: 'primary' },
   fullredraw: { label: '全流程重绘', tag: 'success' },
   gen: { label: '简单生成', tag: 'warning' },
 }
-
-export const mockAssets: AssetRow[] = [
-  {
-    id: 'v1',
-    name: '@Video1 · clip.mp4',
-    kind: 'video',
-    role: '编辑母版',
-    meta: '1920×1080 · 9.83 秒 · 60fps',
-    selected: true,
-    tone: 'linear-gradient(135deg, #1e3a8a, #3b82f6)',
-  },
-  {
-    id: 'i1',
-    name: '@Image1 · i1_frame.png',
-    kind: 'image',
-    role: '主体参考',
-    meta: '1620×1080 · 首帧定稿',
-    selected: true,
-    tone: 'linear-gradient(135deg, #7c2d12, #f59e0b)',
-  },
-  {
-    id: 'i2',
-    name: '@Image2 · i2_sheet.png',
-    kind: 'image',
-    role: '主体参考',
-    meta: '1080×1920 · 人物三视图',
-    selected: false,
-    tone: 'linear-gradient(135deg, #134e4a, #14b8a6)',
-  },
-  {
-    id: 'i3',
-    name: '@Image3 · last_frame_raw.png',
-    kind: 'image',
-    role: '场景参考',
-    meta: '1920×1080 · 尾帧原始图',
-    selected: false,
-    tone: 'linear-gradient(135deg, #4c1d95, #8b5cf6)',
-  },
-]
 
 export const mockPromptVariables: PromptVariable[] = [
   {

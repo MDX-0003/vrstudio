@@ -2,10 +2,12 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Check, Picture, Plus, Refresh, VideoCamera, VideoPlay } from '@element-plus/icons-vue'
+import { Check, Picture, Refresh, VideoCamera, VideoPlay } from '@element-plus/icons-vue'
+import { changeAssetRole, fetchCase, saveSubmitSelection } from '@/api/case'
 import { fetchSessions } from '@/api/sessions'
-import { flowMeta, mockAssets, mockCandidates, mockPromptVariables } from '@/mocks/case'
+import { flowMeta, mockCandidates, mockPromptVariables } from '@/mocks/case'
 import type { AssetRow, CandidateRound, Flow, PromptVariable } from '@/types/case'
+import type { AssetDetail, CaseInfo } from '@/types/case-info'
 import type { EpisodeOption, ProjectOption, SessionOption } from '@/types/session'
 
 const route = useRoute()
@@ -29,13 +31,124 @@ const activeIndex = computed(() => {
   return index < 0 ? 3 : index
 })
 
-const assets = ref<AssetRow[]>(mockAssets.map((asset) => ({ ...asset })))
+const assets = ref<AssetRow[]>([])
 const promptVars = ref<PromptVariable[]>(mockPromptVariables.map((item) => ({ ...item })))
 const candidates = ref<CandidateRound[]>(mockCandidates.map((item) => ({ ...item })))
+const caseInfo = ref<CaseInfo | null>(null)
+const caseLoading = ref(false)
+const caseError = ref('')
+const selectionSaving = ref(false)
 
 const selectedCount = computed(() => assets.value.filter((asset) => asset.selected).length)
 const promptOpen = ref(false)
 const status = ref<'未预演' | '预演通过' | '已提交'>('未预演')
+
+const ASSET_ROLE_LABELS: Record<string, string> = {
+  edit_master: '编辑母版',
+  motion_ref: '动作参考',
+  scene_ref: '场景参考',
+  subject_ref: '主体参考',
+  first_frame: '首帧定稿',
+  last_frame: '尾帧定稿',
+  mid_frame: '中间帧',
+  clip: '流程母版',
+  pad: '扩充画布',
+}
+
+const ASSET_ROLE_OPTIONS = [
+  { value: 'edit_master', label: '编辑母版' },
+  { value: 'motion_ref', label: '动作参考' },
+  { value: 'scene_ref', label: '场景参考' },
+  { value: 'subject_ref', label: '主体参考' },
+  { value: 'first_frame', label: '首帧定稿' },
+  { value: 'last_frame', label: '尾帧定稿' },
+  { value: 'mid_frame', label: '中间帧' },
+]
+
+function assetTone(asset: AssetDetail): string {
+  if (asset.kind === 'video') return 'linear-gradient(135deg, #1e3a8a, #3b82f6)'
+  if (asset.role === 'subject_ref') return 'linear-gradient(135deg, #7c2d12, #f59e0b)'
+  if (asset.role === 'scene_ref') return 'linear-gradient(135deg, #134e4a, #14b8a6)'
+  return 'linear-gradient(135deg, #4c1d95, #8b5cf6)'
+}
+
+function assetMeta(asset: AssetDetail): string {
+  const parts: string[] = []
+  if (asset.width && asset.height) parts.push(`${asset.width}×${asset.height}`)
+  if (asset.duration) parts.push(`${asset.duration.toFixed(2)} 秒`)
+  if (asset.fps) parts.push(`${asset.fps}fps`)
+  if (!asset.exists) parts.push('文件缺失')
+  return parts.join(' · ') || asset.rel || asset.path
+}
+
+function toAssetRow(asset: AssetDetail, selected: Set<string>): AssetRow {
+  return {
+    id: asset.id,
+    name: `${asset.label} · ${asset.name}`,
+    kind: asset.kind,
+    role: ASSET_ROLE_LABELS[asset.role] ?? asset.role,
+    roleRaw: asset.role,
+    roleFixed: asset.role_fixed,
+    meta: assetMeta(asset),
+    selected: selected.has(asset.id),
+    tone: assetTone(asset),
+    url: asset.url,
+    exists: asset.exists,
+  }
+}
+
+async function loadCase(): Promise<void> {
+  caseLoading.value = true
+  caseError.value = ''
+  try {
+    const data = await fetchCase(caseName.value)
+    caseInfo.value = data
+    flow.value = data.flow
+    const selected = new Set(data.submit_selected ?? [])
+    assets.value = (data.assets ?? []).map((asset) => toAssetRow(asset, selected))
+  } catch (err) {
+    caseError.value = err instanceof Error ? err.message : '读取 case 失败'
+    assets.value = []
+  } finally {
+    caseLoading.value = false
+  }
+}
+
+async function toggleAsset(asset: AssetRow, selected: boolean): Promise<void> {
+  if (selectionSaving.value) return
+  const previous = asset.selected
+  asset.selected = selected
+  selectionSaving.value = true
+  try {
+    const ids = assets.value.filter((item) => item.selected).map((item) => item.id)
+    const data = await saveSubmitSelection(caseName.value, ids)
+    caseInfo.value = data
+    const next = new Set(data.submit_selected ?? [])
+    assets.value.forEach((item) => {
+      item.selected = next.has(item.id)
+    })
+  } catch (err) {
+    asset.selected = previous
+    ElMessage.error(err instanceof Error ? err.message : '保存提交集失败')
+  } finally {
+    selectionSaving.value = false
+  }
+}
+
+async function updateAssetRole(asset: AssetRow, role: string): Promise<void> {
+  try {
+    const data = await changeAssetRole(caseName.value, asset.id, role)
+    caseInfo.value = data
+    const selected = new Set(data.submit_selected ?? [])
+    assets.value = (data.assets ?? []).map((item) => toAssetRow(item, selected))
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '修改素材角色失败')
+  }
+}
+
+function onRoleChange(asset: AssetRow, value: unknown): void {
+  void updateAssetRole(asset, String(value))
+}
 
 const mode = ref('firstLastFrame')
 const ratio = ref('16:9')
@@ -141,7 +254,12 @@ watch(
 )
 
 onMounted(() => {
+  void loadCase()
   void loadSessions()
+})
+
+watch(caseName, () => {
+  void loadCase()
 })
 
 function statusTone(): string {
@@ -189,7 +307,12 @@ function statusTone(): string {
     </div>
 
     <template v-else>
-      <div class="gen-layout">
+      <div v-if="caseError" class="load-error">
+        <span>{{ caseError }}</span>
+        <el-button link type="primary" @click="loadCase">重试</el-button>
+      </div>
+
+      <div v-else v-loading="caseLoading" class="gen-layout">
         <section class="gen-main">
           <div class="panel">
             <div class="panel-head">
@@ -197,15 +320,29 @@ function statusTone(): string {
               <span class="muted">{{ selectedCount }} 项已勾选</span>
             </div>
             <div class="panel-body asset-list">
+              <div v-if="!assets.length" class="asset-empty">
+                <el-empty description="还没有素材" :image-size="72" />
+              </div>
               <div
                 v-for="asset in assets"
                 :key="asset.id"
                 class="asset-row"
                 :class="{ dim: !asset.selected }"
               >
-                <el-checkbox v-model="asset.selected" aria-label="参与本次提交" />
+                <el-checkbox
+                  :model-value="asset.selected"
+                  :disabled="selectionSaving"
+                  aria-label="参与本次提交"
+                  @change="toggleAsset(asset, Boolean($event))"
+                />
                 <div class="asset-thumb" :style="{ background: asset.tone }">
-                  <el-icon :size="20">
+                  <img
+                    v-if="asset.url && asset.exists"
+                    :src="asset.url"
+                    alt=""
+                    class="asset-thumb-img"
+                  />
+                  <el-icon v-else :size="20">
                     <VideoCamera v-if="asset.kind === 'video'" />
                     <Picture v-else />
                   </el-icon>
@@ -214,13 +351,23 @@ function statusTone(): string {
                   <div class="asset-name">{{ asset.name }}</div>
                   <div class="asset-meta">{{ asset.meta }}</div>
                 </div>
-                <el-select v-model="asset.role" size="small" style="width: 128px">
-                  <el-option label="编辑母版" value="编辑母版" />
-                  <el-option label="主体参考" value="主体参考" />
-                  <el-option label="场景参考" value="场景参考" />
+                <el-select
+                  v-if="!asset.roleFixed"
+                  :model-value="asset.roleRaw || asset.role"
+                  size="small"
+                  style="width: 128px"
+                  @change="onRoleChange(asset, $event)"
+                >
+                  <el-option
+                    v-for="role in ASSET_ROLE_OPTIONS"
+                    :key="role.value"
+                    :label="role.label"
+                    :value="role.value"
+                  />
                 </el-select>
+                <span v-else class="role-fixed">{{ asset.role }}</span>
               </div>
-              <el-button class="add-asset" text :icon="Plus">添加视频或图片</el-button>
+              <div class="asset-note muted">上传素材在 Phase 2 后半段接入。</div>
             </div>
           </div>
 
@@ -313,7 +460,7 @@ function statusTone(): string {
         </aside>
       </div>
 
-      <div class="submit-bar">
+      <div v-if="!caseError" class="submit-bar">
         <div class="submit-inner">
           <div class="submit-row">
             <label class="ctl">
@@ -606,8 +753,43 @@ function statusTone(): string {
   width: 56px;
   height: 40px;
   flex: 0 0 auto;
+  overflow: hidden;
   border-radius: var(--radius-sm);
   color: rgba(255, 255, 255, 0.9);
+}
+
+.asset-thumb-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.role-fixed {
+  width: 128px;
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  text-align: right;
+}
+
+.asset-empty {
+  padding: var(--space-3);
+}
+
+.asset-note {
+  margin-top: var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.load-error {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius-md);
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
 }
 
 .asset-main {

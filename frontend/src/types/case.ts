@@ -57,9 +57,13 @@ export interface AssetRow {
   name: string
   kind: AssetKind
   role: string
+  roleRaw?: string
+  roleFixed?: boolean
   meta: string
   selected: boolean
   tone: string
+  url?: string
+  exists?: boolean
 }
 
 export interface PromptVariable {

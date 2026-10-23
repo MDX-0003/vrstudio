@@ -49,3 +49,16 @@ export async function postJson<T>(path: string, body: unknown): Promise<T> {
   }
   return data as T
 }
+
+export async function putJson<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(path, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await parseBody(response)
+  if (!response.ok) {
+    throw new ApiRequestError(describeError(data, response.status), response.status)
+  }
+  return data as T
+}
