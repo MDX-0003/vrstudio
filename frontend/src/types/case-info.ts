@@ -190,6 +190,16 @@ export interface RawFrame {
   url: string
 }
 
+export interface CaseMeta {
+  owner_id: string | null
+  owner_name: string | null
+  created_at: string | null
+  updated_at: string | null
+  updated_by_id: string | null
+  updated_by_name: string | null
+  revision: number
+}
+
 export interface CaseInfo {
   name: string
   flow: Flow
@@ -222,4 +232,5 @@ export interface CaseInfo {
   prompt: PromptPayload
   generation_params: GenerationParams
   rounds: RoundsPayload
+  meta: CaseMeta
 }

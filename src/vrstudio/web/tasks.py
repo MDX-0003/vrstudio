@@ -36,7 +36,8 @@ def _now() -> str:
 class Task:
     def __init__(self, kind: str, case: str, argv: list[str],
                  follow_up: list[tuple[str, str, list[str]]] | None = None,
-                 owner=None, request_id: str | None = None):
+                 owner=None, request_id: str | None = None,
+                 billing: dict | None = None):
         self.kind = kind          # extract | pad | register | submit | adopt
                                   # | merge | assemble | recompose
         self.case = case
@@ -49,6 +50,7 @@ class Task:
         self.owner_id = getattr(owner, "id", None) if owner is not None else None
         self.owner_name = (getattr(owner, "display_name", None)
                            if owner is not None else None)
+        self.billing = dict(billing or {})
         self.request_id = request_id
         self.created_at = _now()
         self.started_at: str | None = None
@@ -100,6 +102,9 @@ class Task:
             "case": self.case,
             "owner_id": self.owner_id,
             "owner_name": self.owner_name,
+            "project_id": self.billing.get("project_id"),
+            "episode_id": self.billing.get("episode_id"),
+            "session_id": self.billing.get("session_id"),
             "status": self.state,
             "queue_position": position,
             "created_at": self.created_at,
@@ -145,10 +150,11 @@ class TaskQueue:
 
     def submit(self, kind: str, case: str, argv: list[str],
                follow_up: list[tuple[str, str, list[str]]] | None = None,
-               owner=None, request_id: str | None = None) -> Task:
+               owner=None, request_id: str | None = None,
+               billing: dict | None = None) -> Task:
         with self._lock:
             task = Task(kind, case, argv, follow_up=follow_up,
-                        owner=owner, request_id=request_id)
+                        owner=owner, request_id=request_id, billing=billing)
             self.pending.append(task)
             log.info("task.submit", extra={"data": {
                 "event": "task.submit", "task_id": task.id, "kind": kind,
@@ -194,6 +200,7 @@ class TaskQueue:
                         child = Task(kind, case, argv)
                         child.owner_id = task.owner_id
                         child.owner_name = task.owner_name
+                        child.billing = dict(task.billing)
                         child.request_id = task.request_id
                         follow.append(child)
                     self.pending[:0] = follow

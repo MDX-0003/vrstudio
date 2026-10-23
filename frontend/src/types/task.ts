@@ -6,6 +6,9 @@ export interface TaskView {
   case: string
   owner_id: string | null
   owner_name: string | null
+  project_id: number | null
+  episode_id: number | null
+  session_id: number | null
   status: TaskState
   queue_position: number | null
   created_at: string

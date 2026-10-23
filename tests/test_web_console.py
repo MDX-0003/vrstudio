@@ -113,7 +113,13 @@ def gen_case(tmp_path) -> str:
 # ── 页面与列表 ────────────────────────────────────────────────────────────
 
 
-def test_index_page(client):
+def test_index_redirects_to_next_by_default(client):
+    r = client.get("/", follow_redirects=False)
+    assert r.status_code == 307 and r.headers["location"] == "/next/"
+
+
+def test_index_falls_back_to_legacy_by_config(client, monkeypatch):
+    monkeypatch.setattr(web_app, "_default_frontend", lambda: "legacy")
     r = client.get("/")
     assert r.status_code == 200 and "vrstudio" in r.text
 
@@ -291,6 +297,57 @@ def test_media_extract_serves_version_file(client, patch_case, tmp_path):
     r = client.get(f"/media/extract/{patch_case}/v1/clip.mp4")
     assert r.status_code == 200 and r.content == b"clip"
     assert client.get(f"/media/extract/{patch_case}/v1/nope.mp4").status_code == 404
+
+
+def test_case_meta_revision_and_conflict(client, patch_case, tmp_path):
+    info = client.get(f"/api/case/{patch_case}").json()
+    assert info["meta"]["revision"] == 0
+    assert info["meta"]["owner_name"] == "访客"
+    assert (case_mod.case_dir(patch_case, tmp_path) / "case-meta.json").is_file()
+
+    body = {"frames": {"start": 0, "end": 4}, "revision": 0}
+    r = client.post(f"/api/case/{patch_case}/draft", json=body)
+    assert r.status_code == 200, r.text
+    assert r.headers["x-case-revision"] == "1"
+
+    r = client.post(f"/api/case/{patch_case}/draft", json=body)
+    assert r.status_code == 409
+    payload = r.json()
+    assert payload["code"] == "revision_conflict"
+    assert payload["current_revision"] == 1
+
+    r = client.post(f"/api/case/{patch_case}/draft",
+                    json={**body, "revision": 1})
+    assert r.status_code == 200
+    assert r.headers["x-case-revision"] == "2"
+
+    # 老前端不传 revision：允许写入，仍然递增。
+    r = client.post(f"/api/case/{patch_case}/draft",
+                    json={"frames": {"start": 0, "end": 5}})
+    assert r.status_code == 200
+    assert r.headers["x-case-revision"] == "3"
+
+
+def test_case_lock_acquire_conflict_and_release(client, patch_case):
+    client.cookies.set("vrstudio_uid", "u1")
+    client.cookies.set("vrstudio_name", "alice")
+    r = client.post(f"/api/case/{patch_case}/lock")
+    assert r.status_code == 200 and r.json()["mine"] is True
+
+    client.cookies.set("vrstudio_uid", "u2")
+    client.cookies.set("vrstudio_name", "bob")
+    r = client.post(f"/api/case/{patch_case}/lock")
+    assert r.status_code == 409 and r.json()["lock"]["owner_name"] == "alice"
+    r = client.delete(f"/api/case/{patch_case}/lock")
+    assert r.json()["released"] is False
+
+    client.cookies.set("vrstudio_uid", "u1")
+    client.cookies.set("vrstudio_name", "alice")
+    r = client.post(f"/api/case/{patch_case}/lock")
+    assert r.status_code == 200
+    r = client.delete(f"/api/case/{patch_case}/lock")
+    assert r.json()["released"] is True
+    assert client.get(f"/api/case/{patch_case}/lock").json()["lock"] is None
 
 
 def test_modes_endpoint_returns_model_modes(client, monkeypatch):
@@ -732,6 +789,16 @@ def test_failed_task_tail_keeps_the_error_line(tmp_path):
 
     t.state = "running"
     assert "ERROR mglc code" not in " ".join(t.tail(1))
+
+
+def test_task_view_includes_billing_attribution():
+    task = tasks_mod.Task("submit", "x", ["echo"], billing={
+        "project_id": 12, "episode_id": 3, "session_id": 456,
+    })
+    view = task.view()
+    assert view["project_id"] == 12
+    assert view["episode_id"] == 3
+    assert view["session_id"] == 456
 
 
 # ── step_files：两套 flow 的文件规范必须分流 ─────────────────────────────

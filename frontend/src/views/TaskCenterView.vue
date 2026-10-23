@@ -50,6 +50,11 @@ function durationText(task: TaskView): string {
   return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
 }
 
+function quotaText(task: TaskView): string {
+  if (!task.session_id) return '个人额度'
+  return `项目 ${task.project_id ?? '—'} · 第 ${task.episode_id ?? '—'} 集 · 会话 ${task.session_id}`
+}
+
 async function loadTasks(): Promise<void> {
   if (inFlight || document.hidden) return
   inFlight = true
@@ -137,6 +142,11 @@ watch(scope, () => {
         <el-table-column label="负责人" width="110">
           <template #default="{ row }">{{ row.owner_name || '未归属' }}</template>
         </el-table-column>
+        <el-table-column label="扣费归属" min-width="220">
+          <template #default="{ row }">
+            <span class="quota">{{ quotaText(row) }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="排队位置" width="110">
           <template #default="{ row }">{{ positionText(row) }}</template>
         </el-table-column>
@@ -172,6 +182,9 @@ watch(scope, () => {
           </el-descriptions-item>
           <el-descriptions-item label="负责人">
             {{ selected.owner_name || '未归属' }}
+          </el-descriptions-item>
+          <el-descriptions-item label="扣费归属" :span="2">
+            {{ quotaText(selected) }}
           </el-descriptions-item>
           <el-descriptions-item label="排队位置">
             {{ positionText(selected) }}
@@ -214,6 +227,11 @@ watch(scope, () => {
 <style scoped>
 .task-kind {
   font-weight: 600;
+}
+
+.quota {
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
 }
 
 .task-id {

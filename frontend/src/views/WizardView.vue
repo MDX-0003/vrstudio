@@ -25,6 +25,7 @@ import {
 } from '@/api/case'
 import { fetchSessions } from '@/api/sessions'
 import { fetchTasks } from '@/api/tasks'
+import { acquireLock, releaseLock } from '@/api/lock'
 import type { GeometryPayload } from '@/api/workflow'
 import AssetUploadDialog from '@/components/upload/AssetUploadDialog.vue'
 import CompareStep from '@/views/wizard/CompareStep.vue'
@@ -98,6 +99,8 @@ let promptTimer: ReturnType<typeof setTimeout> | null = null
 const caseInfo = ref<CaseInfo | null>(null)
 const caseLoading = ref(false)
 const caseError = ref('')
+const lockHolder = ref<string | null>(null)
+let lockTimer: ReturnType<typeof setInterval> | null = null
 const selectionSaving = ref(false)
 const paramsError = ref('')
 const paramsSaving = ref(false)
@@ -805,10 +808,32 @@ watch(
   { immediate: true },
 )
 
+async function acquireCaseLock(): Promise<void> {
+  if (!caseName.value) return
+  try {
+    const payload = await acquireLock(caseName.value)
+    lockHolder.value = payload.mine ? null : (payload.lock?.owner_name ?? null)
+  } catch (err) {
+    const detail = (err as { payload?: { lock?: { owner_name?: string } } }).payload
+    lockHolder.value = detail?.lock?.owner_name ?? null
+    if (lockHolder.value) {
+      ElMessage.warning(`case 正被 ${lockHolder.value} 使用；保存仍会写入，请先沟通`)
+    }
+  }
+}
+
+function startLockHeartbeat(): void {
+  if (lockTimer) clearInterval(lockTimer)
+  lockTimer = setInterval(() => void acquireCaseLock(), 30000)
+}
+
 onMounted(() => {
   void loadCase()
   void loadSessions()
   startTaskPolling()
+  void acquireCaseLock()
+  startLockHeartbeat()
+  window.addEventListener('case-conflict', onCaseConflict)
 })
 
 onUnmounted(() => {
@@ -816,11 +841,34 @@ onUnmounted(() => {
     clearInterval(taskTimer)
     taskTimer = null
   }
+  if (lockTimer) {
+    clearInterval(lockTimer)
+    lockTimer = null
+  }
+  if (caseName.value) releaseLock(caseName.value)
+  window.removeEventListener('case-conflict', onCaseConflict)
 })
 
-watch(caseName, () => {
+function onCaseConflict(event: Event): void {
+  const detail = (event as CustomEvent<{ error?: string }>).detail
+  void ElMessageBox.confirm(
+    detail?.error || 'case 已被其他人修改，当前页面的保存会覆盖对方的改动。',
+    '保存冲突',
+    {
+      type: 'warning',
+      confirmButtonText: '重新加载',
+      cancelButtonText: '保留当前页面',
+    },
+  )
+    .then(() => loadCase())
+    .catch(() => undefined)
+}
+
+watch(caseName, (_next, previous) => {
+  if (previous) releaseLock(previous)
   void loadCase()
   void loadCaseTasks()
+  void acquireCaseLock()
 })
 
 function statusTone(): string {
@@ -871,6 +919,13 @@ function roundResultText(round: RoundSummary): string {
         {{ saveState === 'saved' ? '已保存' : saveState === 'saving' ? '保存中' : '未保存' }}
       </div>
     </div>
+
+    <el-alert
+      v-if="lockHolder"
+      type="warning"
+      :closable="false"
+      :title="`case 正被 ${lockHolder} 使用；保存仍会写入，请先沟通`"
+    />
 
     <nav class="step-nav" aria-label="流程步骤">
       <button

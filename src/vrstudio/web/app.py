@@ -28,7 +28,14 @@ import jinja2
 import numpy as np
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
-from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from starlette.requests import Request
+from starlette.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+)
 from starlette.routing import Route
 from starlette.staticfiles import StaticFiles
 
@@ -47,12 +54,14 @@ from ..media.videoio import VideoIOError
 from ..patch.projection import viewport_erp_rects
 from ..procenv import decode_text, utf8_env
 from ..redraw.manifest import Manifest
+from . import case_meta
 from .identity import (
     MAX_NAME_LENGTH,
     NAME_COOKIE,
     IdentityMiddleware,
     current_user,
 )
+from .locks import FileCaseLockStore, LockConflict
 from .logging import CLIENT_LOGGER, GEOMETRY_LOGGER, RequestLogMiddleware
 from .proxy import (
     ensure_file_proxy,
@@ -74,11 +83,27 @@ _env = jinja2.Environment(loader=jinja2.FileSystemLoader(_WEB_DIR / "templates")
                           autoescape=True)
 
 #: 单人本地用；serve --cases-dir / 未来多用户在此换全局上下文
-_ctx = {"cases_root": None}
+_ctx = {"cases_root": None, "meta": None, "locks": None}
 
 
 def _root() -> Path:
     return case_mod.cases_root(_ctx["cases_root"])
+
+
+def _meta() -> case_meta.FileCaseMetaStore:
+    store = _ctx["meta"]
+    if store is None:
+        store = case_meta.FileCaseMetaStore(_ctx["cases_root"])
+        _ctx["meta"] = store
+    return store
+
+
+def _locks() -> FileCaseLockStore:
+    store = _ctx["locks"]
+    if store is None:
+        store = FileCaseLockStore(_ctx["cases_root"])
+        _ctx["locks"] = store
+    return store
 
 
 def sources_dir() -> Path:
@@ -252,7 +277,14 @@ def _log_geometry(request, name: str, event: str, old: dict, new: dict) -> None:
 # ── 页面 ─────────────────────────────────────────────────────────────────
 
 
+def _default_frontend() -> str:
+    value = str(config_mod.load().get("web.default_frontend", "next")).strip().lower()
+    return value if value in ("next", "legacy") else "next"
+
+
 async def index(request):
+    if _default_frontend() == "next":
+        return RedirectResponse("/next/", status_code=307)
     return HTMLResponse(_env.get_template("cases.html").render())
 
 
@@ -509,6 +541,20 @@ def _prompt(name: str, flow: str, mode: str | None = None) -> dict:
 def _sessions_tree() -> dict:
     """项目/剧集/生成会话树（只读；契约 case-model.md §4）。"""
     return _vrgen_json(["sessions", "list"])
+
+
+def _billing(name: str) -> dict:
+    """任务提交时记录扣哪个项目/剧集/会话的额度；读不到就留空。"""
+    try:
+        params = _generation_params(name)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {}
+    current = params.get("current") or {}
+    return {
+        "project_id": current.get("project_id"),
+        "episode_id": current.get("episode"),
+        "session_id": current.get("session_id"),
+    }
 
 
 def _generation_params(name: str) -> dict:
@@ -1117,6 +1163,7 @@ def _case_info(name: str) -> dict | None:
         "viewport_options": _viewport_options(case) if case.flow == "patch" else [],
         "viewport_footprint": _footprint_payload(store) if store else [],
         "rounds": _rounds(case.name),
+        "meta": _meta().read(case.name).as_dict(),
     }
     return info
 
@@ -1279,7 +1326,33 @@ async def api_case(request):
     mode = (params.get("current") or {}).get("mode")
     _apply_mode_gate(info, case, mode)
     info["prompt"] = await asyncio.to_thread(_prompt, name, info["flow"], mode)
+    meta = await asyncio.to_thread(_meta().ensure, name, current_user(request))
+    info["meta"] = meta.as_dict()
     return JSONResponse(info)
+
+
+async def api_case_lock(request):
+    name = request.path_params["name"]
+    try:
+        case_mod.load(name, _ctx["cases_root"])
+    except CaseError:
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    user = current_user(request)
+    if request.method == "GET":
+        lock = _locks().read(name)
+        return JSONResponse({
+            "lock": None if lock is None else lock.as_dict(),
+            "mine": bool(lock and lock.owner_id == user.id),
+        })
+    if request.method == "DELETE":
+        released = _locks().release(name, user)
+        return JSONResponse({"released": released})
+    try:
+        lock = _locks().acquire(name, user)
+    except LockConflict as exc:
+        return JSONResponse({"error": str(exc), "lock": exc.current.as_dict()},
+                            status_code=409)
+    return JSONResponse({"lock": lock.as_dict(), "mine": True})
 
 
 async def api_sessions(request):
@@ -1552,6 +1625,7 @@ def _info_with_generation(name: str) -> dict:
     mode = (params.get("current") or {}).get("mode")
     _apply_mode_gate(info, case, mode)
     info["prompt"] = _prompt(name, case.flow, mode)
+    info["meta"] = _meta().read(name).as_dict()
     return info
 
 
@@ -1758,7 +1832,8 @@ async def api_keyframe_run(request):
     except (CaseError, OSError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     QUEUE.submit("keyframe", name, argv, owner=current_user(request),
-                 request_id=getattr(request.state, "rid", None))
+                 request_id=getattr(request.state, "rid", None),
+                 billing=await asyncio.to_thread(_billing, name))
     return JSONResponse({"submitted": "keyframe", "case": name})
 
 
@@ -2285,11 +2360,13 @@ async def api_run(request):
     follow = await asyncio.to_thread(_assemble_followup, name) if op == "merge" else None
     owner = current_user(request)
     request_id = getattr(request.state, "rid", None)
+    billing = await asyncio.to_thread(_billing, name) if op in ("submit", "dry_run") else None
     if follow:
         QUEUE.submit(op, name, argv, follow_up=follow, owner=owner,
-                     request_id=request_id)
+                     request_id=request_id, billing=billing)
     else:
-        QUEUE.submit(op, name, argv, owner=owner, request_id=request_id)
+        QUEUE.submit(op, name, argv, owner=owner, request_id=request_id,
+                     billing=billing)
     return JSONResponse({"submitted": op, "case": name})
 
 
@@ -2466,6 +2543,7 @@ routes = [
     Route("/video/outproxy/{name}/{file}", video_out_proxy),
     Route("/api/cases", api_cases, methods=["GET", "POST"]),
     Route("/api/case/{name}", api_case),
+    Route("/api/case/{name}/lock", api_case_lock, methods=["GET", "POST", "DELETE"]),
     Route("/api/case/{name}/draft", api_draft, methods=["POST"]),
     Route("/api/case/{name}/prompt", api_prompt, methods=["POST"]),
     Route("/api/case/{name}/params", api_params, methods=["POST"]),
@@ -2524,8 +2602,103 @@ class NoStoreMiddleware:
         await self.app(scope, receive, send_wrapper)
 
 
+#: 需要 revision 检查的写端点。几何高频接口（viewport/inner/nudge）不在这里，
+#: 否则每次拖框都会让另一页的提示词保存撞 409。
+_REVISION_WRITES = re.compile(
+    r"^/api/case/(?P<name>[^/]+)/"
+    r"(?:draft|prompt|params|assets|submit|reset-draft|keyframe/(?:prompt|sheet|pick|handoff))$"
+)
+
+
+class CaseRevisionMiddleware:
+    """可选 revision 的乐观并发检查。
+
+    客户端带 ``X-Case-Revision``（或 JSON 里的 ``revision``）时，与
+    ``case-meta.json`` 的当前值比较；不一致返回 409。写成功以后自动加一。
+    老前端不传 revision，照旧写入，只是没有冲突保护。
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        method = scope["method"].upper()
+        match = _REVISION_WRITES.match(scope["path"])
+        if not match or method in ("GET", "HEAD", "OPTIONS"):
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive)
+        name = match.group("name")
+        expected: int | None = None
+        raw = request.headers.get("x-case-revision")
+        body = b""
+        if raw not in (None, ""):
+            try:
+                expected = int(raw)
+            except ValueError:
+                await JSONResponse({"error": "X-Case-Revision 必须是整数"},
+                                   status_code=400)(scope, receive, send)
+                return
+        else:
+            body = await request.body()
+            if body:
+                try:
+                    value = json.loads(body).get("revision")
+                except (ValueError, AttributeError):
+                    value = None
+                if value is not None:
+                    try:
+                        expected = int(value)
+                    except (TypeError, ValueError):
+                        await JSONResponse({"error": "revision 必须是整数"},
+                                           status_code=400)(scope, receive, send)
+                        return
+            sent = {"done": False}
+
+            async def replay():
+                if not sent["done"]:
+                    sent["done"] = True
+                    return {"type": "http.request", "body": body, "more_body": False}
+                return {"type": "http.disconnect"}
+
+            receive = replay
+
+        current = _meta().read(name)
+        if expected is not None and expected != current.revision:
+            payload = {
+                "code": "revision_conflict",
+                "error": f"case 已被 {current.updated_by_name or '其他人'} 修改，请重新加载",
+                "current_revision": current.revision,
+                "updated_by": current.updated_by_name,
+                "updated_at": current.updated_at,
+            }
+            await JSONResponse(payload, status_code=409)(scope, receive, send)
+            return
+
+        user = scope.get("state", {}).get("user")
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                if 200 <= message["status"] < 300:
+                    try:
+                        updated = _meta().touch(name, user)
+                        message.setdefault("headers", []).append(
+                            (b"x-case-revision", str(updated.revision).encode("ascii")))
+                    except OSError:
+                        pass
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+
 def build_app(cases_root: str | Path | None = None) -> Starlette:
     _ctx["cases_root"] = cases_root
+    _ctx["meta"] = case_meta.FileCaseMetaStore(cases_root)
+    _ctx["locks"] = FileCaseLockStore(cases_root)
     try:
         _cleanup_uploads()
     except OSError:
@@ -2533,6 +2706,7 @@ def build_app(cases_root: str | Path | None = None) -> Starlette:
     app = Starlette(routes=routes)
     app.add_middleware(NoStoreMiddleware)
     app.add_middleware(RequestLogMiddleware)
+    app.add_middleware(CaseRevisionMiddleware)
     app.add_middleware(IdentityMiddleware)
     app.mount("/static", StaticFiles(directory=str(_WEB_DIR / "static")),
               name="static")
