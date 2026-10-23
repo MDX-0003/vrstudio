@@ -19,6 +19,7 @@ import re
 import subprocess
 import tempfile
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -1111,8 +1112,18 @@ def _brief(name: str) -> dict | None:
     except CaseError:
         return None
     extracts = _extracts(case) if case.flow == "patch" else []
+    case_toml = case_mod.case_dir(name, _ctx["cases_root"]) / "case.toml"
+    try:
+        updated_at = datetime.fromtimestamp(case_toml.stat().st_mtime).strftime(
+            "%Y-%m-%d %H:%M")
+    except OSError:
+        updated_at = None
     return {"name": case.name, "flow": case.flow,
-            "gates": _gates(case, extracts)}
+            "gates": _gates(case, extracts),
+            "updated_at": updated_at,
+            "outputs": len(_outputs(case)),
+            "owner": None,
+            "task_status": None}
 
 
 def _is_16_9(width: int, height: int) -> bool:

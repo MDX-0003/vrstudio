@@ -232,6 +232,10 @@ def test_cases_list_has_gates(client, patch_case):
     assert body[0]["name"] == "p1" and body[0]["flow"] == "patch"
     assert body[0]["gates"]["pick"]["ok"] is True          # 草稿齐 → pick 达成
     assert body[0]["gates"]["extract"]["ok"] is False      # 还没抽
+    assert body[0]["updated_at"]
+    assert body[0]["outputs"] == 0
+    assert body[0]["owner"] is None
+    assert body[0]["task_status"] is None
 
 
 # ── 草稿 API ──────────────────────────────────────────────────────────────
