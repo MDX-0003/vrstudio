@@ -1,10 +1,20 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
-import { Check, Picture, Refresh, VideoCamera, VideoPlay } from '@element-plus/icons-vue'
-import { changeAssetRole, fetchCase, savePromptVar, saveSubmitSelection } from '@/api/case'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Bottom, Check, Delete, Picture, Refresh, Top, VideoCamera, VideoPlay } from '@element-plus/icons-vue'
+import {
+  changeAssetRole,
+  fetchCase,
+  removeAsset,
+  reorderAssets,
+  runOperation,
+  saveParams,
+  savePromptVar,
+  saveSubmitSelection,
+} from '@/api/case'
 import { fetchSessions } from '@/api/sessions'
+import { fetchTasks } from '@/api/tasks'
 import { flowMeta } from '@/constants/flow'
 import type { AssetRow, Flow, PromptVariable } from '@/types/case'
 import type {
@@ -17,11 +27,12 @@ import type {
   RoundSummary,
 } from '@/types/case-info'
 import type { EpisodeOption, ProjectOption, SessionOption } from '@/types/session'
+import type { TaskView } from '@/types/task'
 
 const route = useRoute()
 const router = useRouter()
 
-const caseName = computed(() => String(route.params.name ?? 'dacne'))
+const caseName = computed(() => String(route.params.name ?? ''))
 const activeStep = computed(() => String(route.params.step ?? 'generate'))
 const flow = ref<Flow>('patch')
 
@@ -51,13 +62,31 @@ const caseLoading = ref(false)
 const caseError = ref('')
 const selectionSaving = ref(false)
 const paramsError = ref('')
+const paramsSaving = ref(false)
+let paramsTimer: ReturnType<typeof setTimeout> | null = null
+let hydrating = true
 
 const recentOutput = computed(() => {
   const outputs = caseInfo.value?.outputs ?? []
-  return outputs.length ? outputs[outputs.length - 1] : null
+  if (!outputs.length) return null
+  const adopted = String(caseInfo.value?.adopt_round ?? '').split(/[\\/]/).pop()
+  return outputs.find((item) => item.version === adopted) ?? outputs[outputs.length - 1]
 })
 const rounds = computed<RoundSummary[]>(() => caseInfo.value?.rounds?.rounds ?? [])
 const roundsHint = computed(() => caseInfo.value?.rounds?.hint ?? '')
+
+const latestUsableRound = computed<RoundSummary | null>(() => {
+  const rows = [...rounds.value]
+    .filter((round) => round.result === 'yes')
+    .sort((a, b) => String(b.updated).localeCompare(String(a.updated)))
+  return rows[0] ?? null
+})
+const adoptedRoundName = computed(() =>
+  String(caseInfo.value?.adopt_round ?? '').split(/[\\/]/).pop(),
+)
+const canAdopt = computed(
+  () => Boolean(latestUsableRound.value) && latestUsableRound.value?.round !== adoptedRoundName.value,
+)
 
 const generationParams = ref<GenerationParams | null>(null)
 const modeOptions = ref<ModeInfo[]>([])
@@ -66,7 +95,28 @@ const scaleOptions = ref<InputOption[]>([])
 
 const selectedCount = computed(() => assets.value.filter((asset) => asset.selected).length)
 const promptOpen = ref(false)
-const status = ref<'未预演' | '预演通过' | '已提交'>('未预演')
+
+type SaveState = 'saved' | 'saving' | 'unsaved'
+const saveState = ref<SaveState>('saved')
+
+type RunStatus =
+  | '未预演'
+  | '预演中'
+  | '预演通过'
+  | '预演已过期'
+  | '提交中'
+  | '排队中'
+  | '运行中'
+  | '已完成'
+  | '失败'
+const status = ref<RunStatus>('未预演')
+const statusDetail = ref('')
+const previewPassedSig = ref<string | null>(null)
+const caseTasks = ref<TaskView[]>([])
+const activeTask = ref<TaskView | null>(null)
+const adopting = ref(false)
+let taskTimer: ReturnType<typeof setInterval> | null = null
+let taskInFlight = false
 
 const ASSET_ROLE_LABELS: Record<string, string> = {
   edit_master: '编辑母版',
@@ -123,8 +173,13 @@ function toAssetRow(asset: AssetDetail, selected: Set<string>): AssetRow {
 }
 
 async function loadCase(): Promise<void> {
+  if (!caseName.value) {
+    caseError.value = '缺少 case 名称'
+    return
+  }
   caseLoading.value = true
   caseError.value = ''
+  hydrating = true
   try {
     const data = await fetchCase(caseName.value)
     caseInfo.value = data
@@ -166,6 +221,11 @@ async function loadCase(): Promise<void> {
           scale.value = current.scale
         }
         ratio.value = current.aspect_ratio || 'auto'
+        if (current.session_id) {
+          selectedSession.value = String(current.session_id)
+          selectedProject.value = String(current.project_id || '')
+          selectedEpisode.value = String(current.episode || '')
+        }
       }
       duration.value = params.fixed?.duration_s ? String(params.fixed.duration_s) : 'auto'
       paramsError.value = ''
@@ -175,6 +235,8 @@ async function loadCase(): Promise<void> {
     assets.value = []
   } finally {
     caseLoading.value = false
+    await nextTick()
+    hydrating = false
   }
 }
 
@@ -223,7 +285,7 @@ const duration = ref('auto')
 const projects = ref<ProjectOption[]>([])
 const selectedProject = ref('')
 const selectedEpisode = ref('')
-const selectedSession = ref('')
+const selectedSession = ref('0')
 const sessionsLoading = ref(false)
 const sessionError = ref('')
 const lastRefreshed = ref('')
@@ -281,36 +343,110 @@ function scaleLabel(option: InputOption): string {
 
 function schedulePromptSave(key: string, value: string): void {
   pendingPromptSaves.set(key, value)
+  saveState.value = 'unsaved'
   if (promptTimer) clearTimeout(promptTimer)
   promptTimer = setTimeout(() => {
     void flushPromptSaves()
   }, 400)
 }
 
-async function flushPromptSaves(): Promise<void> {
+async function flushPromptSaves(): Promise<boolean> {
   if (promptTimer) {
     clearTimeout(promptTimer)
     promptTimer = null
   }
   const entries = [...pendingPromptSaves.entries()]
-  pendingPromptSaves.clear()
-  if (!entries.length) return
+  if (!entries.length) {
+    if (saveState.value === 'unsaved') saveState.value = 'saved'
+    return true
+  }
   promptSaving.value = true
+  saveState.value = 'saving'
+  let latest: CaseInfo | null = null
   try {
-    let latest: CaseInfo | null = null
-    for (const [key, value] of entries) {
+    for (let index = 0; index < entries.length; index += 1) {
+      const [key, value] = entries[index]
       latest = await savePromptVar(caseName.value, key, value)
+      pendingPromptSaves.delete(key)
     }
     if (latest) {
       caseInfo.value = latest
       promptRendered.value = latest.prompt?.rendered || promptRendered.value
       promptRenderError.value = latest.prompt?.render_error || ''
     }
+    saveState.value = 'saved'
+    return true
   } catch (err) {
+    for (const [key, value] of entries) {
+      if (!pendingPromptSaves.has(key)) pendingPromptSaves.set(key, value)
+    }
+    saveState.value = 'unsaved'
     ElMessage.error(err instanceof Error ? err.message : '保存提示词失败')
+    return false
   } finally {
     promptSaving.value = false
   }
+}
+
+function paramsBody() {
+  const body: {
+    mode: string
+    aspect_ratio: string
+    resolution?: string
+    scale?: string
+    session_id?: number
+    project_id?: number
+    episode?: number
+  } = {
+    mode: mode.value,
+    aspect_ratio: ratio.value,
+  }
+  if (resolution.value) body.resolution = resolution.value
+  if (scale.value) body.scale = scale.value
+  if (selectedSession.value !== '') {
+    const sessionId = Number(selectedSession.value)
+    body.session_id = Number.isFinite(sessionId) ? sessionId : 0
+    if (sessionId) {
+      body.project_id = Number(selectedProject.value) || 0
+      body.episode = Number(selectedEpisode.value) || 0
+    } else {
+      body.project_id = 0
+      body.episode = 0
+    }
+  }
+  return body
+}
+
+async function persistParams(): Promise<boolean> {
+  if (hydrating || !caseName.value) return true
+  if (paramsTimer) {
+    clearTimeout(paramsTimer)
+    paramsTimer = null
+  }
+  paramsSaving.value = true
+  try {
+    const data = await saveParams(caseName.value, paramsBody())
+    if (data.generation_params) {
+      generationParams.value = data.generation_params
+      paramsError.value = data.generation_params.error ?? ''
+    }
+    return true
+  } catch (err) {
+    const message = err instanceof Error ? err.message : '保存生成参数失败'
+    paramsError.value = message
+    ElMessage.error(message)
+    return false
+  } finally {
+    paramsSaving.value = false
+  }
+}
+
+function scheduleParamsSave(): void {
+  if (hydrating) return
+  if (paramsTimer) clearTimeout(paramsTimer)
+  paramsTimer = setTimeout(() => {
+    void persistParams()
+  }, 300)
 }
 
 watch(ratioOptions, (options) => {
@@ -323,6 +459,9 @@ watch(durationOptions, (options) => {
   }
 })
 
+watch([mode, ratio, resolution, scale], scheduleParamsSave)
+watch([selectedProject, selectedEpisode, selectedSession], scheduleParamsSave)
+
 function selectStep(key: string): void {
   router.push({ name: 'case', params: { name: caseName.value, step: key } })
 }
@@ -332,20 +471,226 @@ function openPrompt(): void {
 }
 
 async function savePrompt(): Promise<void> {
-  await flushPromptSaves()
+  const saved = await flushPromptSaves()
+  if (!saved) return
   promptOpen.value = false
-  status.value = '未预演'
+  if (status.value === '预演通过') status.value = '预演已过期'
   ElMessage.success('提示词已保存，预演状态回到未预演')
 }
 
+const previewSignature = computed(() =>
+  JSON.stringify({
+    assets: assets.value.filter((item) => item.selected).map((item) => [item.id, item.roleRaw, item.meta]),
+    params: [mode.value, ratio.value, resolution.value, scale.value, duration.value],
+    prompt: [promptVars.value.map((item) => [item.key, item.value]), promptRendered.value],
+    quota: [selectedProject.value, selectedEpisode.value, selectedSession.value],
+  }),
+)
+
+watch(previewSignature, () => {
+  if (status.value === '预演通过' && previewPassedSig.value !== previewSignature.value) {
+    status.value = '预演已过期'
+  }
+})
+
+const generateGate = computed(() => caseInfo.value?.gates?.generate)
+
+function submitBody() {
+  const body = {
+    mode: mode.value,
+    aspect_ratio: ratio.value,
+    resolution: resolution.value,
+    scale: scale.value,
+  } as {
+    mode: string
+    aspect_ratio: string
+    resolution: string
+    scale: string
+    duration?: number
+  }
+  if (duration.value !== 'auto') body.duration = Number(duration.value)
+  return body
+}
+
+const running = computed(() =>
+  ['预演中', '提交中', '排队中', '运行中'].includes(status.value),
+)
+
+const activeKind = ref<'dry_run' | 'submit' | 'adopt' | null>(null)
+const activeStartedAt = ref(0)
+
+function taskTime(task: TaskView): number {
+  const value = new Date(task.created_at).getTime()
+  return Number.isNaN(value) ? 0 : value
+}
+
+function syncRunStatus(): void {
+  if (!activeKind.value) return
+  const candidates = caseTasks.value
+    .filter((task) => task.kind === activeKind.value)
+    .filter((task) => taskTime(task) >= activeStartedAt.value - 5000)
+    .sort((a, b) => taskTime(b) - taskTime(a))
+  const task = candidates[0]
+  if (!task) return
+  activeTask.value = task
+  if (task.status === 'queued') {
+    statusDetail.value = task.queue_position ? `排队第 ${task.queue_position} 位` : '排队中'
+  } else if (task.status === 'running') {
+    statusDetail.value = '正在执行'
+  }
+  if (activeKind.value === 'dry_run') {
+    if (task.status === 'queued' || task.status === 'running') status.value = '预演中'
+    if (task.status === 'done') {
+      status.value = '预演通过'
+      statusDetail.value = '预演通过，当前选择未改动'
+      previewPassedSig.value = previewSignature.value
+      activeKind.value = null
+    }
+    if (task.status === 'failed') {
+      status.value = '失败'
+      statusDetail.value = task.error || task.tail[task.tail.length - 1] || '预演失败'
+      activeKind.value = null
+    }
+  } else if (activeKind.value === 'submit') {
+    if (task.status === 'queued') status.value = '排队中'
+    if (task.status === 'running') status.value = '运行中'
+    if (task.status === 'done') {
+      status.value = '已完成'
+      statusDetail.value = '生成任务已完成'
+      activeKind.value = null
+      void loadCase()
+    }
+    if (task.status === 'failed') {
+      status.value = '失败'
+      statusDetail.value = task.error || task.tail[task.tail.length - 1] || '生成失败'
+      activeKind.value = null
+    }
+  } else if (activeKind.value === 'adopt') {
+    if (task.status === 'done') {
+      adopting.value = false
+      activeKind.value = null
+      ElMessage.success('已采用成片')
+      void loadCase()
+    }
+    if (task.status === 'failed') {
+      adopting.value = false
+      activeKind.value = null
+      ElMessage.error(task.error || '采用成片失败')
+    }
+  }
+}
+
+async function loadCaseTasks(): Promise<void> {
+  if (taskInFlight || document.hidden || !caseName.value) return
+  taskInFlight = true
+  try {
+    const data = await fetchTasks('all')
+    caseTasks.value = data.tasks
+      .filter((task) => task.case === caseName.value)
+      .sort((a, b) => taskTime(b) - taskTime(a))
+    if (!activeKind.value) activeTask.value = caseTasks.value[0] ?? null
+    syncRunStatus()
+  } catch {
+    // 任务列表是辅助信息，失败不打断主页面；下一轮轮询会重试。
+  } finally {
+    taskInFlight = false
+  }
+}
+
+function startTaskPolling(): void {
+  void loadCaseTasks()
+  if (taskTimer) clearInterval(taskTimer)
+  taskTimer = setInterval(() => {
+    void loadCaseTasks()
+  }, 2000)
+}
+
+async function execute(op: 'dry_run' | 'submit'): Promise<void> {
+  if (running.value) return
+  if (generateGate.value && !generateGate.value.ready) {
+    ElMessage.warning(generateGate.value.reason || '生成条件还没有满足')
+    return
+  }
+  if (!(await flushPromptSaves())) return
+  if (!(await persistParams())) return
+  activeKind.value = op
+  activeStartedAt.value = Date.now()
+  activeTask.value = null
+  status.value = op === 'dry_run' ? '预演中' : '提交中'
+  statusDetail.value = ''
+  try {
+    await runOperation(caseName.value, op, submitBody())
+    startTaskPolling()
+  } catch (err) {
+    activeKind.value = null
+    status.value = '失败'
+    statusDetail.value = err instanceof Error ? err.message : '提交失败'
+    ElMessage.error(statusDetail.value)
+  }
+}
+
 function dryRun(): void {
-  status.value = '预演通过'
-  ElMessage.success('预演通过 · 当前选择未改动')
+  void execute('dry_run')
 }
 
 function submit(): void {
-  status.value = '已提交'
-  ElMessage.success('已提交生成，排队第 1 位')
+  void execute('submit')
+}
+
+async function adoptResult(): Promise<void> {
+  const round = latestUsableRound.value
+  if (!round || adopting.value) return
+  adopting.value = true
+  activeKind.value = 'adopt'
+  activeStartedAt.value = Date.now()
+  try {
+    await runOperation(caseName.value, 'adopt', { round: round.round_dir })
+    startTaskPolling()
+  } catch (err) {
+    adopting.value = false
+    activeKind.value = null
+    ElMessage.error(err instanceof Error ? err.message : '采用成片失败')
+  }
+}
+
+function applyAssetData(data: CaseInfo): void {
+  caseInfo.value = data
+  const selected = new Set(data.submit_selected ?? [])
+  assets.value = (data.assets ?? []).map((item) => toAssetRow(item, selected))
+}
+
+async function deleteAsset(asset: AssetRow): Promise<void> {
+  try {
+    await ElMessageBox.confirm(`删除素材「${asset.name}」？文件会从 case 里移除。`, '删除素材', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+    })
+    const data = await removeAsset(caseName.value, asset.id)
+    applyAssetData(data)
+    ElMessage.success('素材已删除')
+  } catch (err) {
+    if (err === 'cancel' || err === 'close') return
+    ElMessage.error(err instanceof Error ? err.message : '删除素材失败')
+  }
+}
+
+async function moveAsset(asset: AssetRow, delta: number): Promise<void> {
+  const index = assets.value.findIndex((item) => item.id === asset.id)
+  const target = index + delta
+  if (index < 0 || target < 0 || target >= assets.value.length) return
+  const previous = [...assets.value]
+  const next = [...assets.value]
+  const [moved] = next.splice(index, 1)
+  next.splice(target, 0, moved)
+  assets.value = next
+  try {
+    const data = await reorderAssets(caseName.value, next.map((item) => item.id))
+    applyAssetData(data)
+  } catch (err) {
+    assets.value = previous
+    ElMessage.error(err instanceof Error ? err.message : '调整素材顺序失败')
+  }
 }
 
 async function loadSessions(): Promise<boolean> {
@@ -385,8 +730,9 @@ watch(
 watch(
   sessions,
   (list) => {
+    if (selectedSession.value === '0') return
     if (!list.some((item) => String(item.id) === selectedSession.value)) {
-      selectedSession.value = list.length ? String(list[0].id) : ''
+      selectedSession.value = '0'
     }
   },
   { immediate: true },
@@ -395,15 +741,26 @@ watch(
 onMounted(() => {
   void loadCase()
   void loadSessions()
+  startTaskPolling()
+})
+
+onUnmounted(() => {
+  if (taskTimer) {
+    clearInterval(taskTimer)
+    taskTimer = null
+  }
 })
 
 watch(caseName, () => {
   void loadCase()
+  void loadCaseTasks()
 })
 
 function statusTone(): string {
-  if (status.value === '预演通过') return 'done'
-  if (status.value === '已提交') return 'queued'
+  if (status.value === '预演通过' || status.value === '已完成') return 'done'
+  if (['提交中', '排队中', '运行中', '预演中'].includes(status.value)) return 'queued'
+  if (status.value === '失败') return 'failed'
+  if (status.value === '预演已过期') return 'stale'
   return ''
 }
 
@@ -440,8 +797,11 @@ function roundResultText(round: RoundSummary): string {
         </h1>
       </div>
       <div class="save-state">
-        <span class="status-dot done" />
-        已保存
+        <span
+          class="status-dot"
+          :class="saveState === 'saved' ? 'done' : saveState === 'saving' ? 'queued' : 'stale'"
+        />
+        {{ saveState === 'saved' ? '已保存' : saveState === 'saving' ? '保存中' : '未保存' }}
       </div>
     </div>
 
@@ -463,7 +823,7 @@ function roundResultText(round: RoundSummary): string {
     </nav>
 
     <div v-if="activeStep !== 'generate'" class="panel placeholder-panel">
-      <el-empty description="Phase 0 原型只实现生成页；选区、抽取、首尾帧、合并与对比在 Phase 2–3 迁移" />
+      <el-empty description="选区、抽取、首尾帧、合并与对比在 Phase 3 迁移" />
     </div>
 
     <template v-else>
@@ -484,7 +844,7 @@ function roundResultText(round: RoundSummary): string {
                 <el-empty description="还没有素材" :image-size="72" />
               </div>
               <div
-                v-for="asset in assets"
+                v-for="(asset, index) in assets"
                 :key="asset.id"
                 class="asset-row"
                 :class="{ dim: !asset.selected }"
@@ -526,8 +886,31 @@ function roundResultText(round: RoundSummary): string {
                   />
                 </el-select>
                 <span v-else class="role-fixed">{{ asset.role }}</span>
+                <div class="asset-actions">
+                  <el-button
+                    link
+                    :icon="Top"
+                    :disabled="index === 0"
+                    aria-label="上移素材"
+                    @click="moveAsset(asset, -1)"
+                  />
+                  <el-button
+                    link
+                    :icon="Bottom"
+                    :disabled="index === assets.length - 1"
+                    aria-label="下移素材"
+                    @click="moveAsset(asset, 1)"
+                  />
+                  <el-button
+                    link
+                    type="danger"
+                    :icon="Delete"
+                    aria-label="删除素材"
+                    @click="deleteAsset(asset)"
+                  />
+                </div>
               </div>
-              <div class="asset-note muted">上传素材在 Phase 2 后半段接入。</div>
+              <div class="asset-note muted">排序、角色与勾选会即时保存；上传素材下一小步接入。</div>
             </div>
           </div>
 
@@ -594,8 +977,19 @@ function roundResultText(round: RoundSummary): string {
               </div>
               <div v-if="recentOutput" class="output-meta mono">{{ recentOutput.file }}</div>
               <div class="output-actions">
-                <el-button type="primary" plain size="small" disabled>选用成片</el-button>
-                <span class="muted">采用接口下一步接入</span>
+                <el-button
+                  type="primary"
+                  plain
+                  size="small"
+                  :disabled="!canAdopt || adopting"
+                  :loading="adopting"
+                  @click="adoptResult"
+                >
+                  选用成片
+                </el-button>
+                <span class="muted">
+                  {{ canAdopt ? `最新可用轮次：${latestUsableRound?.round}` : '当前成片已是采用结果' }}
+                </span>
               </div>
             </div>
           </div>
@@ -625,6 +1019,33 @@ function roundResultText(round: RoundSummary): string {
                   </span>
                 </div>
               </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <h2 class="panel-title">最近任务</h2>
+              <el-tag v-if="activeTask" size="small" effect="light" :type="activeTask.status === 'failed' ? 'danger' : activeTask.status === 'done' ? 'success' : 'primary'">
+                {{ activeTask.kind }} · {{ activeTask.status }}
+              </el-tag>
+              <span v-else class="muted">无</span>
+            </div>
+            <div class="panel-body">
+              <div v-if="!activeTask" class="muted task-empty">这个 case 还没有任务。</div>
+              <template v-else>
+                <div class="task-summary">
+                  <span>{{ activeTask.kind }}</span>
+                  <span class="muted mono">{{ activeTask.id }}</span>
+                  <span v-if="activeTask.queue_position" class="muted">排队第 {{ activeTask.queue_position }} 位</span>
+                </div>
+                <el-alert
+                  v-if="activeTask.error"
+                  type="error"
+                  :closable="false"
+                  :title="activeTask.error"
+                  class="task-error"
+                />
+                <pre v-if="activeTask.tail.length" class="task-tail">{{ activeTask.tail.join('\n') }}</pre>
+              </template>
             </div>
           </div>
         </aside>
@@ -727,12 +1148,8 @@ function roundResultText(round: RoundSummary): string {
             </label>
             <label class="ctl">
               <span>会话</span>
-              <el-select
-                v-model="selectedSession"
-                size="small"
-                style="width: 150px"
-                :disabled="!sessions.length"
-              >
+              <el-select v-model="selectedSession" size="small" style="width: 220px">
+                <el-option label="个人额度（不使用项目会话）" value="0" />
                 <el-option
                   v-for="item in sessions"
                   :key="item.id"
@@ -752,16 +1169,36 @@ function roundResultText(round: RoundSummary): string {
             <span class="muted quota-hint">
               已获取 {{ projects.length }} 个项目<template v-if="lastRefreshed">
                 · 刷新于 {{ lastRefreshed }}</template>
+              <template v-if="paramsSaving"> · 参数保存中</template>
             </span>
             <span v-if="sessionError" class="session-error">{{ sessionError }}</span>
             <div class="submit-actions">
               <span class="run-state">
                 <span class="status-dot" :class="statusTone()" />
                 {{ status }}
+                <span v-if="statusDetail" class="run-detail">{{ statusDetail }}</span>
               </span>
-              <el-button size="small" @click="dryRun">预演检查（不扣费）</el-button>
-              <el-button type="primary" size="small" @click="submit">提交生成</el-button>
+              <el-button
+                size="small"
+                :loading="activeKind === 'dry_run'"
+                :disabled="running && activeKind !== 'dry_run' || !generateGate?.ready"
+                @click="dryRun"
+              >
+                预演检查（不扣费）
+              </el-button>
+              <el-button
+                type="primary"
+                size="small"
+                :loading="activeKind === 'submit'"
+                :disabled="running && activeKind !== 'submit' || !generateGate?.ready"
+                @click="submit"
+              >
+                提交生成
+              </el-button>
             </div>
+          </div>
+          <div v-if="generateGate && !generateGate.ready" class="gate-reason">
+            提交条件未满足：{{ generateGate.reason || '请先完成前一步' }}
           </div>
         </div>
       </div>
@@ -992,6 +1429,63 @@ function roundResultText(round: RoundSummary): string {
 .asset-main {
   flex: 1;
   min-width: 0;
+}
+
+.asset-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: var(--space-1);
+}
+
+.asset-actions .el-button + .el-button {
+  margin-left: 0;
+}
+
+.task-empty {
+  padding: var(--space-2) 0;
+}
+
+.task-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.task-error {
+  margin-top: var(--space-2);
+}
+
+.task-tail {
+  max-height: 180px;
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2);
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  background: #0f172a;
+  color: #e2e8f0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.run-detail {
+  margin-left: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+
+.gate-reason {
+  padding: var(--space-1) 0 var(--space-2);
+  color: var(--color-warning);
+  font-size: var(--text-xs);
+}
+
+.status-dot.stale {
+  background: var(--color-warning);
 }
 
 .asset-name {

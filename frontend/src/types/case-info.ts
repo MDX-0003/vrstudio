@@ -114,6 +114,10 @@ export interface CaseInfo {
   prompt: PromptPayload
   generation_params: GenerationParams
   outputs: OutputFile[]
+  adopt_round: string | null
   rounds: RoundsPayload
-  gates: Record<string, { ok: boolean; reason?: string } | undefined>
+  gates: Record<
+    string,
+    { ok: boolean; ready?: boolean; reason?: string; evidence?: string } | undefined
+  >
 }

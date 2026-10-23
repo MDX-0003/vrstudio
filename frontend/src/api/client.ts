@@ -19,6 +19,9 @@ async function parseBody(response: Response): Promise<unknown> {
 }
 
 function describeError(data: unknown, status: number): string {
+  if (status === 502 || status === 504) {
+    return '后端服务没有启动，请先运行 uv run vrstudio serve'
+  }
   if (data && typeof data === 'object' && 'error' in data) {
     return String((data as { error: unknown }).error)
   }
