@@ -64,6 +64,7 @@ select {
 .page {
   max-width: 1600px;
   margin: 0 auto;
+  padding-bottom: var(--space-6);
 }
 
 .page-header {

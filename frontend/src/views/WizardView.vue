@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Check, Picture, Plus, VideoCamera, VideoPlay } from '@element-plus/icons-vue'
+import { Check, Picture, Plus, Refresh, VideoCamera, VideoPlay } from '@element-plus/icons-vue'
 import { flowMeta, mockAssets, mockCandidates, mockPromptVariables } from '@/mocks/case'
 import type { AssetRow, CandidateRound, Flow, PromptVariable } from '@/types/case'
 
@@ -78,6 +78,10 @@ function dryRun(): void {
 function submit(): void {
   status.value = '已提交'
   ElMessage.success('已提交生成，排队第 1 位')
+}
+
+function refreshSessions(): void {
+  ElMessage.success('会话列表已刷新（原型阶段，Phase 1 接 /api/sessions）')
 }
 
 function statusTone(): string {
@@ -250,74 +254,79 @@ function statusTone(): string {
       </div>
 
       <div class="submit-bar">
-        <div class="submit-row">
-          <label class="ctl">
-            <span>模式</span>
-            <el-select v-model="mode" size="small" style="width: 168px">
-              <el-option label="firstLastFrame · 首尾帧" value="firstLastFrame" />
-              <el-option label="VideoEdit · 结构锁定编辑" value="videoEdit" />
-              <el-option label="allMediaRef · 多素材参考" value="allMediaRef" />
-            </el-select>
-          </label>
-          <label class="ctl">
-            <span>比例</span>
-            <el-select v-model="ratio" size="small" style="width: 100px">
-              <el-option label="16:9" value="16:9" />
-              <el-option label="21:9" value="21:9" />
-              <el-option label="跟随输入" value="auto" />
-            </el-select>
-          </label>
-          <label class="ctl">
-            <span>输出分辨率</span>
-            <el-select v-model="resolution" size="small" style="width: 110px">
-              <el-option label="480p" value="480p" />
-              <el-option label="720p" value="720p" />
-              <el-option label="1080p" value="1080p" />
-            </el-select>
-          </label>
-          <label class="ctl">
-            <span>输入分辨率</span>
-            <el-select v-model="scale" size="small" style="width: 100px">
-              <el-option label="自动" value="auto" />
-              <el-option label="原始尺寸" value="full" />
-              <el-option label="一半" value="half" />
-            </el-select>
-          </label>
-          <label class="ctl">
-            <span>时长</span>
-            <el-select v-model="duration" size="small" style="width: 140px">
-              <el-option label="自动（约 10 秒）" value="auto" />
-              <el-option label="4 秒" value="4" />
-              <el-option label="10 秒" value="10" />
-            </el-select>
-          </label>
-        </div>
-        <div class="submit-row">
-          <label class="ctl">
-            <span>项目</span>
-            <el-select v-model="project" size="small" style="width: 170px">
-              <el-option label="2026大秦寻仙VR" value="2026大秦寻仙VR" />
-            </el-select>
-          </label>
-          <label class="ctl">
-            <span>剧集</span>
-            <el-select v-model="episode" size="small" style="width: 160px">
-              <el-option label="第 1 集 · 姜宣夜" value="第 1 集 · 姜宣夜" />
-            </el-select>
-          </label>
-          <label class="ctl">
-            <span>会话</span>
-            <el-select v-model="session" size="small" style="width: 150px">
-              <el-option label="cli会话_测试" value="cli会话_测试" />
-            </el-select>
-          </label>
-          <span class="spacer" />
-          <span class="run-state">
-            <span class="status-dot" :class="statusTone()" />
-            {{ status }}
-          </span>
-          <el-button size="small" @click="dryRun">预演检查（不扣费）</el-button>
-          <el-button type="primary" size="small" @click="submit">提交生成</el-button>
+        <div class="submit-inner">
+          <div class="submit-row">
+            <label class="ctl">
+              <span>模式</span>
+              <el-select v-model="mode" size="small" style="width: 168px">
+                <el-option label="firstLastFrame · 首尾帧" value="firstLastFrame" />
+                <el-option label="VideoEdit · 结构锁定编辑" value="videoEdit" />
+                <el-option label="allMediaRef · 多素材参考" value="allMediaRef" />
+              </el-select>
+            </label>
+            <label class="ctl">
+              <span>比例</span>
+              <el-select v-model="ratio" size="small" style="width: 100px">
+                <el-option label="16:9" value="16:9" />
+                <el-option label="21:9" value="21:9" />
+                <el-option label="跟随输入" value="auto" />
+              </el-select>
+            </label>
+            <label class="ctl">
+              <span>输出分辨率</span>
+              <el-select v-model="resolution" size="small" style="width: 110px">
+                <el-option label="480p" value="480p" />
+                <el-option label="720p" value="720p" />
+                <el-option label="1080p" value="1080p" />
+              </el-select>
+            </label>
+            <label class="ctl">
+              <span>输入分辨率</span>
+              <el-select v-model="scale" size="small" style="width: 100px">
+                <el-option label="自动" value="auto" />
+                <el-option label="原始尺寸" value="full" />
+                <el-option label="一半" value="half" />
+              </el-select>
+            </label>
+            <label class="ctl">
+              <span>时长</span>
+              <el-select v-model="duration" size="small" style="width: 140px">
+                <el-option label="自动（约 10 秒）" value="auto" />
+                <el-option label="4 秒" value="4" />
+                <el-option label="10 秒" value="10" />
+              </el-select>
+            </label>
+          </div>
+          <div class="submit-row">
+            <label class="ctl">
+              <span>项目</span>
+              <el-select v-model="project" size="small" style="width: 170px">
+                <el-option label="2026大秦寻仙VR" value="2026大秦寻仙VR" />
+              </el-select>
+            </label>
+            <label class="ctl">
+              <span>剧集</span>
+              <el-select v-model="episode" size="small" style="width: 160px">
+                <el-option label="第 1 集 · 姜宣夜" value="第 1 集 · 姜宣夜" />
+              </el-select>
+            </label>
+            <label class="ctl">
+              <span>会话</span>
+              <el-select v-model="session" size="small" style="width: 150px">
+                <el-option label="cli会话_测试" value="cli会话_测试" />
+              </el-select>
+            </label>
+            <el-button size="small" :icon="Refresh" @click="refreshSessions">刷新</el-button>
+            <span class="muted quota-hint">已获取 1 个项目</span>
+            <div class="submit-actions">
+              <span class="run-state">
+                <span class="status-dot" :class="statusTone()" />
+                {{ status }}
+              </span>
+              <el-button size="small" @click="dryRun">预演检查（不扣费）</el-button>
+              <el-button type="primary" size="small" @click="submit">提交生成</el-button>
+            </div>
+          </div>
         </div>
       </div>
     </template>
@@ -356,7 +365,7 @@ function statusTone(): string {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
-  padding-bottom: 120px;
+  padding-bottom: 160px;
 }
 
 .wizard-head {
@@ -646,18 +655,25 @@ function statusTone(): string {
 }
 
 .submit-bar {
-  position: sticky;
+  position: fixed;
+  left: var(--nav-current-width, var(--nav-width));
+  right: 0;
   bottom: 0;
-  z-index: 5;
+  z-index: 20;
+  background: rgba(255, 255, 255, 0.97);
+  border-top: 1px solid var(--color-border);
+  box-shadow: 0 -8px 24px rgba(15, 23, 42, 0.08);
+  backdrop-filter: blur(8px);
+  transition: left var(--duration-base) ease;
+}
+
+.submit-inner {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
-  background: rgba(255, 255, 255, 0.96);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-2);
-  backdrop-filter: blur(8px);
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: var(--space-3) var(--space-6);
 }
 
 .submit-row {
@@ -665,6 +681,18 @@ function statusTone(): string {
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-3);
+}
+
+.quota-hint {
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.submit-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-left: auto;
 }
 
 .ctl {
@@ -748,6 +776,12 @@ function statusTone(): string {
 @media (max-width: 1280px) {
   .gen-layout {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 1024px) {
+  .submit-inner {
+    padding: var(--space-2) var(--space-4);
   }
 }
 </style>
