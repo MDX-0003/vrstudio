@@ -14,6 +14,44 @@ export interface CaseRow {
   outputs: number
 }
 
+export interface Gate {
+  ok: boolean
+  reason?: string
+}
+
+export type Gates = Record<string, Gate | undefined>
+
+export interface CaseBrief {
+  name: string
+  flow: Flow
+  gates: Gates
+  updated_at: string | null
+  outputs: number
+  owner: string | null
+  task_status: string | null
+}
+
+export interface SourcesResponse {
+  dir: string
+  files: string[]
+}
+
+export interface ModeOption {
+  value: string
+  label?: string
+}
+
+export interface ModesResponse {
+  modes: ModeOption[]
+}
+
+export interface CreateCasePayload {
+  flow: Flow
+  name?: string
+  video?: string
+  mode?: string
+}
+
 export interface AssetRow {
   id: string
   name: string

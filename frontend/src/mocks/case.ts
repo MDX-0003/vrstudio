@@ -1,67 +1,10 @@
-import type { AssetRow, CandidateRound, CaseRow, Flow, PromptVariable } from '@/types/case'
+import type { AssetRow, CandidateRound, Flow, PromptVariable } from '@/types/case'
 
 export const flowMeta: Record<Flow, { label: string; tag: 'primary' | 'success' | 'warning' }> = {
   patch: { label: '局部重绘', tag: 'primary' },
   fullredraw: { label: '全流程重绘', tag: 'success' },
   gen: { label: '简单生成', tag: 'warning' },
 }
-
-export const mockCases: CaseRow[] = [
-  {
-    name: 'dacne',
-    flow: 'patch',
-    owner: 'MDX',
-    updatedAt: '2026-10-23 16:42',
-    taskStatus: 'running',
-    taskLabel: '空间合并 · 进行中',
-    outputs: 3,
-  },
-  {
-    name: 'walk_4k',
-    flow: 'patch',
-    owner: 'MDX',
-    updatedAt: '2026-10-23 15:08',
-    taskStatus: 'done',
-    taskLabel: '首尾帧 · 已完成',
-    outputs: 5,
-  },
-  {
-    name: 'walk_02',
-    flow: 'patch',
-    owner: 'LQ',
-    updatedAt: '2026-10-23 14:20',
-    taskStatus: 'queued',
-    taskLabel: '抽取 · 排队第 2 位',
-    outputs: 2,
-  },
-  {
-    name: 'ship_01',
-    flow: 'fullredraw',
-    owner: 'MDX',
-    updatedAt: '2026-10-22 19:35',
-    taskStatus: 'failed',
-    taskLabel: '提交生成 · 额度不足',
-    outputs: 1,
-  },
-  {
-    name: 'simple_gen_01',
-    flow: 'gen',
-    owner: 'WY',
-    updatedAt: '2026-10-22 11:02',
-    taskStatus: 'idle',
-    taskLabel: '等待下一步',
-    outputs: 4,
-  },
-  {
-    name: 'web_demo',
-    flow: 'patch',
-    owner: 'MDX',
-    updatedAt: '2026-10-21 17:50',
-    taskStatus: 'idle',
-    taskLabel: '等待下一步',
-    outputs: 0,
-  },
-]
 
 export const mockAssets: AssetRow[] = [
   {
