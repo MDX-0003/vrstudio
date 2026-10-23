@@ -16,6 +16,8 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
+from datetime import datetime
 from pathlib import Path
 
 from ..config import REPO_ROOT
@@ -27,9 +29,14 @@ _TAIL_BYTES = 8 * 1024
 log = logging.getLogger(TASK_LOGGER)
 
 
+def _now() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
 class Task:
     def __init__(self, kind: str, case: str, argv: list[str],
-                 follow_up: list[tuple[str, str, list[str]]] | None = None):
+                 follow_up: list[tuple[str, str, list[str]]] | None = None,
+                 owner=None, request_id: str | None = None):
         self.kind = kind          # extract | pad | register | submit | adopt
                                   # | merge | assemble | recompose
         self.case = case
@@ -38,6 +45,16 @@ class Task:
         self.follow_up = list(follow_up or [])
         self.state = "queued"     # queued -> running -> done | failed
         self.returncode: int | None = None
+        self.id = uuid.uuid4().hex[:12]
+        self.owner_id = getattr(owner, "id", None) if owner is not None else None
+        self.owner_name = (getattr(owner, "display_name", None)
+                           if owner is not None else None)
+        self.request_id = request_id
+        self.created_at = _now()
+        self.started_at: str | None = None
+        self.finished_at: str | None = None
+        self.progress = None
+        self.error: str | None = None
         self.submitted = time.strftime("%m-%d %H:%M:%S")   # 用户点按钮的时刻
         self.started = 0.0
         self.out_path: Path | None = None
@@ -47,8 +64,9 @@ class Task:
         self.out_path = (logs_dir() /
                          f"web_{self.kind}_{self.case}_{time.strftime('%Y%m%d-%H%M%S')}.log")
         log.info("task.start", extra={"data": {
-            "event": "task.start", "kind": self.kind, "case": self.case,
-            "log": str(self.out_path),
+            "event": "task.start", "task_id": self.id, "kind": self.kind,
+            "case": self.case, "owner_id": self.owner_id,
+            "request_id": self.request_id, "log": str(self.out_path),
         }})
         started = time.monotonic()
         with open(self.out_path, "w", encoding="utf-8", newline="") as fh:
@@ -57,19 +75,42 @@ class Task:
                 cwd=str(REPO_ROOT), env=utf8_env())
             self.state = "running"
             self.started = time.time()
+            self.started_at = _now()
             self.returncode = self.proc.wait()
         self.state = "done" if self.returncode == 0 else "failed"
+        self.finished_at = _now()
         data = {
-            "event": "task.finish", "kind": self.kind, "case": self.case,
-            "rc": self.returncode,
+            "event": "task.finish", "task_id": self.id, "kind": self.kind,
+            "case": self.case, "owner_id": self.owner_id,
+            "request_id": self.request_id, "rc": self.returncode,
             "ms": round((time.monotonic() - started) * 1000, 1),
             "log": str(self.out_path),
         }
         if self.returncode != 0:
             tail = self.tail(5)
-            data["error"] = tail[-1] if tail else None
+            self.error = tail[-1] if tail else None
+            data["error"] = self.error
         log.log(logging.INFO if self.returncode == 0 else logging.ERROR,
                 "task.finish", extra={"data": data})
+
+    def view(self, position: int | None = None) -> dict:
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "case": self.case,
+            "owner_id": self.owner_id,
+            "owner_name": self.owner_name,
+            "status": self.state,
+            "queue_position": position,
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "progress": self.progress,
+            "log_path": str(self.out_path) if self.out_path else None,
+            "error": self.error,
+            "request_id": self.request_id,
+            "tail": self.tail(8),
+        }
 
     def tail(self, max_lines: int = 14) -> list[str]:
         if not self.out_path or not self.out_path.exists():
@@ -103,18 +144,37 @@ class TaskQueue:
         self.history: list[Task] = []
 
     def submit(self, kind: str, case: str, argv: list[str],
-               follow_up: list[tuple[str, str, list[str]]] | None = None) -> Task:
+               follow_up: list[tuple[str, str, list[str]]] | None = None,
+               owner=None, request_id: str | None = None) -> Task:
         with self._lock:
-            task = Task(kind, case, argv, follow_up=follow_up)
+            task = Task(kind, case, argv, follow_up=follow_up,
+                        owner=owner, request_id=request_id)
             self.pending.append(task)
             log.info("task.submit", extra={"data": {
-                "event": "task.submit", "kind": kind, "case": case,
-                "queued": len(self.pending),
+                "event": "task.submit", "task_id": task.id, "kind": kind,
+                "case": case, "owner_id": task.owner_id,
+                "request_id": request_id, "queued": len(self.pending),
             }})
             if self._thread is None or not self._thread.is_alive():
                 self._thread = threading.Thread(target=self._drain, daemon=True)
                 self._thread.start()
             return task
+
+    def list(self, user=None, scope: str = "all") -> list[dict]:
+        """任务视图：当前任务、排队任务、最近历史；history 新→旧。"""
+        with self._lock:
+            current = self.current
+            pending = list(self.pending)
+            history = list(reversed(self.history[-50:]))
+        rows: list[dict] = []
+        if current is not None:
+            rows.append(current.view(1))
+        for index, task in enumerate(pending, start=2):
+            rows.append(task.view(index))
+        rows.extend(task.view(None) for task in history)
+        if scope == "mine" and user is not None:
+            rows = [row for row in rows if row["owner_id"] == user.id]
+        return rows
 
     def _drain(self):
         while True:
@@ -129,8 +189,14 @@ class TaskQueue:
                 self.current = None
                 # 连续任务：merge 成功后才排 assemble；merge 失败就停在原地。
                 if task.state == "done" and task.follow_up:
-                    self.pending[:0] = [Task(kind, case, argv)
-                                        for kind, case, argv in task.follow_up]
+                    follow = []
+                    for kind, case, argv in task.follow_up:
+                        child = Task(kind, case, argv)
+                        child.owner_id = task.owner_id
+                        child.owner_name = task.owner_name
+                        child.request_id = task.request_id
+                        follow.append(child)
+                    self.pending[:0] = follow
 
     def status(self) -> dict:
         with self._lock:

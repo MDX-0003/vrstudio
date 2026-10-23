@@ -382,7 +382,8 @@ def test_run_recompose_needs_manifest(client, tmp_path):
 def test_run_submits_to_queue(client, patch_case, monkeypatch):
     submitted = []
     monkeypatch.setattr(web_app.QUEUE, "submit",
-                        lambda kind, case, argv: submitted.append((kind, case, argv)))
+                        lambda kind, case, argv, **kwargs:
+                        submitted.append((kind, case, argv)))
     r = client.post("/api/case/p1/run", json={"op": "extract"})
     assert r.status_code == 200 and r.json()["submitted"] == "extract"
     kind, case, argv = submitted[0]
@@ -394,7 +395,8 @@ def test_run_submits_to_queue(client, patch_case, monkeypatch):
 def test_run_submit_passes_generation_params(client, patch_case, monkeypatch):
     submitted = []
     monkeypatch.setattr(web_app.QUEUE, "submit",
-                        lambda kind, case, argv: submitted.append((kind, case, argv)))
+                        lambda kind, case, argv, **kwargs:
+                        submitted.append((kind, case, argv)))
     r = client.post("/api/case/p1/run",
                     json={"op": "submit", "mode": "allMediaRef",
                           "aspect_ratio": "16:9",
@@ -936,7 +938,8 @@ def test_keyframe_run_queues_image_argv(client, patch_case, tmp_path, monkeypatc
     _add_image("p1", tmp_path, "sheet", "subject_ref")
     captured = []
     monkeypatch.setattr(web_app.QUEUE, "submit",
-                        lambda op, name, argv: captured.append((op, name, argv)))
+                        lambda op, name, argv, **kwargs:
+                        captured.append((op, name, argv)))
     monkeypatch.setattr(web_app, "_current_session", lambda name: 123)
     r = client.post("/api/case/p1/keyframe/run", json={
         "step": "first", "model_id": 44, "resolution": "2K"})
@@ -1090,7 +1093,8 @@ def test_keyframe_pick_first_queues_last(client, patch_case, tmp_path, monkeypat
                         lambda name, step: {"vars": {"figure": "x", "pose_last": "y"}})
     captured = []
     monkeypatch.setattr(web_app.QUEUE, "submit",
-                        lambda op, name, argv: captured.append((op, name, argv)))
+                        lambda op, name, argv, **kwargs:
+                        captured.append((op, name, argv)))
 
     r = client.post("/api/case/p1/keyframe/pick",
                     json={"round": "img-abc12345", "index": 1, "role": "first_frame"})
@@ -1238,3 +1242,53 @@ def test_identity_roundtrip(client):
 def test_identity_rejects_empty_and_long_names(client):
     assert client.post("/api/me", json={"display_name": "  "}).status_code == 400
     assert client.post("/api/me", json={"display_name": "x" * 41}).status_code == 400
+
+
+def test_task_view_and_queue_filter():
+    from vrstudio.web.identity import User
+
+    user = User("u1", "MDX")
+    other = User("u2", "LQ")
+    current = tasks_mod.Task("extract", "p1", ["echo"], owner=user)
+    current.state = "running"
+    pending = tasks_mod.Task("merge", "p2", ["echo"], owner=other)
+    done = tasks_mod.Task("adopt", "p3", ["echo"], owner=user)
+    done.state = "done"
+
+    queue = tasks_mod.TaskQueue()
+    queue.current = current
+    queue.pending = [pending]
+    queue.history = [done]
+
+    mine = queue.list(user, "mine")
+    assert [row["id"] for row in mine] == [current.id, done.id]
+    assert mine[0]["queue_position"] == 1
+    assert mine[1]["queue_position"] is None
+    assert mine[0]["owner_name"] == "MDX"
+
+    all_rows = queue.list(user, "all")
+    assert [row["kind"] for row in all_rows] == ["extract", "merge", "adopt"]
+    assert all_rows[1]["queue_position"] == 2
+
+
+def test_tasks_api_returns_owner_and_positions(client, monkeypatch):
+    from vrstudio.web.identity import User
+
+    user = User("u1", "MDX")
+    queue = tasks_mod.TaskQueue()
+    queue.current = tasks_mod.Task("extract", "p1", ["echo"], owner=user)
+    queue.current.state = "running"
+    queue.pending = [tasks_mod.Task("merge", "p2", ["echo"], owner=user)]
+    queue.history = [tasks_mod.Task("adopt", "p3", ["echo"], owner=user)]
+    queue.history[0].state = "done"
+    monkeypatch.setattr(web_app, "QUEUE", queue)
+
+    response = client.get("/api/tasks?scope=all")
+    assert response.status_code == 200
+    tasks = response.json()["tasks"]
+    assert [task["kind"] for task in tasks] == ["extract", "merge", "adopt"]
+    assert tasks[0]["queue_position"] == 1
+    assert tasks[1]["queue_position"] == 2
+    assert tasks[2]["queue_position"] is None
+    assert tasks[0]["owner_name"] == "MDX"
+    assert client.get("/api/tasks?scope=bad").status_code == 400

@@ -1532,7 +1532,8 @@ async def api_keyframe_run(request):
         argv = await asyncio.to_thread(_keyframe_argv, name, body)
     except (CaseError, OSError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    QUEUE.submit("keyframe", name, argv)
+    QUEUE.submit("keyframe", name, argv, owner=current_user(request),
+                 request_id=getattr(request.state, "rid", None))
     return JSONResponse({"submitted": "keyframe", "case": name})
 
 
@@ -1693,7 +1694,9 @@ async def api_keyframe_pick(request):
                     return JSONResponse(
                         {"error": "首帧与尾帧宽高不一致，请重新出图"}, status_code=400)
         info = await asyncio.to_thread(_keyframe_accept, name, role, round_name,
-                                       index, target)
+                                       index, target,
+                                       current_user(request),
+                                       getattr(request.state, "rid", None))
     except (CaseError, OSError, VideoIOError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     finally:
@@ -1702,7 +1705,8 @@ async def api_keyframe_pick(request):
 
 
 def _keyframe_accept(name: str, role: str, round_name: str, index: int,
-                     target: Path) -> dict:
+                     target: Path, owner=None,
+                     request_id: str | None = None) -> dict:
     """落素材、更新 keyframe.toml；首帧换新时清掉旧尾帧并自动排队尾帧批次。"""
     case = case_mod.load(name, _ctx["cases_root"])
     cdir = case.dir(_ctx["cases_root"])
@@ -1734,7 +1738,8 @@ def _keyframe_accept(name: str, role: str, round_name: str, index: int,
                             "补齐后点「生成尾帧候选」")
                 else:
                     argv = _keyframe_argv(name, {"step": "last"})
-                    QUEUE.submit("keyframe", name, argv)
+                    QUEUE.submit("keyframe", name, argv, owner=owner,
+                                 request_id=request_id)
                     queued, hint = True, "首帧已定稿；尾帧已自动开始生成"
             except CaseError as exc:
                 hint = f"首帧已定稿；尾帧没有自动开始：{exc}"
@@ -2053,15 +2058,25 @@ async def api_run(request):
     except CaseError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     follow = await asyncio.to_thread(_assemble_followup, name) if op == "merge" else None
+    owner = current_user(request)
+    request_id = getattr(request.state, "rid", None)
     if follow:
-        QUEUE.submit(op, name, argv, follow_up=follow)
+        QUEUE.submit(op, name, argv, follow_up=follow, owner=owner,
+                     request_id=request_id)
     else:
-        QUEUE.submit(op, name, argv)
+        QUEUE.submit(op, name, argv, owner=owner, request_id=request_id)
     return JSONResponse({"submitted": op, "case": name})
 
 
 async def api_task(request):
     return JSONResponse(QUEUE.status())
+
+
+async def api_tasks(request):
+    scope = request.query_params.get("scope", "all")
+    if scope not in ("all", "mine"):
+        return JSONResponse({"error": "scope 必须是 all 或 mine"}, status_code=400)
+    return JSONResponse({"tasks": QUEUE.list(current_user(request), scope)})
 
 
 async def api_me(request):
@@ -2251,6 +2266,7 @@ routes = [
     Route("/api/case/{name}/run", api_run, methods=["POST"]),
     Route("/api/case/{name}/proxy", api_proxy, methods=["GET", "POST"]),
     Route("/api/task", api_task),
+    Route("/api/tasks", api_tasks),
     Route("/api/me", api_me, methods=["GET", "POST"]),
     Route("/api/client-log", api_client_log, methods=["POST"]),
     Route("/api/browse", api_browse),
