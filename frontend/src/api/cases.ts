@@ -1,9 +1,4 @@
-import type {
-  CaseBrief,
-  CreateCasePayload,
-  ModesResponse,
-  SourcesResponse,
-} from '@/types/case'
+import type { CaseBrief, CreateCasePayload, ModesResponse, SourcesResponse } from '@/types/case'
 import { getJson, postJson } from './client'
 
 export function fetchCases(): Promise<CaseBrief[]> {

@@ -35,7 +35,8 @@ export function saveParams(name: string, payload: SaveParamsPayload): Promise<Ca
   return postJson<CaseInfo>(`${casePath(name)}/params`, payload)
 }
 
-export type RunOperation = 'dry_run' | 'submit' | 'adopt' | 'extract' | 'merge' | 'pad' | 'recompose'
+export type RunOperation =
+  'dry_run' | 'submit' | 'adopt' | 'extract' | 'merge' | 'pad' | 'recompose'
 
 export interface RunPayload {
   mode?: string

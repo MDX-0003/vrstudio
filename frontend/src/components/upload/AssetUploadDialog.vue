@@ -3,13 +3,7 @@ import { computed, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, UploadFilled } from '@element-plus/icons-vue'
 import { addAssetsByUploads } from '@/api/case'
-import {
-  cancelUpload,
-  completeUpload,
-  createUpload,
-  getUpload,
-  putChunk,
-} from '@/api/uploads'
+import { cancelUpload, completeUpload, createUpload, getUpload, putChunk } from '@/api/uploads'
 import { ASSET_ROLE_OPTIONS, defaultRole } from '@/constants/assetRoles'
 import type { CaseInfo } from '@/types/case-info'
 
@@ -283,11 +277,18 @@ async function beforeClose(done: () => void): Promise<void> {
           </div>
           <el-progress
             :percentage="progressOf(row)"
-            :status="row.status === 'error' ? 'exception' : row.status === 'done' ? 'success' : undefined"
+            :status="
+              row.status === 'error' ? 'exception' : row.status === 'done' ? 'success' : undefined
+            "
             :stroke-width="6"
           />
         </div>
-        <el-select v-model="row.role" size="small" style="width: 132px" :disabled="row.status === 'uploading'">
+        <el-select
+          v-model="row.role"
+          size="small"
+          style="width: 132px"
+          :disabled="row.status === 'uploading'"
+        >
           <el-option
             v-for="role in ASSET_ROLE_OPTIONS"
             :key="role.value"
@@ -295,7 +296,9 @@ async function beforeClose(done: () => void): Promise<void> {
             :value="role.value"
           />
         </el-select>
-        <el-button v-if="row.status === 'error'" link type="primary" @click="retry(row)">重试</el-button>
+        <el-button v-if="row.status === 'error'" link type="primary" @click="retry(row)"
+          >重试</el-button
+        >
         <el-button link type="danger" :icon="Delete" aria-label="移除" @click="removeRow(row)" />
       </div>
     </div>
@@ -321,7 +324,9 @@ async function beforeClose(done: () => void): Promise<void> {
   background: var(--color-surface-muted);
   color: var(--color-text-muted);
   cursor: pointer;
-  transition: border-color var(--duration-fast) ease, background var(--duration-fast) ease;
+  transition:
+    border-color var(--duration-fast) ease,
+    background var(--duration-fast) ease;
 }
 
 .dropzone:hover,

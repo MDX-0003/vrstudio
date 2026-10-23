@@ -2,7 +2,17 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Bottom, Check, Delete, Picture, Plus, Refresh, Top, VideoCamera, VideoPlay } from '@element-plus/icons-vue'
+import {
+  Bottom,
+  Check,
+  Delete,
+  Picture,
+  Plus,
+  Refresh,
+  Top,
+  VideoCamera,
+  VideoPlay,
+} from '@element-plus/icons-vue'
 import {
   changeAssetRole,
   fetchCase,
@@ -71,7 +81,9 @@ let hydrating = true
 const recentOutput = computed(() => {
   const outputs = caseInfo.value?.outputs ?? []
   if (!outputs.length) return null
-  const adopted = String(caseInfo.value?.adopt_round ?? '').split(/[\\/]/).pop()
+  const adopted = String(caseInfo.value?.adopt_round ?? '')
+    .split(/[\\/]/)
+    .pop()
   return outputs.find((item) => item.version === adopted) ?? outputs[outputs.length - 1]
 })
 const rounds = computed<RoundSummary[]>(() => caseInfo.value?.rounds?.rounds ?? [])
@@ -84,10 +96,13 @@ const latestUsableRound = computed<RoundSummary | null>(() => {
   return rows[0] ?? null
 })
 const adoptedRoundName = computed(() =>
-  String(caseInfo.value?.adopt_round ?? '').split(/[\\/]/).pop(),
+  String(caseInfo.value?.adopt_round ?? '')
+    .split(/[\\/]/)
+    .pop(),
 )
 const canAdopt = computed(
-  () => Boolean(latestUsableRound.value) && latestUsableRound.value?.round !== adoptedRoundName.value,
+  () =>
+    Boolean(latestUsableRound.value) && latestUsableRound.value?.round !== adoptedRoundName.value,
 )
 
 const generationParams = ref<GenerationParams | null>(null)
@@ -461,7 +476,9 @@ async function savePrompt(): Promise<void> {
 
 const previewSignature = computed(() =>
   JSON.stringify({
-    assets: assets.value.filter((item) => item.selected).map((item) => [item.id, item.roleRaw, item.meta]),
+    assets: assets.value
+      .filter((item) => item.selected)
+      .map((item) => [item.id, item.roleRaw, item.meta]),
     params: [mode.value, ratio.value, resolution.value, scale.value, duration.value],
     prompt: [promptVars.value.map((item) => [item.key, item.value]), promptRendered.value],
     quota: [selectedProject.value, selectedEpisode.value, selectedSession.value],
@@ -493,9 +510,7 @@ function submitBody() {
   return body
 }
 
-const running = computed(() =>
-  ['预演中', '提交中', '排队中', '运行中'].includes(status.value),
-)
+const running = computed(() => ['预演中', '提交中', '排队中', '运行中'].includes(status.value))
 
 const activeKind = ref<'dry_run' | 'submit' | 'adopt' | null>(null)
 const activeStartedAt = ref(0)
@@ -671,7 +686,10 @@ async function moveAsset(asset: AssetRow, delta: number): Promise<void> {
   next.splice(target, 0, moved)
   assets.value = next
   try {
-    const data = await reorderAssets(caseName.value, next.map((item) => item.id))
+    const data = await reorderAssets(
+      caseName.value,
+      next.map((item) => item.id),
+    )
     applyAssetData(data)
   } catch (err) {
     assets.value = previous
@@ -956,7 +974,9 @@ function roundResultText(round: RoundSummary): string {
               <video
                 v-if="recentOutput"
                 class="output-video"
-                :src="recentOutput.proxy_state === 'ready' ? recentOutput.proxy_url : recentOutput.url"
+                :src="
+                  recentOutput.proxy_state === 'ready' ? recentOutput.proxy_url : recentOutput.url
+                "
                 controls
                 preload="metadata"
               />
@@ -977,7 +997,9 @@ function roundResultText(round: RoundSummary): string {
                   选用成片
                 </el-button>
                 <span class="muted">
-                  {{ canAdopt ? `最新可用轮次：${latestUsableRound?.round}` : '当前成片已是采用结果' }}
+                  {{
+                    canAdopt ? `最新可用轮次：${latestUsableRound?.round}` : '当前成片已是采用结果'
+                  }}
                 </span>
               </div>
             </div>
@@ -1013,7 +1035,18 @@ function roundResultText(round: RoundSummary): string {
           <div class="panel">
             <div class="panel-head">
               <h2 class="panel-title">最近任务</h2>
-              <el-tag v-if="activeTask" size="small" effect="light" :type="activeTask.status === 'failed' ? 'danger' : activeTask.status === 'done' ? 'success' : 'primary'">
+              <el-tag
+                v-if="activeTask"
+                size="small"
+                effect="light"
+                :type="
+                  activeTask.status === 'failed'
+                    ? 'danger'
+                    : activeTask.status === 'done'
+                      ? 'success'
+                      : 'primary'
+                "
+              >
                 {{ activeTask.kind }} · {{ activeTask.status }}
               </el-tag>
               <span v-else class="muted">无</span>
@@ -1024,7 +1057,9 @@ function roundResultText(round: RoundSummary): string {
                 <div class="task-summary">
                   <span>{{ activeTask.kind }}</span>
                   <span class="muted mono">{{ activeTask.id }}</span>
-                  <span v-if="activeTask.queue_position" class="muted">排队第 {{ activeTask.queue_position }} 位</span>
+                  <span v-if="activeTask.queue_position" class="muted"
+                    >排队第 {{ activeTask.queue_position }} 位</span
+                  >
                 </div>
                 <el-alert
                   v-if="activeTask.error"
@@ -1033,7 +1068,9 @@ function roundResultText(round: RoundSummary): string {
                   :title="activeTask.error"
                   class="task-error"
                 />
-                <pre v-if="activeTask.tail.length" class="task-tail">{{ activeTask.tail.join('\n') }}</pre>
+                <pre v-if="activeTask.tail.length" class="task-tail">{{
+                  activeTask.tail.join('\n')
+                }}</pre>
               </template>
             </div>
           </div>
@@ -1157,7 +1194,8 @@ function roundResultText(round: RoundSummary): string {
             </el-button>
             <span class="muted quota-hint">
               已获取 {{ projects.length }} 个项目<template v-if="lastRefreshed">
-                · 刷新于 {{ lastRefreshed }}</template>
+                · 刷新于 {{ lastRefreshed }}</template
+              >
               <template v-if="paramsSaving"> · 参数保存中</template>
             </span>
             <span v-if="sessionError" class="session-error">{{ sessionError }}</span>
@@ -1170,7 +1208,7 @@ function roundResultText(round: RoundSummary): string {
               <el-button
                 size="small"
                 :loading="activeKind === 'dry_run'"
-                :disabled="running && activeKind !== 'dry_run' || !generateGate?.ready"
+                :disabled="(running && activeKind !== 'dry_run') || !generateGate?.ready"
                 @click="dryRun"
               >
                 预演检查（不扣费）
@@ -1179,7 +1217,7 @@ function roundResultText(round: RoundSummary): string {
                 type="primary"
                 size="small"
                 :loading="activeKind === 'submit'"
-                :disabled="running && activeKind !== 'submit' || !generateGate?.ready"
+                :disabled="(running && activeKind !== 'submit') || !generateGate?.ready"
                 @click="submit"
               >
                 提交生成
@@ -1207,7 +1245,11 @@ function roundResultText(round: RoundSummary): string {
           <pre>{{ promptRendered || '还没有模板正文' }}</pre>
         </section>
         <section class="vars-block">
-          <el-empty v-if="!promptVars.length" description="没有可编辑的提示词变量" :image-size="72" />
+          <el-empty
+            v-if="!promptVars.length"
+            description="没有可编辑的提示词变量"
+            :image-size="72"
+          />
           <div v-for="item in promptVars" :key="item.key" class="var-card">
             <div class="var-head">
               <span class="var-label">{{ item.label }}</span>
@@ -1229,11 +1271,7 @@ function roundResultText(round: RoundSummary): string {
       </template>
     </el-drawer>
 
-    <AssetUploadDialog
-      v-model="uploadOpen"
-      :case-name="caseName"
-      @added="onAssetsAdded"
-    />
+    <AssetUploadDialog v-model="uploadOpen" :case-name="caseName" @added="onAssetsAdded" />
   </div>
 </template>
 
@@ -1371,7 +1409,9 @@ function roundResultText(round: RoundSummary): string {
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  transition: background var(--duration-fast) ease, opacity var(--duration-fast) ease;
+  transition:
+    background var(--duration-fast) ease,
+    opacity var(--duration-fast) ease;
 }
 
 .asset-row:hover {

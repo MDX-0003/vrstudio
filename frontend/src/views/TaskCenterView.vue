@@ -24,7 +24,10 @@ const statusMeta: Record<
   failed: { text: '失败', type: 'danger' },
 }
 
-function statusOf(status: string): { text: string; type: 'primary' | 'warning' | 'success' | 'danger' } {
+function statusOf(status: string): {
+  text: string
+  type: 'primary' | 'warning' | 'success' | 'danger'
+} {
   return statusMeta[status as TaskState] ?? statusMeta.queued
 }
 
@@ -116,12 +119,7 @@ watch(scope, () => {
     </div>
 
     <div class="panel">
-      <el-table
-        v-loading="loading"
-        :data="tasks"
-        row-key="id"
-        @row-click="openTask"
-      >
+      <el-table v-loading="loading" :data="tasks" row-key="id" @row-click="openTask">
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
             <el-tag :type="statusOf(row.status).type" effect="light" size="small">
@@ -204,7 +202,9 @@ watch(scope, () => {
         />
 
         <h3 class="log-title">日志尾部</h3>
-        <pre class="log-tail">{{ selected.tail.length ? selected.tail.join('\n') : '没有日志输出' }}</pre>
+        <pre class="log-tail">{{
+          selected.tail.length ? selected.tail.join('\n') : '没有日志输出'
+        }}</pre>
         <p class="muted log-note">完整日志下载在 Phase 5 接入。</p>
       </template>
     </el-drawer>

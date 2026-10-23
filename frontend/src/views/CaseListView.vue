@@ -190,12 +190,7 @@ onMounted(loadCases)
     </div>
 
     <div class="panel">
-      <el-table
-        v-loading="loading"
-        :data="filteredRows"
-        row-key="name"
-        @row-click="openCase"
-      >
+      <el-table v-loading="loading" :data="filteredRows" row-key="name" @row-click="openCase">
         <el-table-column label="Case" min-width="180">
           <template #default="{ row }">
             <div class="case-name">{{ row.name }}</div>
@@ -230,9 +225,7 @@ onMounted(loadCases)
           </template>
         </el-table-column>
         <template #empty>
-          <el-empty
-            :description="error ? '读取失败，请点上方重试' : '还没有 case，先新建一个'"
-          />
+          <el-empty :description="error ? '读取失败，请点上方重试' : '还没有 case，先新建一个'" />
         </template>
       </el-table>
     </div>
@@ -258,9 +251,7 @@ onMounted(loadCases)
           >
             <el-option v-for="file in sources" :key="file" :label="file" :value="file" />
           </el-select>
-          <div v-if="!sources.length" class="field-hint">
-            sources/ 目录里还没有视频。
-          </div>
+          <div v-if="!sources.length" class="field-hint">sources/ 目录里还没有视频。</div>
         </el-form-item>
         <el-form-item v-else label="生成模式" required>
           <el-select
@@ -276,9 +267,7 @@ onMounted(loadCases)
               :value="mode.value"
             />
           </el-select>
-          <div v-if="!modes.length" class="field-hint">
-            模型能力里没有可选模式。
-          </div>
+          <div v-if="!modes.length" class="field-hint">模型能力里没有可选模式。</div>
         </el-form-item>
       </el-form>
       <template #footer>

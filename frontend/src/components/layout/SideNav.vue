@@ -122,7 +122,9 @@ function goOldConsole(): void {
   border-radius: var(--radius-md);
   color: var(--color-text-muted);
   font-size: var(--text-base);
-  transition: background var(--duration-fast) ease, color var(--duration-fast) ease;
+  transition:
+    background var(--duration-fast) ease,
+    color var(--duration-fast) ease;
 }
 
 .nav-item:hover {
