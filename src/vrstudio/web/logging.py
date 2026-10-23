@@ -167,10 +167,19 @@ class RequestLogMiddleware:
             level = logging.INFO
         if path.startswith(_DEBUG_PREFIXES):
             level = logging.DEBUG
+        user = scope.get("state", {}).get("user")
+        case = ""
+        parts = [p for p in path.split("/") if p]
+        if len(parts) >= 3 and parts[0] == "api" and parts[1] == "case":
+            case = parts[2]
         self.log.log(level, "request", extra={"data": {
-            "event": "request", "rid": rid, "method": scope.get("method", ""),
+            "event": "request", "rid": rid, "request_id": rid,
+            "method": scope.get("method", ""),
             "path": target[:1000], "status": status,
-            "ms": round(ms, 1), "bytes": size, "slow": slow,
+            "ms": round(ms, 1), "duration_ms": round(ms, 1),
+            "bytes": size, "slow": slow,
+            "user_id": getattr(user, "id", None), "case": case,
+            "error": None if status < 400 else f"HTTP {status}",
         }})
 
 

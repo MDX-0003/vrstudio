@@ -7,6 +7,7 @@ are otherwise indistinguishable from a hang.
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -109,15 +110,28 @@ class RateMeter:
 
 def logs_dir() -> Path:
     """<project root>/logs — the repo root in a source checkout, cwd/logs as a
-    fallback for exotic installs."""
-    root = Path(__file__).resolve().parents[2]
-    d = root / "logs" if (root / "pyproject.toml").exists() else Path.cwd() / "logs"
-    d.mkdir(exist_ok=True)
+    fallback for exotic installs. ``VRSTUDIO_LOGS_DIR`` overrides it for tests."""
+    override = os.environ.get("VRSTUDIO_LOGS_DIR")
+    if override:
+        d = Path(override)
+    else:
+        root = Path(__file__).resolve().parents[2]
+        d = root / "logs" if (root / "pyproject.toml").exists() else Path.cwd() / "logs"
+    d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def open_log_file(stem: str):
-    """Create logs/<stem>_<timestamp>.log and return an open text handle."""
+    """Create logs/<stem>_<timestamp>.log and return an open text handle.
+
+    Web 任务通过 ``VRSTUDIO_CLI_LOG_PATH`` 指定同一个任务日志，CLI 不再另建
+    ``logs/extract_*``、``logs/merge_*`` 等文件；控制台模式仍按原规则落盘。
+    """
+    target = os.environ.get("VRSTUDIO_CLI_LOG_PATH")
+    if target:
+        path = Path(target)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return open(path, "a", encoding="utf-8", newline="\n"), path
     path = logs_dir() / f"{stem}_{time.strftime('%Y%m%d-%H%M%S')}.log"
     fh = open(path, "w", encoding="utf-8")
     return fh, path

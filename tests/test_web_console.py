@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import types
 from fractions import Fraction
 from pathlib import Path
@@ -799,6 +800,41 @@ def test_task_view_includes_billing_attribution():
     assert view["project_id"] == 12
     assert view["episode_id"] == 3
     assert view["session_id"] == 456
+
+
+def test_task_log_path_uses_tasks_day_directory(tmp_path):
+    path = tasks_mod._task_log_path("abc123", "extract", "p1")
+    assert path.parent.name == time.strftime("%Y%m%d")
+    assert path.parent.parent.name == "tasks"
+    assert path.name == "abc123_extract_p1.log"
+
+
+def test_cli_log_appends_to_web_task_log(tmp_path, monkeypatch):
+    from vrstudio.progress import open_log_file
+
+    target = tmp_path / "task.log"
+    monkeypatch.setenv("VRSTUDIO_CLI_LOG_PATH", str(target))
+    fh, path = open_log_file("extract_p1")
+    fh.write("cli line\n")
+    fh.close()
+    assert path == target
+    assert target.read_text(encoding="utf-8") == "cli line\n"
+
+
+def test_task_detail_and_log_endpoints(client, tmp_path):
+    task = tasks_mod.Task("submit", "p1", ["echo"])
+    task.out_path = tmp_path / "task.log"
+    task.out_path.write_text("line1\nline2\nline3", encoding="utf-8")
+    task.state = "done"
+    tasks_mod.QUEUE.history.append(task)
+    try:
+        r = client.get(f"/api/tasks/{task.id}")
+        assert r.status_code == 200 and r.json()["kind"] == "submit"
+        r = client.get(f"/api/tasks/{task.id}/log?tail=2")
+        assert r.status_code == 200 and r.text == "line2\nline3"
+        assert client.get("/api/tasks/nope/log").status_code == 404
+    finally:
+        tasks_mod.QUEUE.history.remove(task)
 
 
 # ── step_files：两套 flow 的文件规范必须分流 ─────────────────────────────

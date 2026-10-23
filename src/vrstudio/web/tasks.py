@@ -12,6 +12,7 @@ submit 增参即可；调度策略已是单队列先进先出，无需改动。
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import sys
 import threading
@@ -31,6 +32,14 @@ log = logging.getLogger(TASK_LOGGER)
 
 def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _task_log_path(task_id: str, kind: str, case: str) -> Path:
+    day = time.strftime("%Y%m%d")
+    directory = logs_dir() / "tasks" / day
+    directory.mkdir(parents=True, exist_ok=True)
+    safe_case = re.sub(r"[^\w.-]", "_", case)
+    return directory / f"{task_id}_{kind}_{safe_case}.log"
 
 
 class Task:
@@ -63,18 +72,21 @@ class Task:
         self.proc: subprocess.Popen | None = None
 
     def _run(self):
-        self.out_path = (logs_dir() /
-                         f"web_{self.kind}_{self.case}_{time.strftime('%Y%m%d-%H%M%S')}.log")
+        self.out_path = _task_log_path(self.id, self.kind, self.case)
         log.info("task.start", extra={"data": {
             "event": "task.start", "task_id": self.id, "kind": self.kind,
             "case": self.case, "owner_id": self.owner_id,
+            "user_id": self.owner_id, "op": self.kind,
             "request_id": self.request_id, "log": str(self.out_path),
+            "log_ref": str(self.out_path),
         }})
         started = time.monotonic()
         with open(self.out_path, "w", encoding="utf-8", newline="") as fh:
+            env = utf8_env()
+            env["VRSTUDIO_CLI_LOG_PATH"] = str(self.out_path)
             self.proc = subprocess.Popen(
                 self.argv, stdout=fh, stderr=subprocess.STDOUT,
-                cwd=str(REPO_ROOT), env=utf8_env())
+                cwd=str(REPO_ROOT), env=env)
             self.state = "running"
             self.started = time.time()
             self.started_at = _now()
@@ -84,9 +96,10 @@ class Task:
         data = {
             "event": "task.finish", "task_id": self.id, "kind": self.kind,
             "case": self.case, "owner_id": self.owner_id,
+            "user_id": self.owner_id, "op": self.kind,
             "request_id": self.request_id, "rc": self.returncode,
             "ms": round((time.monotonic() - started) * 1000, 1),
-            "log": str(self.out_path),
+            "log": str(self.out_path), "log_ref": str(self.out_path),
         }
         if self.returncode != 0:
             tail = self.tail(5)
@@ -165,6 +178,18 @@ class TaskQueue:
                 self._thread = threading.Thread(target=self._drain, daemon=True)
                 self._thread.start()
             return task
+
+    def get(self, task_id: str) -> Task | None:
+        with self._lock:
+            if self.current is not None and self.current.id == task_id:
+                return self.current
+            for task in self.pending:
+                if task.id == task_id:
+                    return task
+            for task in reversed(self.history):
+                if task.id == task_id:
+                    return task
+        return None
 
     def list(self, user=None, scope: str = "all") -> list[dict]:
         """任务视图：当前任务、排队任务、最近历史；history 新→旧。"""

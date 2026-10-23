@@ -12,6 +12,13 @@ import numpy as np
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _temp_logs(tmp_path, monkeypatch):
+    """pytest 与本地实验不写生产 logs/。"""
+    monkeypatch.setenv("VRSTUDIO_LOGS_DIR", str(tmp_path / "logs"))
+    yield
+
+
 def synthetic_erp(width: int = 384, height: int = 192, seed: int = 0) -> np.ndarray:
     """A closed ERP frame: every horizontal term has period ``width``."""
     rng = np.random.default_rng(seed)

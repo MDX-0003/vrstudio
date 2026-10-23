@@ -218,7 +218,16 @@ watch(scope, () => {
         <pre class="log-tail">{{
           selected.tail.length ? selected.tail.join('\n') : '没有日志输出'
         }}</pre>
-        <p class="muted log-note">完整日志下载在 Phase 5 接入。</p>
+        <p class="log-note">
+          <el-link
+            :href="`/api/tasks/${selected.id}/log`"
+            target="_blank"
+            type="primary"
+            underline="never"
+          >
+            打开完整日志
+          </el-link>
+        </p>
       </template>
     </el-drawer>
   </div>

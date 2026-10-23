@@ -303,8 +303,7 @@ def ensure_file_proxy(case: Case, source: str | Path, root=None,
         build = _builds.get(key)
         if build is not None and build.state == "building":
             return "building"
-        log_path = logs_dir() / (
-            f"proxy_{case.name}_{fp.source.stem}_{time.strftime('%Y%m%d-%H%M%S')}.log")
+        log_path = _proxy_log_path(case, fp.source.stem)
         build = Build("building", None, log_path)
         _builds[key] = build
         thread = threading.Thread(
@@ -314,6 +313,14 @@ def ensure_file_proxy(case: Case, source: str | Path, root=None,
         build.thread = thread
         thread.start()
     return "building"
+
+
+def _proxy_log_path(case: Case, stem: str) -> Path:
+    """代理构建的原始输出：统一进 logs/tasks/，不再散落 logs/proxy_*。"""
+    day = time.strftime("%Y%m%d")
+    directory = logs_dir() / "tasks" / day
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"proxy_{case.name}_{stem}_{time.strftime('%Y%m%d-%H%M%S')}.log"
 
 
 def _build_file(case: Case, root, fp: FileProxy, identity, build: Build,
@@ -402,8 +409,7 @@ def ensure_proxy(case: Case, root=None, on_done=None) -> str:
         build = _builds.get(case.name)
         if build is not None and build.state == "building":
             return "building"
-        log_path = logs_dir() / (
-            f"proxy_{case.name}_{time.strftime('%Y%m%d-%H%M%S')}.log")
+        log_path = _proxy_log_path(case, "source")
         build = Build("building", None, log_path)
         _builds[case.name] = build
         thread = threading.Thread(

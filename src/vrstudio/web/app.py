@@ -33,6 +33,7 @@ from starlette.responses import (
     FileResponse,
     HTMLResponse,
     JSONResponse,
+    PlainTextResponse,
     RedirectResponse,
     Response,
 )
@@ -2381,6 +2382,31 @@ async def api_tasks(request):
     return JSONResponse({"tasks": QUEUE.list(current_user(request), scope)})
 
 
+async def api_task_detail(request):
+    task = QUEUE.get(request.path_params["task_id"])
+    if task is None:
+        return JSONResponse({"error": "没有这个任务"}, status_code=404)
+    return JSONResponse(task.view())
+
+
+async def api_task_log(request):
+    task = QUEUE.get(request.path_params["task_id"])
+    if task is None:
+        return JSONResponse({"error": "没有这个任务"}, status_code=404)
+    if task.out_path is None or not task.out_path.is_file():
+        return JSONResponse({"error": "这个任务还没有日志"}, status_code=404)
+    raw = request.query_params.get("tail")
+    text = task.out_path.read_text(encoding="utf-8", errors="replace")
+    if raw is not None:
+        try:
+            count = max(1, int(raw))
+        except ValueError:
+            return JSONResponse({"error": "tail 必须是整数"}, status_code=400)
+        lines = text.splitlines()
+        text = "\n".join(lines[-count:])
+    return PlainTextResponse(text)
+
+
 async def api_me(request):
     user = current_user(request)
     if request.method == "GET":
@@ -2574,6 +2600,8 @@ routes = [
     Route("/api/case/{name}/proxy", api_proxy, methods=["GET", "POST"]),
     Route("/api/task", api_task),
     Route("/api/tasks", api_tasks),
+    Route("/api/tasks/{task_id}", api_task_detail),
+    Route("/api/tasks/{task_id}/log", api_task_log),
     Route("/api/me", api_me, methods=["GET", "POST"]),
     Route("/api/client-log", api_client_log, methods=["POST"]),
     Route("/api/browse", api_browse),
