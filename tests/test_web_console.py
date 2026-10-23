@@ -792,6 +792,15 @@ def test_failed_task_tail_keeps_the_error_line(tmp_path):
     assert "ERROR mglc code" not in " ".join(t.tail(1))
 
 
+def test_keyframe_resolution_follows_first_asset_width(monkeypatch):
+    monkeypatch.setattr(web_app, "_media_meta", lambda path, kind: {"width": 1024})
+    assert web_app._keyframe_resolution_for(Path("a.png")) == "1K"
+    monkeypatch.setattr(web_app, "_media_meta", lambda path, kind: {"width": 2048})
+    assert web_app._keyframe_resolution_for(Path("a.png")) == "2K"
+    monkeypatch.setattr(web_app, "_media_meta", lambda path, kind: {"width": 3840})
+    assert web_app._keyframe_resolution_for(Path("a.png")) == "4K"
+
+
 def test_task_view_includes_billing_attribution():
     task = tasks_mod.Task("submit", "x", ["echo"], billing={
         "project_id": 12, "episode_id": 3, "session_id": 456,
