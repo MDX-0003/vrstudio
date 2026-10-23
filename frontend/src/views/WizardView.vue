@@ -559,6 +559,27 @@ watch(previewSignature, () => {
 
 const generateGate = computed(() => caseInfo.value?.gates?.generate)
 
+const firstLastFrameIssue = computed(() => {
+  if (mode.value !== 'firstLastFrame') return ''
+  const selected = assets.value.filter((asset) => asset.selected)
+  const first = selected.filter((asset) => asset.roleRaw === 'first_frame')
+  const last = selected.filter((asset) => asset.roleRaw === 'last_frame')
+  if (first.length !== 1 || last.length !== 1) {
+    return 'firstLastFrame 需要恰好一张首帧定稿和一张尾帧定稿'
+  }
+  if (selected.length !== 2) {
+    return 'firstLastFrame 不能带视频、mask 或其他素材'
+  }
+  return ''
+})
+
+const runBlockReason = computed(() => {
+  if (generateGate.value && !generateGate.value.ready) {
+    return generateGate.value.reason || '生成条件还没有满足'
+  }
+  return firstLastFrameIssue.value
+})
+
 function submitBody() {
   const body = {
     mode: mode.value,
@@ -669,8 +690,8 @@ function startTaskPolling(): void {
 
 async function execute(op: 'dry_run' | 'submit'): Promise<void> {
   if (running.value) return
-  if (generateGate.value && !generateGate.value.ready) {
-    ElMessage.warning(generateGate.value.reason || '生成条件还没有满足')
+  if (runBlockReason.value) {
+    ElMessage.warning(runBlockReason.value)
     return
   }
   if (!(await flushPromptSaves())) return
@@ -1357,7 +1378,7 @@ function roundResultText(round: RoundSummary): string {
                 <el-button
                   size="small"
                   :loading="activeKind === 'dry_run'"
-                  :disabled="(running && activeKind !== 'dry_run') || !generateGate?.ready"
+                  :disabled="(running && activeKind !== 'dry_run') || Boolean(runBlockReason)"
                   @click="dryRun"
                 >
                   预演检查（不扣费）
@@ -1366,15 +1387,15 @@ function roundResultText(round: RoundSummary): string {
                   type="primary"
                   size="small"
                   :loading="activeKind === 'submit'"
-                  :disabled="(running && activeKind !== 'submit') || !generateGate?.ready"
+                  :disabled="(running && activeKind !== 'submit') || Boolean(runBlockReason)"
                   @click="submit"
                 >
                   提交生成
                 </el-button>
               </div>
             </div>
-            <div v-if="generateGate && !generateGate.ready" class="gate-reason">
-              提交条件未满足：{{ generateGate.reason || '请先完成前一步' }}
+            <div v-if="runBlockReason" class="gate-reason">
+              提交条件未满足：{{ runBlockReason }}
             </div>
           </div>
         </div>
