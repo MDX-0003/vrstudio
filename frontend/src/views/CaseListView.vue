@@ -5,7 +5,7 @@ import { ElMessage } from 'element-plus'
 import { Plus, Refresh, Search } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import { createCaseRequest, fetchCases, fetchModes, fetchSources } from '@/api/cases'
-import { flowMeta } from '@/mocks/case'
+import { flowMeta } from '@/constants/flow'
 import type { CaseBrief, CaseRow, Flow, ModeOption } from '@/types/case'
 
 const router = useRouter()

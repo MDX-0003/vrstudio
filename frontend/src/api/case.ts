@@ -16,3 +16,7 @@ export function saveSubmitSelection(name: string, selected: string[]): Promise<C
 export function changeAssetRole(name: string, id: string, role: string): Promise<CaseInfo> {
   return postJson<CaseInfo>(`${casePath(name)}/assets`, { op: 'role', id, role })
 }
+
+export function savePromptVar(name: string, key: string, value: string): Promise<CaseInfo> {
+  return postJson<CaseInfo>(`${casePath(name)}/prompt`, { set: key, value })
+}

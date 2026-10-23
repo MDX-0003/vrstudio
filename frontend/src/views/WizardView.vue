@@ -3,11 +3,19 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Check, Picture, Refresh, VideoCamera, VideoPlay } from '@element-plus/icons-vue'
-import { changeAssetRole, fetchCase, saveSubmitSelection } from '@/api/case'
+import { changeAssetRole, fetchCase, savePromptVar, saveSubmitSelection } from '@/api/case'
 import { fetchSessions } from '@/api/sessions'
-import { flowMeta, mockCandidates, mockPromptVariables } from '@/mocks/case'
-import type { AssetRow, CandidateRound, Flow, PromptVariable } from '@/types/case'
-import type { AssetDetail, CaseInfo } from '@/types/case-info'
+import { flowMeta } from '@/constants/flow'
+import type { AssetRow, Flow, PromptVariable } from '@/types/case'
+import type {
+  AssetDetail,
+  CaseInfo,
+  GenerationParams,
+  InputOption,
+  ModeInfo,
+  OutputOption,
+  RoundSummary,
+} from '@/types/case-info'
 import type { EpisodeOption, ProjectOption, SessionOption } from '@/types/session'
 
 const route = useRoute()
@@ -32,12 +40,29 @@ const activeIndex = computed(() => {
 })
 
 const assets = ref<AssetRow[]>([])
-const promptVars = ref<PromptVariable[]>(mockPromptVariables.map((item) => ({ ...item })))
-const candidates = ref<CandidateRound[]>(mockCandidates.map((item) => ({ ...item })))
+const promptVars = ref<PromptVariable[]>([])
+const promptRendered = ref('')
+const promptRenderError = ref('')
+const promptSaving = ref(false)
+const pendingPromptSaves = new Map<string, string>()
+let promptTimer: ReturnType<typeof setTimeout> | null = null
 const caseInfo = ref<CaseInfo | null>(null)
 const caseLoading = ref(false)
 const caseError = ref('')
 const selectionSaving = ref(false)
+const paramsError = ref('')
+
+const recentOutput = computed(() => {
+  const outputs = caseInfo.value?.outputs ?? []
+  return outputs.length ? outputs[outputs.length - 1] : null
+})
+const rounds = computed<RoundSummary[]>(() => caseInfo.value?.rounds?.rounds ?? [])
+const roundsHint = computed(() => caseInfo.value?.rounds?.hint ?? '')
+
+const generationParams = ref<GenerationParams | null>(null)
+const modeOptions = ref<ModeInfo[]>([])
+const resolutionOptions = ref<OutputOption[]>([])
+const scaleOptions = ref<InputOption[]>([])
 
 const selectedCount = computed(() => assets.value.filter((asset) => asset.selected).length)
 const promptOpen = ref(false)
@@ -106,6 +131,45 @@ async function loadCase(): Promise<void> {
     flow.value = data.flow
     const selected = new Set(data.submit_selected ?? [])
     assets.value = (data.assets ?? []).map((asset) => toAssetRow(asset, selected))
+
+    const prompt = data.prompt
+    if (prompt?.error) {
+      promptRenderError.value = prompt.error
+    } else if (prompt) {
+      promptVars.value = Object.entries(prompt.vars ?? {}).map(([key, value]) => ({
+        key,
+        label: prompt.labels?.[key] || key,
+        help: prompt.help?.[key] || '',
+        value,
+      }))
+      promptRendered.value = prompt.rendered || prompt.template_text || ''
+      promptRenderError.value = prompt.render_error || ''
+    }
+
+    const params = data.generation_params
+    if (params?.error) {
+      paramsError.value = params.error
+    } else if (params) {
+      generationParams.value = params
+      modeOptions.value = params.modes ?? []
+      resolutionOptions.value = params.output ?? []
+      scaleOptions.value = params.input ?? []
+      const current = params.current
+      if (current) {
+        if (modeOptions.value.some((item) => item.value === current.mode)) {
+          mode.value = current.mode
+        }
+        if (resolutionOptions.value.some((item) => item.value === current.resolution)) {
+          resolution.value = current.resolution
+        }
+        if (scaleOptions.value.some((item) => item.value === current.scale)) {
+          scale.value = current.scale
+        }
+        ratio.value = current.aspect_ratio || 'auto'
+      }
+      duration.value = params.fixed?.duration_s ? String(params.fixed.duration_s) : 'auto'
+      paramsError.value = ''
+    }
   } catch (err) {
     caseError.value = err instanceof Error ? err.message : '读取 case 失败'
     assets.value = []
@@ -173,17 +237,91 @@ const currentEpisode = computed(() =>
 )
 const sessions = computed<SessionOption[]>(() => currentEpisode.value?.sessions ?? [])
 
-const templateText = computed(() =>
-  [
-    '【素材】<Video1> 是本次唯一的编辑母版；<Image1> 提供人物外观；mask 由装配器自动附带。',
-    '【任务】只编辑 <Video1> 中指定的主体，其余画面保持原样。',
-    `【主体】${promptVars.value[0]?.value ?? ''}`,
-    `【重绘结果】${promptVars.value[1]?.value ?? ''}`,
-    `【情节与动作】${promptVars.value[2]?.value ?? ''}`,
-    `【必须保持】${promptVars.value[4]?.value ?? ''}`,
-    `【允许变化】${promptVars.value[5]?.value ?? ''}`,
-  ].join('\n\n'),
-)
+const currentMode = computed(() => modeOptions.value.find((item) => item.value === mode.value))
+
+const ratioOptions = computed<string[]>(() => {
+  const ratios = currentMode.value?.ratios ?? []
+  return ratios.length ? ratios : ['auto']
+})
+
+const durationOptions = computed<{ value: string; label: string }[]>(() => {
+  const duration = currentMode.value?.duration
+  if (!duration || duration.type !== 'range' || !duration.min || !duration.max) {
+    return [{ value: 'auto', label: duration?.type === '' ? '自动（由母版决定）' : '自动' }]
+  }
+  const autoLabel = generationParams.value?.auto_duration_s
+    ? `自动（约 ${generationParams.value.auto_duration_s} 秒）`
+    : '自动'
+  const options = [{ value: 'auto', label: autoLabel }]
+  for (let value = duration.min; value <= duration.max; value += 1) {
+    options.push({ value: String(value), label: `${value} 秒` })
+  }
+  return options
+})
+
+function ratioLabel(value: string): string {
+  return value === 'auto' ? '跟随输入' : value
+}
+
+function scaleLabel(option: InputOption): string {
+  const base =
+    option.value === 'auto'
+      ? '自动'
+      : option.value === 'full'
+        ? '原始尺寸'
+        : option.value === 'half'
+          ? '一半'
+          : option.value
+  const size = option.width && option.height ? `${option.width}×${option.height}` : ''
+  if (!option.ok) {
+    return `${base}${size ? `（${size}）` : ''}：${option.reason || '不可用'}`
+  }
+  return size ? `${base}（${size}）` : base
+}
+
+function schedulePromptSave(key: string, value: string): void {
+  pendingPromptSaves.set(key, value)
+  if (promptTimer) clearTimeout(promptTimer)
+  promptTimer = setTimeout(() => {
+    void flushPromptSaves()
+  }, 400)
+}
+
+async function flushPromptSaves(): Promise<void> {
+  if (promptTimer) {
+    clearTimeout(promptTimer)
+    promptTimer = null
+  }
+  const entries = [...pendingPromptSaves.entries()]
+  pendingPromptSaves.clear()
+  if (!entries.length) return
+  promptSaving.value = true
+  try {
+    let latest: CaseInfo | null = null
+    for (const [key, value] of entries) {
+      latest = await savePromptVar(caseName.value, key, value)
+    }
+    if (latest) {
+      caseInfo.value = latest
+      promptRendered.value = latest.prompt?.rendered || promptRendered.value
+      promptRenderError.value = latest.prompt?.render_error || ''
+    }
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '保存提示词失败')
+  } finally {
+    promptSaving.value = false
+  }
+}
+
+watch(ratioOptions, (options) => {
+  if (!options.includes(ratio.value)) ratio.value = options[0] ?? 'auto'
+})
+
+watch(durationOptions, (options) => {
+  if (!options.some((item) => item.value === duration.value)) {
+    duration.value = options[0]?.value ?? 'auto'
+  }
+})
 
 function selectStep(key: string): void {
   router.push({ name: 'case', params: { name: caseName.value, step: key } })
@@ -193,7 +331,8 @@ function openPrompt(): void {
   promptOpen.value = true
 }
 
-function savePrompt(): void {
+async function savePrompt(): Promise<void> {
+  await flushPromptSaves()
   promptOpen.value = false
   status.value = '未预演'
   ElMessage.success('提示词已保存，预演状态回到未预演')
@@ -266,6 +405,27 @@ function statusTone(): string {
   if (status.value === '预演通过') return 'done'
   if (status.value === '已提交') return 'queued'
   return ''
+}
+
+function formatRoundTime(value: string): string {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString('zh-CN', { hour12: false })
+}
+
+function roundResultType(round: RoundSummary): 'success' | 'danger' | 'info' | 'warning' {
+  if (round.result === 'yes') return 'success'
+  if (round.stage === 'failed') return 'danger'
+  if (round.stage === 'prepared') return 'warning'
+  return 'info'
+}
+
+function roundResultText(round: RoundSummary): string {
+  if (round.result === 'yes') return '可用'
+  if (round.stage === 'failed') return '失败'
+  if (round.stage === 'prepared') return '已准备'
+  return '未出片'
 }
 </script>
 
@@ -377,6 +537,13 @@ function statusTone(): string {
               <el-button link type="primary" @click="openPrompt">展开编辑</el-button>
             </div>
             <div class="panel-body">
+              <el-alert
+                v-if="promptRenderError"
+                type="warning"
+                :closable="false"
+                :title="promptRenderError"
+                class="prompt-error"
+              />
               <div class="prompt-chips">
                 <span v-for="item in promptVars" :key="item.key" class="prompt-chip">
                   {{ item.label }}
@@ -403,56 +570,59 @@ function statusTone(): string {
           <div class="panel">
             <div class="panel-head">
               <h2 class="panel-title">最近成片</h2>
-              <el-tag type="success" effect="light" size="small">可用</el-tag>
+              <el-tag
+                v-if="recentOutput"
+                :type="recentOutput.partial ? 'warning' : 'success'"
+                effect="light"
+                size="small"
+              >
+                {{ recentOutput.partial ? '仅中间段' : '可用' }}
+              </el-tag>
+              <span v-else class="muted">无</span>
             </div>
             <div class="panel-body">
-              <div class="output-frame">
+              <video
+                v-if="recentOutput"
+                class="output-video"
+                :src="recentOutput.proxy_state === 'ready' ? recentOutput.proxy_url : recentOutput.url"
+                controls
+                preload="metadata"
+              />
+              <div v-else class="output-frame">
                 <el-icon :size="34"><VideoPlay /></el-icon>
-                <span>16:31 · 1920×1080 · 9.83 秒</span>
+                <span>还没有成片</span>
               </div>
+              <div v-if="recentOutput" class="output-meta mono">{{ recentOutput.file }}</div>
               <div class="output-actions">
-                <el-button type="primary" plain size="small">选用成片</el-button>
-                <span class="muted">采用后结果写回 case</span>
+                <el-button type="primary" plain size="small" disabled>选用成片</el-button>
+                <span class="muted">采用接口下一步接入</span>
               </div>
             </div>
           </div>
 
           <div class="panel">
             <div class="panel-head">
-              <h2 class="panel-title">候选</h2>
-              <span class="muted">{{ candidates.length }} 批</span>
+              <h2 class="panel-title">生成轮次</h2>
+              <span class="muted">{{ rounds.length }} 轮</span>
             </div>
             <div class="panel-body candidate-list">
-              <div v-for="round in candidates" :key="round.id" class="candidate">
+              <div v-if="!rounds.length" class="candidate-empty">
+                <el-empty description="还没有生成轮次" :image-size="72" />
+                <p v-if="roundsHint" class="muted rounds-hint">{{ roundsHint }}</p>
+              </div>
+              <div v-for="round in rounds" :key="round.round" class="candidate">
                 <div class="candidate-head">
-                  <span>{{ round.title }}</span>
-                  <span class="muted mono">{{ round.time }}</span>
+                  <span class="round-name">{{ round.round }}</span>
+                  <span class="muted mono">{{ formatRoundTime(round.updated) }}</span>
                 </div>
-                <div class="candidate-grid">
-                  <div
-                    v-for="n in round.images"
-                    :key="n"
-                    class="candidate-tile"
-                    :class="{ picked: round.status === 'picked' && n === 1 }"
-                  >
-                    <el-icon :size="18"><Picture /></el-icon>
-                  </div>
-                </div>
-                <div class="candidate-foot">
-                  <el-tag
-                    :type="
-                      round.status === 'failed'
-                        ? 'danger'
-                        : round.status === 'picked'
-                          ? 'success'
-                          : 'info'
-                    "
-                    effect="light"
-                    size="small"
-                  >
-                    {{ round.status === 'failed' ? '失败' : round.status === 'picked' ? '已定稿' : '待挑选' }}
+                <div class="round-tags">
+                  <el-tag size="small" effect="light">{{ round.stage || '未知阶段' }}</el-tag>
+                  <el-tag size="small" effect="light" :type="roundResultType(round)">
+                    {{ roundResultText(round) }}
                   </el-tag>
-                  <el-button link type="primary" size="small">查看</el-button>
+                  <span v-if="round.gate && round.gate !== '?'" class="muted mono">
+                    gate={{ round.gate }}
+                  </span>
                 </div>
               </div>
             </div>
@@ -465,44 +635,62 @@ function statusTone(): string {
           <div class="submit-row">
             <label class="ctl">
               <span>模式</span>
-              <el-select v-model="mode" size="small" style="width: 168px">
-                <el-option label="firstLastFrame · 首尾帧" value="firstLastFrame" />
-                <el-option label="VideoEdit · 结构锁定编辑" value="videoEdit" />
-                <el-option label="allMediaRef · 多素材参考" value="allMediaRef" />
+              <el-select v-model="mode" size="small" style="width: 180px">
+                <el-option
+                  v-for="item in modeOptions"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+                <el-option v-if="!modeOptions.length" label="暂无模式" value="" disabled />
               </el-select>
             </label>
             <label class="ctl">
               <span>比例</span>
-              <el-select v-model="ratio" size="small" style="width: 100px">
-                <el-option label="16:9" value="16:9" />
-                <el-option label="21:9" value="21:9" />
-                <el-option label="跟随输入" value="auto" />
+              <el-select v-model="ratio" size="small" style="width: 110px">
+                <el-option
+                  v-for="value in ratioOptions"
+                  :key="value"
+                  :label="ratioLabel(value)"
+                  :value="value"
+                />
               </el-select>
             </label>
             <label class="ctl">
               <span>输出分辨率</span>
-              <el-select v-model="resolution" size="small" style="width: 110px">
-                <el-option label="480p" value="480p" />
-                <el-option label="720p" value="720p" />
-                <el-option label="1080p" value="1080p" />
+              <el-select v-model="resolution" size="small" style="width: 170px">
+                <el-option
+                  v-for="item in resolutionOptions"
+                  :key="item.value"
+                  :label="`${item.value}（${item.width}×${item.height}）`"
+                  :value="item.value"
+                />
               </el-select>
             </label>
             <label class="ctl">
               <span>输入分辨率</span>
-              <el-select v-model="scale" size="small" style="width: 100px">
-                <el-option label="自动" value="auto" />
-                <el-option label="原始尺寸" value="full" />
-                <el-option label="一半" value="half" />
+              <el-select v-model="scale" size="small" style="width: 190px">
+                <el-option
+                  v-for="item in scaleOptions"
+                  :key="item.value"
+                  :label="scaleLabel(item)"
+                  :value="item.value"
+                  :disabled="!item.ok"
+                />
               </el-select>
             </label>
             <label class="ctl">
               <span>时长</span>
-              <el-select v-model="duration" size="small" style="width: 140px">
-                <el-option label="自动（约 10 秒）" value="auto" />
-                <el-option label="4 秒" value="4" />
-                <el-option label="10 秒" value="10" />
+              <el-select v-model="duration" size="small" style="width: 150px">
+                <el-option
+                  v-for="item in durationOptions"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
               </el-select>
             </label>
+            <span v-if="paramsError" class="session-error">{{ paramsError }}</span>
           </div>
           <div class="submit-row">
             <label class="ctl">
@@ -583,9 +771,17 @@ function statusTone(): string {
       <div class="prompt-editor">
         <section class="template-block">
           <h3>模板正文（只读）</h3>
-          <pre>{{ templateText }}</pre>
+          <el-alert
+            v-if="promptRenderError"
+            type="warning"
+            :closable="false"
+            :title="promptRenderError"
+            class="prompt-error"
+          />
+          <pre>{{ promptRendered || '还没有模板正文' }}</pre>
         </section>
         <section class="vars-block">
+          <el-empty v-if="!promptVars.length" description="没有可编辑的提示词变量" :image-size="72" />
           <div v-for="item in promptVars" :key="item.key" class="var-card">
             <div class="var-head">
               <span class="var-label">{{ item.label }}</span>
@@ -596,13 +792,14 @@ function statusTone(): string {
               v-model="item.value"
               type="textarea"
               :autosize="{ minRows: 3, maxRows: 8 }"
+              @input="schedulePromptSave(item.key, item.value)"
             />
           </div>
         </section>
       </div>
       <template #footer>
-        <el-button @click="promptOpen = false">取消</el-button>
-        <el-button type="primary" @click="savePrompt">保存并关闭</el-button>
+        <el-button @click="promptOpen = false">关闭</el-button>
+        <el-button type="primary" :loading="promptSaving" @click="savePrompt">保存并关闭</el-button>
       </template>
     </el-drawer>
   </div>
@@ -877,6 +1074,22 @@ function statusTone(): string {
   font-size: var(--text-xs);
 }
 
+.output-video {
+  display: block;
+  width: 100%;
+  max-width: 560px;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--radius-md);
+  background: #0f172a;
+}
+
+.output-meta {
+  margin-top: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  word-break: break-all;
+}
+
 .output-actions {
   display: flex;
   align-items: center;
@@ -908,33 +1121,28 @@ function statusTone(): string {
   font-weight: 600;
 }
 
-.candidate-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--space-2);
-  margin: var(--space-2) 0;
+.round-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.candidate-tile {
-  display: grid;
-  place-items: center;
-  aspect-ratio: 16 / 9;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-muted);
-  color: var(--color-text-faint);
-}
-
-.candidate-tile.picked {
-  border-color: var(--color-success);
-  background: var(--color-success-soft);
-  color: var(--color-success);
-}
-
-.candidate-foot {
+.round-tags {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.candidate-empty {
+  padding: var(--space-2);
+}
+
+.rounds-hint {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-xs);
+  word-break: break-all;
 }
 
 .submit-bar {
@@ -1004,6 +1212,10 @@ function statusTone(): string {
   display: flex;
   flex-direction: column;
   gap: var(--space-5);
+}
+
+.prompt-error {
+  margin-bottom: var(--space-3);
 }
 
 .template-block h3,
