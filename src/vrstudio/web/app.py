@@ -46,6 +46,12 @@ from ..media.videoio import VideoIOError
 from ..patch.projection import viewport_erp_rects
 from ..procenv import decode_text, utf8_env
 from ..redraw.manifest import Manifest
+from .identity import (
+    MAX_NAME_LENGTH,
+    NAME_COOKIE,
+    IdentityMiddleware,
+    current_user,
+)
 from .logging import CLIENT_LOGGER, GEOMETRY_LOGGER, RequestLogMiddleware
 from .proxy import (
     ensure_file_proxy,
@@ -2058,6 +2064,31 @@ async def api_task(request):
     return JSONResponse(QUEUE.status())
 
 
+async def api_me(request):
+    user = current_user(request)
+    if request.method == "GET":
+        return JSONResponse({
+            "id": user.id,
+            "display_name": user.display_name,
+            "authenticated": user.authenticated,
+        })
+    body = await request.json()
+    name = str(body.get("display_name") or "").strip()
+    if not name:
+        return JSONResponse({"error": "昵称不能为空"}, status_code=400)
+    if len(name) > MAX_NAME_LENGTH:
+        return JSONResponse(
+            {"error": f"昵称不能超过 {MAX_NAME_LENGTH} 个字符"}, status_code=400)
+    response = JSONResponse({
+        "id": user.id,
+        "display_name": name,
+        "authenticated": False,
+    })
+    response.set_cookie(NAME_COOKIE, name, max_age=365 * 24 * 3600,
+                        httponly=True, samesite="lax")
+    return response
+
+
 _CLIENT_LOG_MAX = 16 * 1024
 _CLIENT_TEXT_LIMITS = {
     "message": 4000, "detail": 4000, "source": 1000,
@@ -2220,6 +2251,7 @@ routes = [
     Route("/api/case/{name}/run", api_run, methods=["POST"]),
     Route("/api/case/{name}/proxy", api_proxy, methods=["GET", "POST"]),
     Route("/api/task", api_task),
+    Route("/api/me", api_me, methods=["GET", "POST"]),
     Route("/api/client-log", api_client_log, methods=["POST"]),
     Route("/api/browse", api_browse),
     Route("/api/sources", api_sources),
@@ -2252,6 +2284,7 @@ def build_app(cases_root: str | Path | None = None) -> Starlette:
     app = Starlette(routes=routes)
     app.add_middleware(NoStoreMiddleware)
     app.add_middleware(RequestLogMiddleware)
+    app.add_middleware(IdentityMiddleware)
     app.mount("/static", StaticFiles(directory=str(_WEB_DIR / "static")),
               name="static")
     app.mount("/next", NextFrontendFiles(directory=str(_NEXT_DIR), html=True,

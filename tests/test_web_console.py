@@ -1215,3 +1215,26 @@ def test_next_frontend_serves_spa_and_assets(tmp_path, monkeypatch):
     assert client.get("/next/").text == "<html>next</html>"
     assert client.get("/next/case/dacne/generate").text == "<html>next</html>"
     assert client.get("/next/assets/app.js").text == "console.log(1)"
+
+
+def test_identity_roundtrip(client):
+    first = client.get("/api/me")
+    assert first.status_code == 200
+    body = first.json()
+    assert body["display_name"] == "访客"
+    assert body["authenticated"] is False
+    uid = client.cookies.get("vrstudio_uid")
+    assert uid
+
+    saved = client.post("/api/me", json={"display_name": "MDX"})
+    assert saved.status_code == 200
+    assert saved.json()["display_name"] == "MDX"
+    assert saved.json()["id"] == uid
+
+    again = client.get("/api/me")
+    assert again.json()["display_name"] == "MDX"
+
+
+def test_identity_rejects_empty_and_long_names(client):
+    assert client.post("/api/me", json={"display_name": "  "}).status_code == 400
+    assert client.post("/api/me", json={"display_name": "x" * 41}).status_code == 400
