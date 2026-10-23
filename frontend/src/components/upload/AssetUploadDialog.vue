@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, UploadFilled } from '@element-plus/icons-vue'
 import { addAssetsByUploads } from '@/api/case'
@@ -151,7 +151,7 @@ function addFiles(files: File[]): void {
       continue
     }
     if (rows.value.some((row) => row.key === storageKey(file))) continue
-    const row: Row = {
+    const row = reactive<Row>({
       key: storageKey(file),
       file,
       kind,
@@ -160,7 +160,7 @@ function addFiles(files: File[]): void {
       received: 0,
       status: 'queued',
       error: '',
-    }
+    })
     rows.value.push(row)
     void uploadRow(row)
   }

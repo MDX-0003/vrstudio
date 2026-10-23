@@ -37,7 +37,7 @@ const picking = ref<string | null>(null)
 const handoffBusy = ref(false)
 const sheetSaving = ref(false)
 const modelId = ref<number | null>(null)
-const resolution = ref('1080p')
+const resolution = ref('2K')
 const num = ref(4)
 let startedAt = 0
 let promptTimer: ReturnType<typeof setTimeout> | null = null
@@ -196,7 +196,11 @@ async function pick(round: KeyframeRound, index: number): Promise<void> {
     emit('updated', data)
     await loadRounds()
     if (step.value === 'first') {
-      ElMessage.success('首帧已定稿；提示词齐全会自动排队尾帧')
+      if (data.keyframe_queued) {
+        ElMessage.success(data.keyframe_hint || '首帧已定稿；尾帧已自动开始生成')
+      } else {
+        ElMessage.info(data.keyframe_hint || '首帧已定稿；补齐尾帧提示词后生成尾帧')
+      }
       step.value = 'last'
       await loadPrompt('last')
     } else {
@@ -362,9 +366,9 @@ onUnmounted(() => {
         />
         <div class="run-row">
           <el-select v-model="resolution" size="small" style="width: 110px">
-            <el-option label="480p" value="480p" />
-            <el-option label="720p" value="720p" />
-            <el-option label="1080p" value="1080p" />
+            <el-option label="1K" value="1K" />
+            <el-option label="2K" value="2K" />
+            <el-option label="4K" value="4K" />
           </el-select>
           <el-input-number v-model="num" :min="1" :max="4" size="small" />
           <el-button

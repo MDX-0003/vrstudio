@@ -1,5 +1,6 @@
 # 数据不进 git（AGENTS.md 硬规则 7）
 cases/
+cases_qa/
 sources/
 logs/
 vrgen_runs/

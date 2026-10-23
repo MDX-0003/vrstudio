@@ -2005,6 +2005,17 @@ async def api_keyframe_pick(request):
     return JSONResponse(info)
 
 
+def _keyframe_resolution_for(path: Path) -> str:
+    """自动尾帧批次沿用首帧定稿的档位，避免默认 4K 与 2K 首帧宽高不一致。"""
+    meta = _media_meta(path, "image")
+    width = int(meta.get("width") or 0)
+    if width <= 1536:
+        return "1K"
+    if width <= 3072:
+        return "2K"
+    return "4K"
+
+
 def _keyframe_accept(name: str, role: str, round_name: str, index: int,
                      target: Path, owner=None,
                      request_id: str | None = None) -> dict:
@@ -2038,7 +2049,11 @@ def _keyframe_accept(name: str, role: str, round_name: str, index: int,
                     hint = ("首帧已定稿；尾帧提示词还缺人物外观或尾帧姿态，"
                             "补齐后点「生成尾帧候选」")
                 else:
-                    argv = _keyframe_argv(name, {"step": "last"})
+                    first_asset = updated.asset(new_id)
+                    resolution = _keyframe_resolution_for(
+                        first_asset.resolved(updated, _ctx["cases_root"]))
+                    argv = _keyframe_argv(
+                        name, {"step": "last", "resolution": resolution})
                     QUEUE.submit("keyframe", name, argv, owner=owner,
                                  request_id=request_id)
                     queued, hint = True, "首帧已定稿；尾帧已自动开始生成"
