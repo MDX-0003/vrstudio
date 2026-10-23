@@ -1,9 +1,29 @@
 <script setup lang="ts">
+import { onMounted, ref, watch } from 'vue'
+import { useSessionStore } from '@/stores/session'
 import { useUiStore } from '@/stores/ui'
+import NicknameDialog from './NicknameDialog.vue'
 import SideNav from './SideNav.vue'
 import TopBar from './TopBar.vue'
 
 const ui = useUiStore()
+const session = useSessionStore()
+const prompted = ref(false)
+
+onMounted(() => {
+  void session.load()
+})
+
+watch(
+  () => session.needsNickname,
+  (needs) => {
+    if (needs && !prompted.value) {
+      prompted.value = true
+      ui.openNicknameDialog()
+    }
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
@@ -15,6 +35,7 @@ const ui = useUiStore()
         <RouterView />
       </main>
     </div>
+    <NicknameDialog v-model="ui.nicknameDialogOpen" />
   </div>
 </template>
 

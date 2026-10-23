@@ -4,6 +4,7 @@ export const useUiStore = defineStore('ui', {
   state: () => ({
     navCollapsed: false,
     taskDrawerOpen: false,
+    nicknameDialogOpen: false,
   }),
   actions: {
     toggleNav() {
@@ -14,6 +15,12 @@ export const useUiStore = defineStore('ui', {
     },
     closeTaskDrawer() {
       this.taskDrawerOpen = false
+    },
+    openNicknameDialog() {
+      this.nicknameDialogOpen = true
+    },
+    closeNicknameDialog() {
+      this.nicknameDialogOpen = false
     },
   },
 })
