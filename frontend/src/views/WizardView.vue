@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Bottom, Check, Delete, Picture, Refresh, Top, VideoCamera, VideoPlay } from '@element-plus/icons-vue'
+import { Bottom, Check, Delete, Picture, Plus, Refresh, Top, VideoCamera, VideoPlay } from '@element-plus/icons-vue'
 import {
   changeAssetRole,
   fetchCase,
@@ -15,6 +15,8 @@ import {
 } from '@/api/case'
 import { fetchSessions } from '@/api/sessions'
 import { fetchTasks } from '@/api/tasks'
+import AssetUploadDialog from '@/components/upload/AssetUploadDialog.vue'
+import { ASSET_ROLE_LABELS, ASSET_ROLE_OPTIONS } from '@/constants/assetRoles'
 import { flowMeta } from '@/constants/flow'
 import type { AssetRow, Flow, PromptVariable } from '@/types/case'
 import type {
@@ -95,6 +97,7 @@ const scaleOptions = ref<InputOption[]>([])
 
 const selectedCount = computed(() => assets.value.filter((asset) => asset.selected).length)
 const promptOpen = ref(false)
+const uploadOpen = ref(false)
 
 type SaveState = 'saved' | 'saving' | 'unsaved'
 const saveState = ref<SaveState>('saved')
@@ -117,28 +120,6 @@ const activeTask = ref<TaskView | null>(null)
 const adopting = ref(false)
 let taskTimer: ReturnType<typeof setInterval> | null = null
 let taskInFlight = false
-
-const ASSET_ROLE_LABELS: Record<string, string> = {
-  edit_master: '编辑母版',
-  motion_ref: '动作参考',
-  scene_ref: '场景参考',
-  subject_ref: '主体参考',
-  first_frame: '首帧定稿',
-  last_frame: '尾帧定稿',
-  mid_frame: '中间帧',
-  clip: '流程母版',
-  pad: '扩充画布',
-}
-
-const ASSET_ROLE_OPTIONS = [
-  { value: 'edit_master', label: '编辑母版' },
-  { value: 'motion_ref', label: '动作参考' },
-  { value: 'scene_ref', label: '场景参考' },
-  { value: 'subject_ref', label: '主体参考' },
-  { value: 'first_frame', label: '首帧定稿' },
-  { value: 'last_frame', label: '尾帧定稿' },
-  { value: 'mid_frame', label: '中间帧' },
-]
 
 function assetTone(asset: AssetDetail): string {
   if (asset.kind === 'video') return 'linear-gradient(135deg, #1e3a8a, #3b82f6)'
@@ -659,6 +640,11 @@ function applyAssetData(data: CaseInfo): void {
   assets.value = (data.assets ?? []).map((item) => toAssetRow(item, selected))
 }
 
+function onAssetsAdded(data: CaseInfo): void {
+  applyAssetData(data)
+  uploadOpen.value = false
+}
+
 async function deleteAsset(asset: AssetRow): Promise<void> {
   try {
     await ElMessageBox.confirm(`删除素材「${asset.name}」？文件会从 case 里移除。`, '删除素材', {
@@ -837,7 +823,10 @@ function roundResultText(round: RoundSummary): string {
           <div class="panel">
             <div class="panel-head">
               <h2 class="panel-title">素材与本次提交</h2>
-              <span class="muted">{{ selectedCount }} 项已勾选</span>
+              <div class="panel-head-actions">
+                <span class="muted">{{ selectedCount }} 项已勾选</span>
+                <el-button size="small" :icon="Plus" @click="uploadOpen = true">上传素材</el-button>
+              </div>
             </div>
             <div class="panel-body asset-list">
               <div v-if="!assets.length" class="asset-empty">
@@ -1239,6 +1228,12 @@ function roundResultText(round: RoundSummary): string {
         <el-button type="primary" :loading="promptSaving" @click="savePrompt">保存并关闭</el-button>
       </template>
     </el-drawer>
+
+    <AssetUploadDialog
+      v-model="uploadOpen"
+      :case-name="caseName"
+      @added="onAssetsAdded"
+    />
   </div>
 </template>
 
@@ -1276,6 +1271,12 @@ function roundResultText(round: RoundSummary): string {
   align-items: center;
   color: var(--color-text-muted);
   font-size: var(--text-sm);
+}
+
+.panel-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
 }
 
 .step-nav {

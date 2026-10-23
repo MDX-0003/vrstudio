@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import uuid
@@ -84,6 +85,73 @@ def sources_dir() -> Path:
     d = config_mod.REPO_ROOT / "sources"
     d.mkdir(exist_ok=True)
     return d
+
+
+# ── 浏览器分片上传（会话与完成区都在 cases/.uploads）────────────────────
+#
+# 只接受追加写：客户端每次带 offset，服务端校验 offset == 已收字节数，
+# 越界与重复写入都拒绝。文件不进内存，按 8 MB 分片落盘。完成后计算
+# SHA-256，加入 case 时按哈希去重，避免同一文件被静默收两遍。
+
+UPLOAD_CHUNK = 8 * 1024 * 1024
+UPLOAD_MAX_DEFAULT = 2 * 1024 ** 3
+UPLOAD_TTL_SECONDS = 24 * 3600
+_UPLOAD_ID = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _upload_max_bytes() -> int:
+    try:
+        return int(config_mod.load().get("web.upload_max_bytes", UPLOAD_MAX_DEFAULT))
+    except (TypeError, ValueError):
+        return UPLOAD_MAX_DEFAULT
+
+
+def _uploads_root() -> Path:
+    root = _root() / ".uploads"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _upload_dir(upload_id: str) -> Path:
+    if not _UPLOAD_ID.fullmatch(upload_id):
+        raise CaseError("上传 id 不合法")
+    direct = _uploads_root() / upload_id
+    if direct.is_dir():
+        return direct
+    complete = _uploads_root() / "complete" / upload_id
+    if complete.is_dir():
+        return complete
+    raise CaseError("上传会话不存在")
+
+
+def _upload_meta(directory: Path) -> dict:
+    path = directory / "meta.json"
+    if not path.is_file():
+        raise CaseError("上传会话缺少元数据")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _save_upload_meta(directory: Path, meta: dict) -> None:
+    (directory / "meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _cleanup_uploads() -> None:
+    """启动时清掉超过 24 小时仍未完成或未被取走的会话。"""
+    now = datetime.now().timestamp()
+    for base in (_uploads_root(), _uploads_root() / "complete"):
+        if not base.is_dir():
+            continue
+        for child in base.iterdir():
+            if not child.is_dir() or child.name == "complete":
+                continue
+            try:
+                created = datetime.fromisoformat(
+                    str(_upload_meta(child).get("created_at", ""))).timestamp()
+            except (OSError, ValueError, TypeError):
+                created = 0
+            if now - created > UPLOAD_TTL_SECONDS:
+                shutil.rmtree(child, ignore_errors=True)
 
 
 # ── 预览 store 缓存（case.toml mtime 变更即失效）────────────────────────
@@ -1276,6 +1344,128 @@ async def asset_img(request):
     return Response(content=data, media_type="image/jpeg")
 
 
+async def api_uploads_create(request):
+    body = await request.json()
+    name = Path(str(body.get("name") or "")).name
+    if not name or name in (".", ".."):
+        return JSONResponse({"error": "缺少文件名"}, status_code=400)
+    suffix = Path(name).suffix.lower()
+    if suffix not in _VIDEO_EXTS | _IMAGE_EXTS:
+        allowed = "/".join(sorted(_VIDEO_EXTS | _IMAGE_EXTS))
+        return JSONResponse({"error": f"不支持的文件类型：{suffix or '无后缀'}（允许 {allowed}）"},
+                            status_code=400)
+    try:
+        size = int(body.get("size"))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "缺少文件大小 size"}, status_code=400)
+    max_bytes = _upload_max_bytes()
+    if size <= 0:
+        return JSONResponse({"error": "文件大小必须大于 0"}, status_code=400)
+    if size > max_bytes:
+        return JSONResponse({"error": f"文件超过上限 {max_bytes} 字节"}, status_code=413)
+    upload_id = uuid.uuid4().hex
+    directory = _uploads_root() / upload_id
+    directory.mkdir(parents=True)
+    (directory / "data.part").touch()
+    meta = {
+        "upload_id": upload_id,
+        "name": name,
+        "size": size,
+        "received": 0,
+        "status": "uploading",
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "sha256": None,
+        "stored_name": None,
+    }
+    _save_upload_meta(directory, meta)
+    return JSONResponse({"upload_id": upload_id, "chunk_size": UPLOAD_CHUNK,
+                         "max_size": max_bytes})
+
+
+async def api_upload(request):
+    upload_id = request.path_params["upload_id"]
+    try:
+        directory = _upload_dir(upload_id)
+        meta = _upload_meta(directory)
+    except CaseError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    if request.method == "GET":
+        return JSONResponse({key: meta.get(key) for key in
+                             ("upload_id", "name", "size", "received", "status", "sha256")})
+    if request.method == "DELETE":
+        shutil.rmtree(directory, ignore_errors=True)
+        return JSONResponse({"deleted": upload_id})
+    if meta.get("status") != "uploading":
+        return JSONResponse({"error": "这个上传已经完成，不能再追加"}, status_code=409)
+    try:
+        offset = int(request.query_params.get("offset", "0"))
+    except ValueError:
+        return JSONResponse({"error": "offset 必须是整数"}, status_code=400)
+    if offset != meta["received"]:
+        return JSONResponse({"error": "偏移不连续，请从已接收位置续传",
+                             "received": meta["received"]}, status_code=409)
+    body = await request.body()
+    if not body:
+        return JSONResponse({"error": "分片为空"}, status_code=400)
+    if meta["received"] + len(body) > meta["size"]:
+        return JSONResponse({"error": "分片超过声明的文件大小"}, status_code=400)
+    part = directory / "data.part"
+    with open(part, "r+b") as fh:
+        fh.seek(offset)
+        fh.write(body)
+    meta["received"] = offset + len(body)
+    _save_upload_meta(directory, meta)
+    return JSONResponse({"upload_id": upload_id, "received": meta["received"],
+                         "size": meta["size"]})
+
+
+async def api_upload_complete(request):
+    upload_id = request.path_params["upload_id"]
+    try:
+        directory = _upload_dir(upload_id)
+        meta = _upload_meta(directory)
+    except CaseError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    if meta.get("status") == "complete":
+        return JSONResponse({"file_id": upload_id, "name": meta["name"],
+                             "size": meta["size"], "sha256": meta["sha256"]})
+    if meta.get("received") != meta.get("size"):
+        return JSONResponse({"error": "文件还没有传完",
+                             "received": meta.get("received"),
+                             "size": meta.get("size")}, status_code=400)
+    part = directory / "data.part"
+    if not part.is_file():
+        return JSONResponse({"error": "分片文件不存在"}, status_code=400)
+    sha256 = await asyncio.to_thread(case_mod.file_sha256, part)
+    target = _uploads_root() / "complete" / upload_id
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+    shutil.move(str(directory), str(target))
+    (target / "data.part").rename(target / meta["name"])
+    meta.update(status="complete", sha256=sha256, stored_name=meta["name"])
+    _save_upload_meta(target, meta)
+    return JSONResponse({"file_id": upload_id, "name": meta["name"],
+                         "size": meta["size"], "sha256": sha256})
+
+
+def _uploaded_paths(upload_ids: list[str]) -> tuple[list[Path], list[Path]]:
+    """把已完成的 upload id 解析成文件路径；返回 (路径, 会话目录)。"""
+    paths: list[Path] = []
+    dirs: list[Path] = []
+    for upload_id in upload_ids:
+        directory = _upload_dir(upload_id)
+        meta = _upload_meta(directory)
+        if meta.get("status") != "complete":
+            raise CaseError(f"上传 {upload_id} 还没有完成")
+        path = directory / str(meta.get("stored_name") or "")
+        if not path.is_file():
+            raise CaseError(f"上传 {upload_id} 的文件不存在")
+        paths.append(path)
+        dirs.append(directory)
+    return paths, dirs
+
+
 async def api_assets(request):
     """三流程素材增删改排（唯一权威仍是 vrstudio.case 的素材函数）。"""
     name = request.path_params["name"]
@@ -1287,13 +1477,34 @@ async def api_assets(request):
     op = body.get("op")
     try:
         if op == "add":
-            paths = [str(p) for p in (body.get("paths") or [])]
             roles = [str(r) for r in (body.get("roles") or [])]
-            if not paths or len(paths) != len(roles):
-                return JSONResponse({"error": "paths 与 roles 要一一对应且非空"},
-                                    status_code=400)
-            await asyncio.to_thread(case_mod.add_assets, name,
-                                    list(zip(paths, roles, strict=True)), _ctx["cases_root"])
+            upload_ids = [str(i) for i in (body.get("upload_ids") or [])]
+            if upload_ids:
+                if len(upload_ids) != len(roles):
+                    return JSONResponse({"error": "upload_ids 与 roles 要一一对应"},
+                                        status_code=400)
+                paths, dirs = _uploaded_paths(upload_ids)
+                known = {a.sha256 for a in case.assets if a.sha256}
+                seen: set[str] = set()
+                for path in paths:
+                    digest = case_mod.file_sha256(path)
+                    if digest in known or digest in seen:
+                        return JSONResponse(
+                            {"error": f"素材已存在：{path.name}（SHA-256 相同）"},
+                            status_code=409)
+                    seen.add(digest)
+                await asyncio.to_thread(
+                    case_mod.add_assets, name,
+                    list(zip(paths, roles, strict=True)), _ctx["cases_root"])
+                for directory in dirs:
+                    shutil.rmtree(directory, ignore_errors=True)
+            else:
+                paths = [str(p) for p in (body.get("paths") or [])]
+                if not paths or len(paths) != len(roles):
+                    return JSONResponse({"error": "paths 与 roles 要一一对应且非空"},
+                                        status_code=400)
+                await asyncio.to_thread(case_mod.add_assets, name,
+                                        list(zip(paths, roles, strict=True)), _ctx["cases_root"])
         elif op == "remove":
             await asyncio.to_thread(case_mod.remove_asset, name,
                                     str(body.get("id") or ""), _ctx["cases_root"])
@@ -2244,6 +2455,9 @@ routes = [
     Route("/api/case/{name}/prompt", api_prompt, methods=["POST"]),
     Route("/api/case/{name}/params", api_params, methods=["POST"]),
     Route("/api/case/{name}/assets", api_assets, methods=["POST"]),
+    Route("/api/uploads", api_uploads_create, methods=["POST"]),
+    Route("/api/uploads/{upload_id}", api_upload, methods=["GET", "PUT", "DELETE"]),
+    Route("/api/uploads/{upload_id}/complete", api_upload_complete, methods=["POST"]),
     Route("/api/case/{name}/derived", api_derived),
     Route("/api/case/{name}/submit", api_submit_set, methods=["GET", "PUT"]),
     Route("/api/case/{name}/extract-frames", api_extract_frames, methods=["POST"]),
@@ -2297,6 +2511,10 @@ class NoStoreMiddleware:
 
 def build_app(cases_root: str | Path | None = None) -> Starlette:
     _ctx["cases_root"] = cases_root
+    try:
+        _cleanup_uploads()
+    except OSError:
+        pass
     app = Starlette(routes=routes)
     app.add_middleware(NoStoreMiddleware)
     app.add_middleware(RequestLogMiddleware)

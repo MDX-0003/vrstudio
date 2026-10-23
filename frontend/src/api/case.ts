@@ -63,6 +63,18 @@ export function addAssetsByPaths(
   return postJson<CaseInfo>(`${casePath(name)}/assets`, { op: 'add', paths, roles })
 }
 
+export function addAssetsByUploads(
+  name: string,
+  uploadIds: string[],
+  roles: string[],
+): Promise<CaseInfo> {
+  return postJson<CaseInfo>(`${casePath(name)}/assets`, {
+    op: 'add',
+    upload_ids: uploadIds,
+    roles,
+  })
+}
+
 export function removeAsset(name: string, id: string): Promise<CaseInfo> {
   return postJson<CaseInfo>(`${casePath(name)}/assets`, { op: 'remove', id })
 }

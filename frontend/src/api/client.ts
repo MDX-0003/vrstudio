@@ -65,3 +65,28 @@ export async function putJson<T>(path: string, body: unknown): Promise<T> {
   }
   return data as T
 }
+
+export async function putBlob<T>(path: string, body: Blob): Promise<T> {
+  const response = await fetch(path, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/octet-stream', Accept: 'application/json' },
+    body,
+  })
+  const data = await parseBody(response)
+  if (!response.ok) {
+    throw new ApiRequestError(describeError(data, response.status), response.status)
+  }
+  return data as T
+}
+
+export async function deleteJson<T>(path: string): Promise<T> {
+  const response = await fetch(path, {
+    method: 'DELETE',
+    headers: { Accept: 'application/json' },
+  })
+  const data = await parseBody(response)
+  if (!response.ok) {
+    throw new ApiRequestError(describeError(data, response.status), response.status)
+  }
+  return data as T
+}

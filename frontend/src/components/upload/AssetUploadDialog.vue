@@ -1,0 +1,386 @@
+<script setup lang="ts">
+import { computed, ref } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Delete, UploadFilled } from '@element-plus/icons-vue'
+import { addAssetsByUploads } from '@/api/case'
+import {
+  cancelUpload,
+  completeUpload,
+  createUpload,
+  getUpload,
+  putChunk,
+} from '@/api/uploads'
+import { ASSET_ROLE_OPTIONS, defaultRole } from '@/constants/assetRoles'
+import type { CaseInfo } from '@/types/case-info'
+
+type RowStatus = 'queued' | 'uploading' | 'done' | 'error' | 'canceled'
+
+interface Row {
+  key: string
+  file: File
+  kind: 'video' | 'image'
+  role: string
+  uploadId: string | null
+  received: number
+  status: RowStatus
+  error: string
+}
+
+const props = defineProps<{ modelValue: boolean; caseName: string }>()
+const emit = defineEmits<{
+  'update:modelValue': [value: boolean]
+  added: [data: CaseInfo]
+}>()
+
+const visible = computed({
+  get: () => props.modelValue,
+  set: (value: boolean) => emit('update:modelValue', value),
+})
+
+const rows = ref<Row[]>([])
+const adding = ref(false)
+const dragOver = ref(false)
+const fileInput = ref<HTMLInputElement | null>(null)
+
+const completed = computed(() => rows.value.filter((row) => row.status === 'done' && row.uploadId))
+const uploading = computed(() => rows.value.some((row) => row.status === 'uploading'))
+const canAdd = computed(() => completed.value.length > 0 && !uploading.value && !adding.value)
+
+const VIDEO_EXTS = ['.mp4', '.mov', '.mkv', '.avi']
+const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.webp']
+
+function kindOf(name: string): 'video' | 'image' | null {
+  const lower = name.toLowerCase()
+  if (VIDEO_EXTS.some((ext) => lower.endsWith(ext))) return 'video'
+  if (IMAGE_EXTS.some((ext) => lower.endsWith(ext))) return 'image'
+  return null
+}
+
+function storageKey(file: File): string {
+  return `vrstudio-upload:${file.name}:${file.size}:${file.lastModified}`
+}
+
+function formatSize(value: number): string {
+  const units = ['B', 'KB', 'MB', 'GB']
+  let size = value
+  let index = 0
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024
+    index += 1
+  }
+  return `${index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`
+}
+
+function progressOf(row: Row): number {
+  if (!row.file.size) return 0
+  return Math.min(100, Math.round((row.received / row.file.size) * 100))
+}
+
+function statusText(row: Row): string {
+  if (row.status === 'uploading') return `上传中 ${progressOf(row)}%`
+  if (row.status === 'done') return '已上传'
+  if (row.status === 'error') return row.error || '上传失败'
+  if (row.status === 'canceled') return '已取消'
+  return '等待上传'
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function uploadRow(row: Row): Promise<void> {
+  row.status = 'uploading'
+  row.error = ''
+  const key = storageKey(row.file)
+  try {
+    if (!row.uploadId) {
+      const saved = localStorage.getItem(key)
+      if (saved) {
+        try {
+          const status = await getUpload(saved)
+          if (status.name === row.file.name && status.size === row.file.size) {
+            row.uploadId = saved
+            row.received = status.received
+            if (status.status === 'complete') {
+              row.received = status.size
+              row.status = 'done'
+              return
+            }
+          } else {
+            localStorage.removeItem(key)
+          }
+        } catch {
+          localStorage.removeItem(key)
+        }
+      }
+    }
+    if (!row.uploadId) {
+      const session = await createUpload(row.file.name, row.file.size)
+      row.uploadId = session.upload_id
+      row.received = 0
+      localStorage.setItem(key, session.upload_id)
+    }
+    const uploadId = row.uploadId
+    const chunkSize = 8 * 1024 * 1024
+    while (row.received < row.file.size) {
+      if ((row.status as RowStatus) === 'canceled') return
+      const end = Math.min(row.received + chunkSize, row.file.size)
+      const chunk = row.file.slice(row.received, end)
+      let attempt = 0
+      for (;;) {
+        try {
+          const result = await putChunk(uploadId, row.received, chunk)
+          row.received = result.received
+          break
+        } catch (err) {
+          attempt += 1
+          if (attempt >= 3) throw err
+          await sleep(400 * attempt)
+        }
+      }
+    }
+    await completeUpload(uploadId)
+    localStorage.removeItem(key)
+    row.status = 'done'
+  } catch (err) {
+    row.status = 'error'
+    row.error = err instanceof Error ? err.message : '上传失败'
+    if (row.uploadId) localStorage.setItem(key, row.uploadId)
+  }
+}
+
+function addFiles(files: File[]): void {
+  for (const file of files) {
+    const kind = kindOf(file.name)
+    if (!kind) {
+      ElMessage.warning(`${file.name}：只支持 mp4/mov/mkv/avi 与 png/jpg/webp`)
+      continue
+    }
+    if (rows.value.some((row) => row.key === storageKey(file))) continue
+    const row: Row = {
+      key: storageKey(file),
+      file,
+      kind,
+      role: defaultRole(kind),
+      uploadId: null,
+      received: 0,
+      status: 'queued',
+      error: '',
+    }
+    rows.value.push(row)
+    void uploadRow(row)
+  }
+}
+
+function onPick(event: Event): void {
+  const input = event.target as HTMLInputElement
+  addFiles(Array.from(input.files ?? []))
+  input.value = ''
+}
+
+function onDrop(event: DragEvent): void {
+  dragOver.value = false
+  addFiles(Array.from(event.dataTransfer?.files ?? []))
+}
+
+async function removeRow(row: Row): Promise<void> {
+  if (row.status === 'uploading' && row.uploadId) {
+    try {
+      await cancelUpload(row.uploadId)
+    } catch {
+      // 取消失败不阻止从列表移除；服务端会按 24 小时清理。
+    }
+  }
+  row.status = 'canceled'
+  localStorage.removeItem(storageKey(row.file))
+  rows.value = rows.value.filter((item) => item !== row)
+}
+
+function retry(row: Row): void {
+  if (row.status !== 'error') return
+  row.error = ''
+  void uploadRow(row)
+}
+
+async function confirmAdd(): Promise<void> {
+  if (!canAdd.value) return
+  adding.value = true
+  try {
+    const data = await addAssetsByUploads(
+      props.caseName,
+      completed.value.map((row) => row.uploadId as string),
+      completed.value.map((row) => row.role),
+    )
+    emit('added', data)
+    ElMessage.success(`已加入 ${completed.value.length} 个素材`)
+    rows.value = []
+    visible.value = false
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '加入素材失败')
+  } finally {
+    adding.value = false
+  }
+}
+
+async function beforeClose(done: () => void): Promise<void> {
+  if (!uploading.value) {
+    done()
+    return
+  }
+  try {
+    await ElMessageBox.confirm('还有文件在上传，关闭会中断这次上传。', '确认关闭', {
+      type: 'warning',
+      confirmButtonText: '关闭',
+      cancelButtonText: '继续上传',
+    })
+    rows.value.forEach((row) => {
+      row.status = 'canceled'
+      localStorage.removeItem(storageKey(row.file))
+    })
+    done()
+  } catch {
+    // 继续上传
+  }
+}
+</script>
+
+<template>
+  <el-dialog
+    v-model="visible"
+    title="上传素材"
+    width="720px"
+    :close-on-click-modal="false"
+    :before-close="beforeClose"
+  >
+    <div
+      class="dropzone"
+      :class="{ over: dragOver }"
+      @dragover.prevent="dragOver = true"
+      @dragleave.prevent="dragOver = false"
+      @drop.prevent="onDrop"
+      @click="fileInput?.click()"
+    >
+      <el-icon :size="30"><UploadFilled /></el-icon>
+      <p>把视频或图片拖到这里，或点击选择文件</p>
+      <p class="muted">单文件最大 2 GB；分片 8 MB，失败自动重试三次，刷新后可续传。</p>
+      <input
+        ref="fileInput"
+        type="file"
+        multiple
+        accept=".mp4,.mov,.mkv,.avi,.png,.jpg,.jpeg,.webp"
+        class="file-input"
+        @change="onPick"
+      />
+    </div>
+
+    <div v-if="rows.length" class="upload-list">
+      <div v-for="row in rows" :key="row.key" class="upload-row">
+        <div class="upload-main">
+          <div class="upload-name">{{ row.file.name }}</div>
+          <div class="upload-meta">
+            <span>{{ formatSize(row.file.size) }}</span>
+            <span :class="{ bad: row.status === 'error' }">{{ statusText(row) }}</span>
+          </div>
+          <el-progress
+            :percentage="progressOf(row)"
+            :status="row.status === 'error' ? 'exception' : row.status === 'done' ? 'success' : undefined"
+            :stroke-width="6"
+          />
+        </div>
+        <el-select v-model="row.role" size="small" style="width: 132px" :disabled="row.status === 'uploading'">
+          <el-option
+            v-for="role in ASSET_ROLE_OPTIONS"
+            :key="role.value"
+            :label="role.label"
+            :value="role.value"
+          />
+        </el-select>
+        <el-button v-if="row.status === 'error'" link type="primary" @click="retry(row)">重试</el-button>
+        <el-button link type="danger" :icon="Delete" aria-label="移除" @click="removeRow(row)" />
+      </div>
+    </div>
+
+    <template #footer>
+      <el-button @click="visible = false">取消</el-button>
+      <el-button type="primary" :loading="adding" :disabled="!canAdd" @click="confirmAdd">
+        加入素材库（{{ completed.length }}）
+      </el-button>
+    </template>
+  </el-dialog>
+</template>
+
+<style scoped>
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-6);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: border-color var(--duration-fast) ease, background var(--duration-fast) ease;
+}
+
+.dropzone:hover,
+.dropzone.over {
+  border-color: var(--color-primary);
+  background: var(--color-primary-soft);
+}
+
+.dropzone p {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.dropzone p.muted {
+  font-size: var(--text-xs);
+}
+
+.file-input {
+  display: none;
+}
+
+.upload-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+.upload-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.upload-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.upload-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.upload-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin: var(--space-1) 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+
+.upload-meta .bad {
+  color: var(--color-danger);
+}
+</style>

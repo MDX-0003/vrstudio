@@ -216,6 +216,75 @@ def test_asset_api_rejects_bad_role(client, gen_case, tmp_path):
     assert r.status_code == 400
 
 
+def _upload(client, name: str, data: bytes, *, chunks: list[bytes] | None = None):
+    r = client.post("/api/uploads", json={"name": name, "size": len(data)})
+    assert r.status_code == 200, r.text
+    upload_id = r.json()["upload_id"]
+    offset = 0
+    for part in chunks or [data]:
+        r = client.put(f"/api/uploads/{upload_id}?offset={offset}", content=part)
+        assert r.status_code == 200, r.text
+        offset += len(part)
+    r = client.post(f"/api/uploads/{upload_id}/complete")
+    assert r.status_code == 200, r.text
+    return upload_id, r.json()
+
+
+def test_upload_chunks_complete_and_add_asset(client, gen_case, tmp_path):
+    data = b"fake png bytes for upload"
+    upload_id, done = _upload(client, "ref.png", data,
+                              chunks=[data[:5], data[5:12], data[12:]])
+    assert done["name"] == "ref.png" and done["size"] == len(data)
+    assert len(done["sha256"]) == 64
+
+    status = client.get(f"/api/uploads/{upload_id}").json()
+    assert status["status"] == "complete" and status["received"] == len(data)
+
+    r = client.post("/api/case/g1/assets",
+                    json={"op": "add", "upload_ids": [upload_id],
+                          "roles": ["subject_ref"]})
+    assert r.status_code == 200, r.text
+    assets = r.json()["assets"]
+    assert [a["id"] for a in assets] == ["v1", "i1"]
+    assert any((case_mod.case_dir("g1", tmp_path) / "assets").glob("i1_ref.png"))
+    assert not (tmp_path / ".uploads" / "complete" / upload_id).exists()
+
+
+def test_upload_rejects_discontinuous_offset_and_duplicate_file(client, gen_case, tmp_path):
+    data = b"same bytes"
+    r = client.post("/api/uploads", json={"name": "ref.png", "size": len(data)})
+    upload_id = r.json()["upload_id"]
+    r = client.put(f"/api/uploads/{upload_id}?offset=3", content=data)
+    assert r.status_code == 409 and r.json()["received"] == 0
+    r = client.put(f"/api/uploads/{upload_id}?offset=0", content=data)
+    assert r.status_code == 200
+    r = client.post(f"/api/uploads/{upload_id}/complete")
+    assert r.status_code == 200
+
+    r = client.post("/api/case/g1/assets",
+                    json={"op": "add", "upload_ids": [upload_id],
+                          "roles": ["subject_ref"]})
+    assert r.status_code == 200, r.text
+
+    second_id, _ = _upload(client, "ref-copy.png", data)
+    r = client.post("/api/case/g1/assets",
+                    json={"op": "add", "upload_ids": [second_id],
+                          "roles": ["scene_ref"]})
+    assert r.status_code == 409 and "已存在" in r.json()["error"]
+
+
+def test_upload_rejects_bad_type_and_size(client):
+    r = client.post("/api/uploads", json={"name": "notes.txt", "size": 4})
+    assert r.status_code == 400 and "不支持" in r.json()["error"]
+    r = client.post("/api/uploads", json={"name": "ref.png", "size": 0})
+    assert r.status_code == 400
+    r = client.post("/api/uploads", json={"name": "ref.png", "size": 3})
+    assert r.status_code == 200
+    upload_id = r.json()["upload_id"]
+    r = client.put(f"/api/uploads/{upload_id}?offset=0", content=b"toolong")
+    assert r.status_code == 400
+
+
 def test_modes_endpoint_returns_model_modes(client, monkeypatch):
     monkeypatch.setattr(web_app, "_vrgen_json",
                         lambda argv: {"modes": [{"value": "allMediaRef"}],
