@@ -1070,7 +1070,7 @@ function roundResultText(round: RoundSummary): string {
                     <el-button
                       link
                       :icon="Bottom"
-                      :disabled="index === assets.length - 1"
+                      :disabled="index === assets.length - 1 || asset.roleRaw === 'edit_master'"
                       aria-label="下移素材"
                       @click="moveAsset(asset, 1)"
                     />
@@ -1150,7 +1150,7 @@ function roundResultText(round: RoundSummary): string {
                 />
                 <div v-else class="output-frame">
                   <el-icon :size="34"><VideoPlay /></el-icon>
-                  <span>还没有成片</span>
+                  <span>还没有合并成片</span>
                 </div>
                 <div v-if="recentOutput" class="output-meta mono">{{ recentOutput.file }}</div>
                 <div class="output-actions">
@@ -1168,7 +1168,9 @@ function roundResultText(round: RoundSummary): string {
                     {{
                       canAdopt
                         ? `最新可用轮次：${latestUsableRound?.round}`
-                        : '当前成片已是采用结果'
+                        : recentOutput
+                          ? '当前成片已是采用结果'
+                          : '已采用最新轮次，合并后在这里看成片'
                     }}
                   </span>
                 </div>
