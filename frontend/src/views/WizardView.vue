@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Check, Picture, Plus, Refresh, VideoCamera, VideoPlay } from '@element-plus/icons-vue'
+import { fetchSessions } from '@/api/sessions'
 import { flowMeta, mockAssets, mockCandidates, mockPromptVariables } from '@/mocks/case'
 import type { AssetRow, CandidateRound, Flow, PromptVariable } from '@/types/case'
+import type { EpisodeOption, ProjectOption, SessionOption } from '@/types/session'
 
 const route = useRoute()
 const router = useRouter()
@@ -40,9 +42,23 @@ const ratio = ref('16:9')
 const resolution = ref('1080p')
 const scale = ref('auto')
 const duration = ref('auto')
-const project = ref('2026大秦寻仙VR')
-const episode = ref('第 1 集 · 姜宣夜')
-const session = ref('cli会话_测试')
+
+const projects = ref<ProjectOption[]>([])
+const selectedProject = ref('')
+const selectedEpisode = ref('')
+const selectedSession = ref('')
+const sessionsLoading = ref(false)
+const sessionError = ref('')
+const lastRefreshed = ref('')
+
+const currentProject = computed(() =>
+  projects.value.find((item) => String(item.id) === selectedProject.value),
+)
+const episodes = computed<EpisodeOption[]>(() => currentProject.value?.episodes ?? [])
+const currentEpisode = computed(() =>
+  episodes.value.find((item) => String(item.no) === selectedEpisode.value),
+)
+const sessions = computed<SessionOption[]>(() => currentEpisode.value?.sessions ?? [])
 
 const templateText = computed(() =>
   [
@@ -80,9 +96,53 @@ function submit(): void {
   ElMessage.success('已提交生成，排队第 1 位')
 }
 
-function refreshSessions(): void {
-  ElMessage.success('会话列表已刷新（原型阶段，Phase 1 接 /api/sessions）')
+async function loadSessions(): Promise<boolean> {
+  sessionsLoading.value = true
+  sessionError.value = ''
+  try {
+    const data = await fetchSessions()
+    if (data.error) throw new Error(data.error)
+    projects.value = data.projects ?? []
+    if (!projects.value.some((item) => String(item.id) === selectedProject.value)) {
+      selectedProject.value = projects.value.length ? String(projects.value[0].id) : ''
+    }
+    lastRefreshed.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+    return true
+  } catch (err) {
+    sessionError.value = err instanceof Error ? err.message : '读取会话失败'
+    return false
+  } finally {
+    sessionsLoading.value = false
+  }
 }
+
+async function refreshSessions(): Promise<void> {
+  await loadSessions()
+}
+
+watch(
+  episodes,
+  (list) => {
+    if (!list.some((item) => String(item.no) === selectedEpisode.value)) {
+      selectedEpisode.value = list.length ? String(list[0].no) : ''
+    }
+  },
+  { immediate: true },
+)
+
+watch(
+  sessions,
+  (list) => {
+    if (!list.some((item) => String(item.id) === selectedSession.value)) {
+      selectedSession.value = list.length ? String(list[0].id) : ''
+    }
+  },
+  { immediate: true },
+)
+
+onMounted(() => {
+  void loadSessions()
+})
 
 function statusTone(): string {
   if (status.value === '预演通过') return 'done'
@@ -300,24 +360,65 @@ function statusTone(): string {
           <div class="submit-row">
             <label class="ctl">
               <span>项目</span>
-              <el-select v-model="project" size="small" style="width: 170px">
-                <el-option label="2026大秦寻仙VR" value="2026大秦寻仙VR" />
+              <el-select
+                v-model="selectedProject"
+                size="small"
+                style="width: 170px"
+                :loading="sessionsLoading"
+              >
+                <el-option
+                  v-for="item in projects"
+                  :key="item.id"
+                  :label="item.name"
+                  :value="String(item.id)"
+                />
               </el-select>
             </label>
             <label class="ctl">
               <span>剧集</span>
-              <el-select v-model="episode" size="small" style="width: 160px">
-                <el-option label="第 1 集 · 姜宣夜" value="第 1 集 · 姜宣夜" />
+              <el-select
+                v-model="selectedEpisode"
+                size="small"
+                style="width: 160px"
+                :disabled="!episodes.length"
+              >
+                <el-option
+                  v-for="item in episodes"
+                  :key="item.no"
+                  :label="`第 ${item.no} 集 · ${item.name}`"
+                  :value="String(item.no)"
+                />
               </el-select>
             </label>
             <label class="ctl">
               <span>会话</span>
-              <el-select v-model="session" size="small" style="width: 150px">
-                <el-option label="cli会话_测试" value="cli会话_测试" />
+              <el-select
+                v-model="selectedSession"
+                size="small"
+                style="width: 150px"
+                :disabled="!sessions.length"
+              >
+                <el-option
+                  v-for="item in sessions"
+                  :key="item.id"
+                  :label="item.name || '未命名'"
+                  :value="String(item.id)"
+                />
               </el-select>
             </label>
-            <el-button size="small" :icon="Refresh" @click="refreshSessions">刷新</el-button>
-            <span class="muted quota-hint">已获取 1 个项目</span>
+            <el-button
+              size="small"
+              :icon="Refresh"
+              :loading="sessionsLoading"
+              @click="refreshSessions"
+            >
+              刷新
+            </el-button>
+            <span class="muted quota-hint">
+              已获取 {{ projects.length }} 个项目<template v-if="lastRefreshed">
+                · 刷新于 {{ lastRefreshed }}</template>
+            </span>
+            <span v-if="sessionError" class="session-error">{{ sessionError }}</span>
             <div class="submit-actions">
               <span class="run-state">
                 <span class="status-dot" :class="statusTone()" />
@@ -686,6 +787,11 @@ function statusTone(): string {
 .quota-hint {
   font-size: var(--text-xs);
   white-space: nowrap;
+}
+
+.session-error {
+  color: var(--color-danger);
+  font-size: var(--text-xs);
 }
 
 .submit-actions {
