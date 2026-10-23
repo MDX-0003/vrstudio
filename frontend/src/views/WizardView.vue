@@ -25,7 +25,13 @@ import {
 } from '@/api/case'
 import { fetchSessions } from '@/api/sessions'
 import { fetchTasks } from '@/api/tasks'
+import type { GeometryPayload } from '@/api/workflow'
 import AssetUploadDialog from '@/components/upload/AssetUploadDialog.vue'
+import CompareStep from '@/views/wizard/CompareStep.vue'
+import ExtractStep from '@/views/wizard/ExtractStep.vue'
+import KeyframeStep from '@/views/wizard/KeyframeStep.vue'
+import MergeStep from '@/views/wizard/MergeStep.vue'
+import PickStep from '@/views/wizard/PickStep.vue'
 import { ASSET_ROLE_LABELS, ASSET_ROLE_OPTIONS } from '@/constants/assetRoles'
 import { flowMeta } from '@/constants/flow'
 import type { AssetRow, Flow, PromptVariable } from '@/types/case'
@@ -45,21 +51,41 @@ const route = useRoute()
 const router = useRouter()
 
 const caseName = computed(() => String(route.params.name ?? ''))
-const activeStep = computed(() => String(route.params.step ?? 'generate'))
 const flow = ref<Flow>('patch')
 
-const steps = [
-  { key: 'pick', label: '选区' },
-  { key: 'extract', label: '抽取' },
-  { key: 'keyframe', label: '首尾帧' },
-  { key: 'generate', label: '生成' },
-  { key: 'merge', label: '合并' },
-  { key: 'compare', label: '对比' },
-]
+interface StepDef {
+  key: string
+  label: string
+}
+
+const steps = computed<StepDef[]>(() => {
+  if (flow.value === 'fullredraw') {
+    return [
+      { key: 'pad', label: '扩充画面' },
+      { key: 'generate', label: '生成' },
+      { key: 'recompose', label: '裁回原尺寸' },
+      { key: 'compare', label: '对比' },
+    ]
+  }
+  if (flow.value === 'gen') return [{ key: 'generate', label: '生成' }]
+  return [
+    { key: 'pick', label: '选区' },
+    { key: 'extract', label: '抽取' },
+    { key: 'keyframe', label: '首尾帧' },
+    { key: 'generate', label: '生成' },
+    { key: 'merge', label: '合并' },
+    { key: 'compare', label: '对比' },
+  ]
+})
+
+const activeStep = computed(() => {
+  const raw = String(route.params.step ?? '')
+  return raw || steps.value[0]?.key || 'generate'
+})
 
 const activeIndex = computed(() => {
-  const index = steps.findIndex((step) => step.key === activeStep.value)
-  return index < 0 ? 3 : index
+  const index = steps.value.findIndex((step) => step.key === activeStep.value)
+  return index < 0 ? 0 : index
 })
 
 const assets = ref<AssetRow[]>([])
@@ -168,6 +194,57 @@ function toAssetRow(asset: AssetDetail, selected: Set<string>): AssetRow {
   }
 }
 
+function applyCaseInfo(data: CaseInfo): void {
+  caseInfo.value = data
+  flow.value = data.flow
+  const selected = new Set(data.submit_selected ?? [])
+  assets.value = (data.assets ?? []).map((asset) => toAssetRow(asset, selected))
+
+  const prompt = data.prompt
+  if (prompt?.error) {
+    promptRenderError.value = prompt.error
+  } else if (prompt) {
+    promptVars.value = Object.entries(prompt.vars ?? {}).map(([key, value]) => ({
+      key,
+      label: prompt.labels?.[key] || key,
+      help: prompt.help?.[key] || '',
+      value,
+    }))
+    promptRendered.value = prompt.rendered || prompt.template_text || ''
+    promptRenderError.value = prompt.render_error || ''
+  }
+
+  const params = data.generation_params
+  if (params?.error) {
+    paramsError.value = params.error
+  } else if (params) {
+    generationParams.value = params
+    modeOptions.value = params.modes ?? []
+    resolutionOptions.value = params.output ?? []
+    scaleOptions.value = params.input ?? []
+    const current = params.current
+    if (current) {
+      if (modeOptions.value.some((item) => item.value === current.mode)) {
+        mode.value = current.mode
+      }
+      if (resolutionOptions.value.some((item) => item.value === current.resolution)) {
+        resolution.value = current.resolution
+      }
+      if (scaleOptions.value.some((item) => item.value === current.scale)) {
+        scale.value = current.scale
+      }
+      ratio.value = current.aspect_ratio || 'auto'
+      if (current.session_id) {
+        selectedSession.value = String(current.session_id)
+        selectedProject.value = String(current.project_id || '')
+        selectedEpisode.value = String(current.episode || '')
+      }
+    }
+    duration.value = params.fixed?.duration_s ? String(params.fixed.duration_s) : 'auto'
+    paramsError.value = ''
+  }
+}
+
 async function loadCase(): Promise<void> {
   if (!caseName.value) {
     caseError.value = '缺少 case 名称'
@@ -177,55 +254,7 @@ async function loadCase(): Promise<void> {
   caseError.value = ''
   hydrating = true
   try {
-    const data = await fetchCase(caseName.value)
-    caseInfo.value = data
-    flow.value = data.flow
-    const selected = new Set(data.submit_selected ?? [])
-    assets.value = (data.assets ?? []).map((asset) => toAssetRow(asset, selected))
-
-    const prompt = data.prompt
-    if (prompt?.error) {
-      promptRenderError.value = prompt.error
-    } else if (prompt) {
-      promptVars.value = Object.entries(prompt.vars ?? {}).map(([key, value]) => ({
-        key,
-        label: prompt.labels?.[key] || key,
-        help: prompt.help?.[key] || '',
-        value,
-      }))
-      promptRendered.value = prompt.rendered || prompt.template_text || ''
-      promptRenderError.value = prompt.render_error || ''
-    }
-
-    const params = data.generation_params
-    if (params?.error) {
-      paramsError.value = params.error
-    } else if (params) {
-      generationParams.value = params
-      modeOptions.value = params.modes ?? []
-      resolutionOptions.value = params.output ?? []
-      scaleOptions.value = params.input ?? []
-      const current = params.current
-      if (current) {
-        if (modeOptions.value.some((item) => item.value === current.mode)) {
-          mode.value = current.mode
-        }
-        if (resolutionOptions.value.some((item) => item.value === current.resolution)) {
-          resolution.value = current.resolution
-        }
-        if (scaleOptions.value.some((item) => item.value === current.scale)) {
-          scale.value = current.scale
-        }
-        ratio.value = current.aspect_ratio || 'auto'
-        if (current.session_id) {
-          selectedSession.value = String(current.session_id)
-          selectedProject.value = String(current.project_id || '')
-          selectedEpisode.value = String(current.episode || '')
-        }
-      }
-      duration.value = params.fixed?.duration_s ? String(params.fixed.duration_s) : 'auto'
-      paramsError.value = ''
-    }
+    applyCaseInfo(await fetchCase(caseName.value))
   } catch (err) {
     caseError.value = err instanceof Error ? err.message : '读取 case 失败'
     assets.value = []
@@ -461,6 +490,40 @@ watch([selectedProject, selectedEpisode, selectedSession], scheduleParamsSave)
 function selectStep(key: string): void {
   router.push({ name: 'case', params: { name: caseName.value, step: key } })
 }
+
+function onStepUpdated(data: CaseInfo): void {
+  applyCaseInfo(data)
+}
+
+function applyGeometry(payload: GeometryPayload): void {
+  if (!caseInfo.value) return
+  caseInfo.value = {
+    ...caseInfo.value,
+    viewport: payload.viewport,
+    inner: payload.inner,
+    viewport_footprint: payload.viewport_footprint,
+    previews: payload.previews,
+  }
+}
+
+function onHandoff(data: CaseInfo): void {
+  applyCaseInfo(data)
+  void router.push({ name: 'case', params: { name: caseName.value, step: 'generate' } })
+}
+
+watch(
+  () => [activeStep.value, steps.value, caseInfo.value?.name],
+  () => {
+    if (!caseInfo.value) return
+    if (!steps.value.some((step) => step.key === activeStep.value)) {
+      void router.replace({
+        name: 'case',
+        params: { name: caseName.value, step: steps.value[0]?.key ?? 'generate' },
+      })
+    }
+  },
+  { immediate: true },
+)
 
 function openPrompt(): void {
   promptOpen.value = true
@@ -826,409 +889,441 @@ function roundResultText(round: RoundSummary): string {
       </button>
     </nav>
 
-    <div v-if="activeStep !== 'generate'" class="panel placeholder-panel">
-      <el-empty description="选区、抽取、首尾帧、合并与对比在 Phase 3 迁移" />
+    <div v-if="caseError" class="load-error">
+      <span>{{ caseError }}</span>
+      <el-button link type="primary" @click="loadCase">重试</el-button>
     </div>
 
-    <template v-else>
-      <div v-if="caseError" class="load-error">
-        <span>{{ caseError }}</span>
-        <el-button link type="primary" @click="loadCase">重试</el-button>
-      </div>
+    <template v-else-if="caseInfo">
+      <PickStep
+        v-if="activeStep === 'pick'"
+        :case-name="caseName"
+        :info="caseInfo"
+        @updated="onStepUpdated"
+        @geometry="applyGeometry"
+      />
+      <ExtractStep
+        v-else-if="activeStep === 'extract'"
+        :case-name="caseName"
+        :info="caseInfo"
+        @updated="onStepUpdated"
+      />
+      <KeyframeStep
+        v-else-if="activeStep === 'keyframe'"
+        :case-name="caseName"
+        :info="caseInfo"
+        @updated="onStepUpdated"
+        @handoff="onHandoff"
+      />
+      <MergeStep
+        v-else-if="['merge', 'pad', 'recompose'].includes(activeStep)"
+        :case-name="caseName"
+        :info="caseInfo"
+        @updated="onStepUpdated"
+      />
+      <CompareStep v-else-if="activeStep === 'compare'" :case-name="caseName" :info="caseInfo" />
 
-      <div v-else v-loading="caseLoading" class="gen-layout">
-        <section class="gen-main">
-          <div class="panel">
-            <div class="panel-head">
-              <h2 class="panel-title">素材与本次提交</h2>
-              <div class="panel-head-actions">
-                <span class="muted">{{ selectedCount }} 项已勾选</span>
-                <el-button size="small" :icon="Plus" @click="uploadOpen = true">上传素材</el-button>
+      <template v-else>
+        <div v-loading="caseLoading" class="gen-layout">
+          <section class="gen-main">
+            <div class="panel">
+              <div class="panel-head">
+                <h2 class="panel-title">素材与本次提交</h2>
+                <div class="panel-head-actions">
+                  <span class="muted">{{ selectedCount }} 项已勾选</span>
+                  <el-button size="small" :icon="Plus" @click="uploadOpen = true"
+                    >上传素材</el-button
+                  >
+                </div>
+              </div>
+              <div class="panel-body asset-list">
+                <div v-if="!assets.length" class="asset-empty">
+                  <el-empty description="还没有素材" :image-size="72" />
+                </div>
+                <div
+                  v-for="(asset, index) in assets"
+                  :key="asset.id"
+                  class="asset-row"
+                  :class="{ dim: !asset.selected }"
+                >
+                  <el-checkbox
+                    :model-value="asset.selected"
+                    :disabled="selectionSaving"
+                    aria-label="参与本次提交"
+                    @change="toggleAsset(asset, Boolean($event))"
+                  />
+                  <div class="asset-thumb" :style="{ background: asset.tone }">
+                    <img
+                      v-if="asset.url && asset.exists"
+                      :src="asset.url"
+                      alt=""
+                      class="asset-thumb-img"
+                    />
+                    <el-icon v-else :size="20">
+                      <VideoCamera v-if="asset.kind === 'video'" />
+                      <Picture v-else />
+                    </el-icon>
+                  </div>
+                  <div class="asset-main">
+                    <div class="asset-name">{{ asset.name }}</div>
+                    <div class="asset-meta">{{ asset.meta }}</div>
+                  </div>
+                  <el-select
+                    v-if="!asset.roleFixed"
+                    :model-value="asset.roleRaw || asset.role"
+                    size="small"
+                    style="width: 128px"
+                    @change="onRoleChange(asset, $event)"
+                  >
+                    <el-option
+                      v-for="role in ASSET_ROLE_OPTIONS"
+                      :key="role.value"
+                      :label="role.label"
+                      :value="role.value"
+                    />
+                  </el-select>
+                  <span v-else class="role-fixed">{{ asset.role }}</span>
+                  <div class="asset-actions">
+                    <el-button
+                      link
+                      :icon="Top"
+                      :disabled="index === 0"
+                      aria-label="上移素材"
+                      @click="moveAsset(asset, -1)"
+                    />
+                    <el-button
+                      link
+                      :icon="Bottom"
+                      :disabled="index === assets.length - 1"
+                      aria-label="下移素材"
+                      @click="moveAsset(asset, 1)"
+                    />
+                    <el-button
+                      link
+                      type="danger"
+                      :icon="Delete"
+                      aria-label="删除素材"
+                      @click="deleteAsset(asset)"
+                    />
+                  </div>
+                </div>
+                <div class="asset-note muted">
+                  排序、角色与勾选会即时保存；上传素材下一小步接入。
+                </div>
               </div>
             </div>
-            <div class="panel-body asset-list">
-              <div v-if="!assets.length" class="asset-empty">
-                <el-empty description="还没有素材" :image-size="72" />
+
+            <div class="panel">
+              <div class="panel-head">
+                <h2 class="panel-title">提示词</h2>
+                <el-button link type="primary" @click="openPrompt">展开编辑</el-button>
               </div>
-              <div
-                v-for="(asset, index) in assets"
-                :key="asset.id"
-                class="asset-row"
-                :class="{ dim: !asset.selected }"
-              >
-                <el-checkbox
-                  :model-value="asset.selected"
-                  :disabled="selectionSaving"
-                  aria-label="参与本次提交"
-                  @change="toggleAsset(asset, Boolean($event))"
+              <div class="panel-body">
+                <el-alert
+                  v-if="promptRenderError"
+                  type="warning"
+                  :closable="false"
+                  :title="promptRenderError"
+                  class="prompt-error"
                 />
-                <div class="asset-thumb" :style="{ background: asset.tone }">
-                  <img
-                    v-if="asset.url && asset.exists"
-                    :src="asset.url"
-                    alt=""
-                    class="asset-thumb-img"
-                  />
-                  <el-icon v-else :size="20">
-                    <VideoCamera v-if="asset.kind === 'video'" />
-                    <Picture v-else />
-                  </el-icon>
+                <div class="prompt-chips">
+                  <span v-for="item in promptVars" :key="item.key" class="prompt-chip">
+                    {{ item.label }}
+                  </span>
                 </div>
-                <div class="asset-main">
-                  <div class="asset-name">{{ asset.name }}</div>
-                  <div class="asset-meta">{{ asset.meta }}</div>
+                <div class="prompt-summary">
+                  <div class="prompt-line">
+                    <span class="prompt-label">{{ promptVars[0]?.label }}</span>
+                    <span>{{ promptVars[0]?.value }}</span>
+                  </div>
+                  <div class="prompt-line">
+                    <span class="prompt-label">{{ promptVars[2]?.label }}</span>
+                    <span>{{ promptVars[2]?.value }}</span>
+                  </div>
                 </div>
-                <el-select
-                  v-if="!asset.roleFixed"
-                  :model-value="asset.roleRaw || asset.role"
+                <div class="prompt-note muted">
+                  模板正文只读；变量改动会自动保存，提交与预演前会先写入。
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <aside class="gen-side">
+            <div class="panel">
+              <div class="panel-head">
+                <h2 class="panel-title">最近成片</h2>
+                <el-tag
+                  v-if="recentOutput"
+                  :type="recentOutput.partial ? 'warning' : 'success'"
+                  effect="light"
                   size="small"
-                  style="width: 128px"
-                  @change="onRoleChange(asset, $event)"
                 >
-                  <el-option
-                    v-for="role in ASSET_ROLE_OPTIONS"
-                    :key="role.value"
-                    :label="role.label"
-                    :value="role.value"
-                  />
-                </el-select>
-                <span v-else class="role-fixed">{{ asset.role }}</span>
-                <div class="asset-actions">
+                  {{ recentOutput.partial ? '仅中间段' : '可用' }}
+                </el-tag>
+                <span v-else class="muted">无</span>
+              </div>
+              <div class="panel-body">
+                <video
+                  v-if="recentOutput"
+                  class="output-video"
+                  :src="
+                    recentOutput.proxy_state === 'ready' ? recentOutput.proxy_url : recentOutput.url
+                  "
+                  controls
+                  preload="metadata"
+                />
+                <div v-else class="output-frame">
+                  <el-icon :size="34"><VideoPlay /></el-icon>
+                  <span>还没有成片</span>
+                </div>
+                <div v-if="recentOutput" class="output-meta mono">{{ recentOutput.file }}</div>
+                <div class="output-actions">
                   <el-button
-                    link
-                    :icon="Top"
-                    :disabled="index === 0"
-                    aria-label="上移素材"
-                    @click="moveAsset(asset, -1)"
-                  />
-                  <el-button
-                    link
-                    :icon="Bottom"
-                    :disabled="index === assets.length - 1"
-                    aria-label="下移素材"
-                    @click="moveAsset(asset, 1)"
-                  />
-                  <el-button
-                    link
-                    type="danger"
-                    :icon="Delete"
-                    aria-label="删除素材"
-                    @click="deleteAsset(asset)"
-                  />
-                </div>
-              </div>
-              <div class="asset-note muted">排序、角色与勾选会即时保存；上传素材下一小步接入。</div>
-            </div>
-          </div>
-
-          <div class="panel">
-            <div class="panel-head">
-              <h2 class="panel-title">提示词</h2>
-              <el-button link type="primary" @click="openPrompt">展开编辑</el-button>
-            </div>
-            <div class="panel-body">
-              <el-alert
-                v-if="promptRenderError"
-                type="warning"
-                :closable="false"
-                :title="promptRenderError"
-                class="prompt-error"
-              />
-              <div class="prompt-chips">
-                <span v-for="item in promptVars" :key="item.key" class="prompt-chip">
-                  {{ item.label }}
-                </span>
-              </div>
-              <div class="prompt-summary">
-                <div class="prompt-line">
-                  <span class="prompt-label">{{ promptVars[0]?.label }}</span>
-                  <span>{{ promptVars[0]?.value }}</span>
-                </div>
-                <div class="prompt-line">
-                  <span class="prompt-label">{{ promptVars[2]?.label }}</span>
-                  <span>{{ promptVars[2]?.value }}</span>
-                </div>
-              </div>
-              <div class="prompt-note muted">
-                模板正文只读；变量改动会自动保存，提交与预演前会先写入。
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <aside class="gen-side">
-          <div class="panel">
-            <div class="panel-head">
-              <h2 class="panel-title">最近成片</h2>
-              <el-tag
-                v-if="recentOutput"
-                :type="recentOutput.partial ? 'warning' : 'success'"
-                effect="light"
-                size="small"
-              >
-                {{ recentOutput.partial ? '仅中间段' : '可用' }}
-              </el-tag>
-              <span v-else class="muted">无</span>
-            </div>
-            <div class="panel-body">
-              <video
-                v-if="recentOutput"
-                class="output-video"
-                :src="
-                  recentOutput.proxy_state === 'ready' ? recentOutput.proxy_url : recentOutput.url
-                "
-                controls
-                preload="metadata"
-              />
-              <div v-else class="output-frame">
-                <el-icon :size="34"><VideoPlay /></el-icon>
-                <span>还没有成片</span>
-              </div>
-              <div v-if="recentOutput" class="output-meta mono">{{ recentOutput.file }}</div>
-              <div class="output-actions">
-                <el-button
-                  type="primary"
-                  plain
-                  size="small"
-                  :disabled="!canAdopt || adopting"
-                  :loading="adopting"
-                  @click="adoptResult"
-                >
-                  选用成片
-                </el-button>
-                <span class="muted">
-                  {{
-                    canAdopt ? `最新可用轮次：${latestUsableRound?.round}` : '当前成片已是采用结果'
-                  }}
-                </span>
-              </div>
-            </div>
-          </div>
-
-          <div class="panel">
-            <div class="panel-head">
-              <h2 class="panel-title">生成轮次</h2>
-              <span class="muted">{{ rounds.length }} 轮</span>
-            </div>
-            <div class="panel-body candidate-list">
-              <div v-if="!rounds.length" class="candidate-empty">
-                <el-empty description="还没有生成轮次" :image-size="72" />
-                <p v-if="roundsHint" class="muted rounds-hint">{{ roundsHint }}</p>
-              </div>
-              <div v-for="round in rounds" :key="round.round" class="candidate">
-                <div class="candidate-head">
-                  <span class="round-name">{{ round.round }}</span>
-                  <span class="muted mono">{{ formatRoundTime(round.updated) }}</span>
-                </div>
-                <div class="round-tags">
-                  <el-tag size="small" effect="light">{{ round.stage || '未知阶段' }}</el-tag>
-                  <el-tag size="small" effect="light" :type="roundResultType(round)">
-                    {{ roundResultText(round) }}
-                  </el-tag>
-                  <span v-if="round.gate && round.gate !== '?'" class="muted mono">
-                    gate={{ round.gate }}
+                    type="primary"
+                    plain
+                    size="small"
+                    :disabled="!canAdopt || adopting"
+                    :loading="adopting"
+                    @click="adoptResult"
+                  >
+                    选用成片
+                  </el-button>
+                  <span class="muted">
+                    {{
+                      canAdopt
+                        ? `最新可用轮次：${latestUsableRound?.round}`
+                        : '当前成片已是采用结果'
+                    }}
                   </span>
                 </div>
               </div>
             </div>
-          </div>
-          <div class="panel">
-            <div class="panel-head">
-              <h2 class="panel-title">最近任务</h2>
-              <el-tag
-                v-if="activeTask"
-                size="small"
-                effect="light"
-                :type="
-                  activeTask.status === 'failed'
-                    ? 'danger'
-                    : activeTask.status === 'done'
-                      ? 'success'
-                      : 'primary'
-                "
-              >
-                {{ activeTask.kind }} · {{ activeTask.status }}
-              </el-tag>
-              <span v-else class="muted">无</span>
-            </div>
-            <div class="panel-body">
-              <div v-if="!activeTask" class="muted task-empty">这个 case 还没有任务。</div>
-              <template v-else>
-                <div class="task-summary">
-                  <span>{{ activeTask.kind }}</span>
-                  <span class="muted mono">{{ activeTask.id }}</span>
-                  <span v-if="activeTask.queue_position" class="muted"
-                    >排队第 {{ activeTask.queue_position }} 位</span
-                  >
-                </div>
-                <el-alert
-                  v-if="activeTask.error"
-                  type="error"
-                  :closable="false"
-                  :title="activeTask.error"
-                  class="task-error"
-                />
-                <pre v-if="activeTask.tail.length" class="task-tail">{{
-                  activeTask.tail.join('\n')
-                }}</pre>
-              </template>
-            </div>
-          </div>
-        </aside>
-      </div>
 
-      <div v-if="!caseError" class="submit-bar">
-        <div class="submit-inner">
-          <div class="submit-row">
-            <label class="ctl">
-              <span>模式</span>
-              <el-select v-model="mode" size="small" style="width: 180px">
-                <el-option
-                  v-for="item in modeOptions"
-                  :key="item.value"
-                  :label="item.label"
-                  :value="item.value"
-                />
-                <el-option v-if="!modeOptions.length" label="暂无模式" value="" disabled />
-              </el-select>
-            </label>
-            <label class="ctl">
-              <span>比例</span>
-              <el-select v-model="ratio" size="small" style="width: 110px">
-                <el-option
-                  v-for="value in ratioOptions"
-                  :key="value"
-                  :label="ratioLabel(value)"
-                  :value="value"
-                />
-              </el-select>
-            </label>
-            <label class="ctl">
-              <span>输出分辨率</span>
-              <el-select v-model="resolution" size="small" style="width: 170px">
-                <el-option
-                  v-for="item in resolutionOptions"
-                  :key="item.value"
-                  :label="`${item.value}（${item.width}×${item.height}）`"
-                  :value="item.value"
-                />
-              </el-select>
-            </label>
-            <label class="ctl">
-              <span>输入分辨率</span>
-              <el-select v-model="scale" size="small" style="width: 190px">
-                <el-option
-                  v-for="item in scaleOptions"
-                  :key="item.value"
-                  :label="scaleLabel(item)"
-                  :value="item.value"
-                  :disabled="!item.ok"
-                />
-              </el-select>
-            </label>
-            <label class="ctl">
-              <span>时长</span>
-              <el-select v-model="duration" size="small" style="width: 150px">
-                <el-option
-                  v-for="item in durationOptions"
-                  :key="item.value"
-                  :label="item.label"
-                  :value="item.value"
-                />
-              </el-select>
-            </label>
-            <span v-if="paramsError" class="session-error">{{ paramsError }}</span>
-          </div>
-          <div class="submit-row">
-            <label class="ctl">
-              <span>项目</span>
-              <el-select
-                v-model="selectedProject"
-                size="small"
-                style="width: 170px"
-                :loading="sessionsLoading"
-              >
-                <el-option
-                  v-for="item in projects"
-                  :key="item.id"
-                  :label="item.name"
-                  :value="String(item.id)"
-                />
-              </el-select>
-            </label>
-            <label class="ctl">
-              <span>剧集</span>
-              <el-select
-                v-model="selectedEpisode"
-                size="small"
-                style="width: 160px"
-                :disabled="!episodes.length"
-              >
-                <el-option
-                  v-for="item in episodes"
-                  :key="item.no"
-                  :label="`第 ${item.no} 集 · ${item.name}`"
-                  :value="String(item.no)"
-                />
-              </el-select>
-            </label>
-            <label class="ctl">
-              <span>会话</span>
-              <el-select v-model="selectedSession" size="small" style="width: 220px">
-                <el-option label="个人额度（不使用项目会话）" value="0" />
-                <el-option
-                  v-for="item in sessions"
-                  :key="item.id"
-                  :label="item.name || '未命名'"
-                  :value="String(item.id)"
-                />
-              </el-select>
-            </label>
-            <el-button
-              size="small"
-              :icon="Refresh"
-              :loading="sessionsLoading"
-              @click="refreshSessions"
-            >
-              刷新
-            </el-button>
-            <span class="muted quota-hint">
-              已获取 {{ projects.length }} 个项目<template v-if="lastRefreshed">
-                · 刷新于 {{ lastRefreshed }}</template
-              >
-              <template v-if="paramsSaving"> · 参数保存中</template>
-            </span>
-            <span v-if="sessionError" class="session-error">{{ sessionError }}</span>
-            <div class="submit-actions">
-              <span class="run-state">
-                <span class="status-dot" :class="statusTone()" />
-                {{ status }}
-                <span v-if="statusDetail" class="run-detail">{{ statusDetail }}</span>
-              </span>
-              <el-button
-                size="small"
-                :loading="activeKind === 'dry_run'"
-                :disabled="(running && activeKind !== 'dry_run') || !generateGate?.ready"
-                @click="dryRun"
-              >
-                预演检查（不扣费）
-              </el-button>
-              <el-button
-                type="primary"
-                size="small"
-                :loading="activeKind === 'submit'"
-                :disabled="(running && activeKind !== 'submit') || !generateGate?.ready"
-                @click="submit"
-              >
-                提交生成
-              </el-button>
+            <div class="panel">
+              <div class="panel-head">
+                <h2 class="panel-title">生成轮次</h2>
+                <span class="muted">{{ rounds.length }} 轮</span>
+              </div>
+              <div class="panel-body candidate-list">
+                <div v-if="!rounds.length" class="candidate-empty">
+                  <el-empty description="还没有生成轮次" :image-size="72" />
+                  <p v-if="roundsHint" class="muted rounds-hint">{{ roundsHint }}</p>
+                </div>
+                <div v-for="round in rounds" :key="round.round" class="candidate">
+                  <div class="candidate-head">
+                    <span class="round-name">{{ round.round }}</span>
+                    <span class="muted mono">{{ formatRoundTime(round.updated) }}</span>
+                  </div>
+                  <div class="round-tags">
+                    <el-tag size="small" effect="light">{{ round.stage || '未知阶段' }}</el-tag>
+                    <el-tag size="small" effect="light" :type="roundResultType(round)">
+                      {{ roundResultText(round) }}
+                    </el-tag>
+                    <span v-if="round.gate && round.gate !== '?'" class="muted mono">
+                      gate={{ round.gate }}
+                    </span>
+                  </div>
+                </div>
+              </div>
             </div>
-          </div>
-          <div v-if="generateGate && !generateGate.ready" class="gate-reason">
-            提交条件未满足：{{ generateGate.reason || '请先完成前一步' }}
+            <div class="panel">
+              <div class="panel-head">
+                <h2 class="panel-title">最近任务</h2>
+                <el-tag
+                  v-if="activeTask"
+                  size="small"
+                  effect="light"
+                  :type="
+                    activeTask.status === 'failed'
+                      ? 'danger'
+                      : activeTask.status === 'done'
+                        ? 'success'
+                        : 'primary'
+                  "
+                >
+                  {{ activeTask.kind }} · {{ activeTask.status }}
+                </el-tag>
+                <span v-else class="muted">无</span>
+              </div>
+              <div class="panel-body">
+                <div v-if="!activeTask" class="muted task-empty">这个 case 还没有任务。</div>
+                <template v-else>
+                  <div class="task-summary">
+                    <span>{{ activeTask.kind }}</span>
+                    <span class="muted mono">{{ activeTask.id }}</span>
+                    <span v-if="activeTask.queue_position" class="muted"
+                      >排队第 {{ activeTask.queue_position }} 位</span
+                    >
+                  </div>
+                  <el-alert
+                    v-if="activeTask.error"
+                    type="error"
+                    :closable="false"
+                    :title="activeTask.error"
+                    class="task-error"
+                  />
+                  <pre v-if="activeTask.tail.length" class="task-tail">{{
+                    activeTask.tail.join('\n')
+                  }}</pre>
+                </template>
+              </div>
+            </div>
+          </aside>
+        </div>
+
+        <div class="submit-bar">
+          <div class="submit-inner">
+            <div class="submit-row">
+              <label class="ctl">
+                <span>模式</span>
+                <el-select v-model="mode" size="small" style="width: 180px">
+                  <el-option
+                    v-for="item in modeOptions"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                  <el-option v-if="!modeOptions.length" label="暂无模式" value="" disabled />
+                </el-select>
+              </label>
+              <label class="ctl">
+                <span>比例</span>
+                <el-select v-model="ratio" size="small" style="width: 110px">
+                  <el-option
+                    v-for="value in ratioOptions"
+                    :key="value"
+                    :label="ratioLabel(value)"
+                    :value="value"
+                  />
+                </el-select>
+              </label>
+              <label class="ctl">
+                <span>输出分辨率</span>
+                <el-select v-model="resolution" size="small" style="width: 170px">
+                  <el-option
+                    v-for="item in resolutionOptions"
+                    :key="item.value"
+                    :label="`${item.value}（${item.width}×${item.height}）`"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+              <label class="ctl">
+                <span>输入分辨率</span>
+                <el-select v-model="scale" size="small" style="width: 190px">
+                  <el-option
+                    v-for="item in scaleOptions"
+                    :key="item.value"
+                    :label="scaleLabel(item)"
+                    :value="item.value"
+                    :disabled="!item.ok"
+                  />
+                </el-select>
+              </label>
+              <label class="ctl">
+                <span>时长</span>
+                <el-select v-model="duration" size="small" style="width: 150px">
+                  <el-option
+                    v-for="item in durationOptions"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+              <span v-if="paramsError" class="session-error">{{ paramsError }}</span>
+            </div>
+            <div class="submit-row">
+              <label class="ctl">
+                <span>项目</span>
+                <el-select
+                  v-model="selectedProject"
+                  size="small"
+                  style="width: 170px"
+                  :loading="sessionsLoading"
+                >
+                  <el-option
+                    v-for="item in projects"
+                    :key="item.id"
+                    :label="item.name"
+                    :value="String(item.id)"
+                  />
+                </el-select>
+              </label>
+              <label class="ctl">
+                <span>剧集</span>
+                <el-select
+                  v-model="selectedEpisode"
+                  size="small"
+                  style="width: 160px"
+                  :disabled="!episodes.length"
+                >
+                  <el-option
+                    v-for="item in episodes"
+                    :key="item.no"
+                    :label="`第 ${item.no} 集 · ${item.name}`"
+                    :value="String(item.no)"
+                  />
+                </el-select>
+              </label>
+              <label class="ctl">
+                <span>会话</span>
+                <el-select v-model="selectedSession" size="small" style="width: 220px">
+                  <el-option label="个人额度（不使用项目会话）" value="0" />
+                  <el-option
+                    v-for="item in sessions"
+                    :key="item.id"
+                    :label="item.name || '未命名'"
+                    :value="String(item.id)"
+                  />
+                </el-select>
+              </label>
+              <el-button
+                size="small"
+                :icon="Refresh"
+                :loading="sessionsLoading"
+                @click="refreshSessions"
+              >
+                刷新
+              </el-button>
+              <span class="muted quota-hint">
+                已获取 {{ projects.length }} 个项目<template v-if="lastRefreshed">
+                  · 刷新于 {{ lastRefreshed }}</template
+                >
+                <template v-if="paramsSaving"> · 参数保存中</template>
+              </span>
+              <span v-if="sessionError" class="session-error">{{ sessionError }}</span>
+              <div class="submit-actions">
+                <span class="run-state">
+                  <span class="status-dot" :class="statusTone()" />
+                  {{ status }}
+                  <span v-if="statusDetail" class="run-detail">{{ statusDetail }}</span>
+                </span>
+                <el-button
+                  size="small"
+                  :loading="activeKind === 'dry_run'"
+                  :disabled="(running && activeKind !== 'dry_run') || !generateGate?.ready"
+                  @click="dryRun"
+                >
+                  预演检查（不扣费）
+                </el-button>
+                <el-button
+                  type="primary"
+                  size="small"
+                  :loading="activeKind === 'submit'"
+                  :disabled="(running && activeKind !== 'submit') || !generateGate?.ready"
+                  @click="submit"
+                >
+                  提交生成
+                </el-button>
+              </div>
+            </div>
+            <div v-if="generateGate && !generateGate.ready" class="gate-reason">
+              提交条件未满足：{{ generateGate.reason || '请先完成前一步' }}
+            </div>
           </div>
         </div>
-      </div>
+      </template>
     </template>
 
     <el-drawer v-model="promptOpen" title="编辑提示词" size="760px">

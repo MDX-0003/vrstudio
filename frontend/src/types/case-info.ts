@@ -106,18 +106,120 @@ export interface RoundsPayload {
   hint: string
 }
 
+export interface Viewport {
+  yaw_deg: number
+  pitch_deg: number
+  fov_h_deg: number
+  width: number
+  height: number
+}
+
+export interface Inner {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface FrameRange {
+  start: number
+  end: number
+}
+
+export interface ViewportOption {
+  label: string
+  width: number
+  height: number
+  aspect: string
+}
+
+export interface Footprint {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+export interface FileInfo {
+  name: string
+  path: string
+  rel: string | null
+  exists: boolean
+  mtime: number | null
+  size: number | null
+}
+
+export interface ExtractVersion {
+  version: string
+  extracted: boolean
+  has_result: boolean
+}
+
+export interface StepFiles {
+  inputs: FileInfo[]
+  outputs: FileInfo[]
+}
+
+export interface KeyframePick {
+  round: string
+  index: number
+  asset: string
+}
+
+export interface KeyframeState {
+  enabled: boolean
+  error: string | null
+  sheet: string | null
+  sheet_candidates: { id: string; label: string; path: string }[]
+  first: KeyframePick | null
+  last: KeyframePick | null
+  extract: string | null
+  stale: boolean
+  complete: boolean
+}
+
+export interface RawFrame {
+  id: string
+  role: string
+  label: string
+  path: string
+  exists: boolean
+  width: number | null
+  height: number | null
+  size: number | null
+  url: string
+}
+
 export interface CaseInfo {
   name: string
   flow: Flow
-  assets: AssetDetail[]
-  submit_selected: string[]
-  prompt: PromptPayload
-  generation_params: GenerationParams
-  outputs: OutputFile[]
+  source_url: string
+  source_path: string | null
+  viewport: Viewport | null
+  inner: Inner | null
+  frames: FrameRange | null
+  frame_count: number | null
+  fps: number | null
+  duration_s: number | null
+  proxy: { state: string; url: string } | null
+  extract_current: string | null
   adopt_round: string | null
-  rounds: RoundsPayload
+  assets: AssetDetail[]
+  raw_frames: RawFrame[]
+  keyframe: KeyframeState
+  submit_selected: string[]
+  derived: FileInfo[]
+  extracts: ExtractVersion[]
+  outputs: OutputFile[]
+  step_files: Record<string, StepFiles>
   gates: Record<
     string,
     { ok: boolean; ready?: boolean; reason?: string; evidence?: string } | undefined
   >
+  previews: { vp?: string }
+  viewport_options: ViewportOption[]
+  viewport_footprint: Footprint[]
+  prompt: PromptPayload
+  generation_params: GenerationParams
+  rounds: RoundsPayload
 }

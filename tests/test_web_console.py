@@ -285,6 +285,14 @@ def test_upload_rejects_bad_type_and_size(client):
     assert r.status_code == 400
 
 
+def test_media_extract_serves_version_file(client, patch_case, tmp_path):
+    directory = _mk_extract(patch_case, tmp_path, "v1")
+    (directory / "clip.mp4").write_bytes(b"clip")
+    r = client.get(f"/media/extract/{patch_case}/v1/clip.mp4")
+    assert r.status_code == 200 and r.content == b"clip"
+    assert client.get(f"/media/extract/{patch_case}/v1/nope.mp4").status_code == 404
+
+
 def test_modes_endpoint_returns_model_modes(client, monkeypatch):
     monkeypatch.setattr(web_app, "_vrgen_json",
                         lambda argv: {"modes": [{"value": "allMediaRef"}],
