@@ -7,8 +7,8 @@
 "use strict";
 
 const FLOW_STEPS = {
-  patch: [["pick", "选区"], ["extract", "抽取"], ["generate", "生成"],
-          ["merge", "合并"], ["compare", "对比"]],
+  patch: [["pick", "选区"], ["extract", "抽取"], ["keyframe", "首尾帧"],
+          ["generate", "生成"], ["merge", "合并"], ["compare", "对比"]],
   fullredraw: [["pad", "扩充画面"], ["generate", "生成"],
                ["recompose", "裁回原尺寸"], ["compare", "对比"]],
   gen: [["generate", "生成"]],
@@ -41,6 +41,10 @@ function showStep(id) {
   renderSteps();
   syncSubmitBarHeight();
   if (id === "generate") renderSubmitBar();
+  if (id === "keyframe") {
+    if (typeof loadKeyframePrompts === "function") loadKeyframePrompts();
+    if (typeof loadKeyframeRounds === "function") loadKeyframeRounds();
+  }
 }
 
 // ── info 加载 ────────────────────────────────────────────────────────────
@@ -103,6 +107,88 @@ function refreshPreview() {
 function schedulePreview() {
   clearTimeout(previewTimer);
   previewTimer = setTimeout(refreshPreview, 150);
+}
+
+/** 几何交互的轻量应答：只合并 viewport / inner / 预览 URL，不重扫素材。 */
+async function fetchGeometry(path, body) {
+  try {
+    const r = await fetch(`/api/case/${encodeURIComponent(CASE)}/${path}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    });
+    if (r.status === 404) { location.href = "/"; return null; }
+    const d = await r.json();
+    if (!r.ok) { alert(d.error || r.statusText); return null; }
+    return d;
+  } catch (_) {
+    return null;
+  }
+}
+
+function applyGeometry(d) {
+  if (!d) return;
+  if (d.viewport) info.viewport = d.viewport;
+  if (d.inner) info.inner = d.inner;
+  if (d.previews) info.previews = d.previews;
+  if (d.viewport_footprint) info.viewport_footprint = d.viewport_footprint;
+  renderPick();
+}
+
+/** 视口在 ERP 上的示意框；坐标是 ERP 的 0..1 分数。 */
+function drawFootprint(rects) {
+  const boxes = document.querySelectorAll("#vpFoots .vpFoot");
+  const video = $("erpVid"), wrap = $("erpWrap");
+  if (!boxes.length || !video || !wrap) return;
+  const vr = video.getBoundingClientRect();
+  const wr = wrap.getBoundingClientRect();
+  const list = rects || [];
+  for (let i = 0; i < boxes.length; i++) {
+    const box = boxes[i], r = list[i];
+    if (!r || !vr.width || !vr.height) {
+      box.style.display = "none";
+      continue;
+    }
+    box.style.left = (vr.left - wr.left + r.x * vr.width) + "px";
+    box.style.top = (vr.top - wr.top + r.y * vr.height) + "px";
+    box.style.width = (r.w * vr.width) + "px";
+    box.style.height = (r.h * vr.height) + "px";
+    box.style.display = "block";
+  }
+}
+
+/** 视口尺寸下拉：档位由 info.viewport_options 决定，只有一档时禁用。 */
+function renderViewportSize() {
+  const sel = $("vpSize");
+  if (!sel) return;
+  const vp = (info && info.viewport) || {};
+  const opts = (info && info.viewport_options) || [];
+  const sig = JSON.stringify(opts.map(o => [o.width, o.height, o.label]));
+  if (sel.dataset.sig !== sig) {
+    sel.dataset.sig = sig;
+    sel.innerHTML = "";
+    for (const o of opts) {
+      const el = document.createElement("option");
+      el.value = `${o.width}x${o.height}`;
+      el.dataset.width = o.width;
+      el.dataset.height = o.height;
+      el.textContent = o.label || `${o.width}×${o.height}`;
+      sel.appendChild(el);
+    }
+    sel.disabled = opts.length < 2;
+  }
+  if (vp.width && vp.height) {
+    const value = `${vp.width}x${vp.height}`;
+    if ([...sel.options].some(o => o.value === value)) sel.value = value;
+  }
+}
+
+async function changeViewportSize() {
+  const sel = $("vpSize");
+  const opt = sel && sel.selectedOptions[0];
+  if (!opt) return;
+  applyGeometry(await fetchGeometry("viewport-size", {
+    width: +opt.dataset.width, height: +opt.dataset.height,
+  }));
 }
 
 /** 顶部播放器优先用代理；代理没就绪时先用源片，Chrome 能播就先用着。 */
@@ -217,6 +303,8 @@ function renderPick() {
   if (FLOW !== "patch") return;
   setVideoUrl(videoUrl());
   refreshPreview();
+  drawFootprint(info.viewport_footprint);
+  renderViewportSize();
   const vp = info.viewport || {};
   $("vpMeta").textContent =
     `yaw ${vp.yaw_deg ?? "-"}  pitch ${vp.pitch_deg ?? "-"}  fov ${vp.fov_h_deg ?? "-"}  ` +
@@ -248,7 +336,7 @@ function renderPick() {
 async function erpClick(e) {
   const p = PickCoords.point($("erpVid"), e);
   if (!p) return;
-  await post("viewport", { fx: p.frac.x, fy: p.frac.y });
+  applyGeometry(await fetchGeometry("viewport", { fx: p.frac.x, fy: p.frac.y }));
 }
 
 function setupPick() {
@@ -273,6 +361,10 @@ function setupPick() {
       pendingSeek = null;
     }
     updateFrameLabel();
+    drawFootprint((info && info.viewport_footprint) || []);
+  });
+  window.addEventListener("resize", () => {
+    drawFootprint((info && info.viewport_footprint) || []);
   });
   v.addEventListener("seeked", () => {
     const fps = fpsOf();
@@ -327,12 +419,14 @@ function setupPick() {
       const seq = ++innerSeq;
       setInnerBox(inner, true);
       setInnerMeta(inner);
-      const d = await post("inner", { fx: r.frac.x, fy: r.frac.y,
-                                      fw: r.frac.w, fh: r.frac.h },
-                           { stale: () => seq !== innerSeq });
-      if (!d && seq === innerSeq) {   // 写盘失败：回到上一次保存的框
+      const d = await fetchGeometry("inner", { fx: r.frac.x, fy: r.frac.y,
+                                               fw: r.frac.w, fh: r.frac.h });
+      if (seq !== innerSeq) return;
+      if (!d) {                       // 写盘失败：回到上一次保存的框
         setInnerBox(info.inner, true);
         setInnerMeta(info.inner);
+      } else {
+        applyGeometry(d);
       }
     },
     onCancel: () => {
@@ -342,7 +436,10 @@ function setupPick() {
   });
   for (const b of document.querySelectorAll("#joy .jb")) {
     let timer = null;
-    const step = () => post("nudge", { dyaw: +b.dataset.dy, dpitch: +b.dataset.dp });
+    const step = async () => {
+      applyGeometry(await fetchGeometry(
+        "nudge", { dyaw: +b.dataset.dy, dpitch: +b.dataset.dp }));
+    };
     b.addEventListener("mousedown", () => { step(); timer = setInterval(step, 100); });
     window.addEventListener("mouseup", () => clearInterval(timer));
     b.addEventListener("mouseleave", () => clearInterval(timer));
@@ -354,7 +451,7 @@ async function saveFrames() {
 }
 
 async function resetDraft() {
-  await post("reset-draft", {});
+  applyGeometry(await fetchGeometry("reset-draft", {}));
 }
 
 // ── extract（patch 第二步）─────────────────────────────────────────────
@@ -552,8 +649,13 @@ function setupSubmitBar() {
 
 /** 任务队列收尾：把 pending 的预演标记成通过/失败，下一次渲染再比对签名。 */
 function onTasksSettled(s) {
+  const recent = (s && s.last) || [];
+  if (recent.some(h => h.kind === "keyframe" && h.case === CASE)
+      && typeof loadKeyframeRounds === "function") {
+    loadKeyframeRounds();
+  }
   if (!preview.sig || preview.state !== "pending") return;
-  const last = ((s && s.last) || []).slice().reverse()
+  const last = recent.slice().reverse()
     .find(h => h.kind === "dry_run" && h.case === CASE);
   if (!last) return;
   preview.state = last.state === "done" ? "ok" : "failed";

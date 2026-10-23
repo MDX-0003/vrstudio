@@ -33,8 +33,12 @@
               display: none; box-sizing: border-box; }
   #innerBox.committed { border-style: solid; }
   #erpWrap { position: relative; display: inline-block; }
-  #vpFoot, #vpCross { position: absolute; pointer-events: none; display: none; }
-  #vpFoot { border: 1px solid #4a4; }
+  #vpCross { position: absolute; pointer-events: none; display: none; }
+  /* 视口在 ERP 上的示意框：最多两块（跨经线时），坐标由服务端按几何算 */
+  #vpFoots { position: absolute; inset: 0; pointer-events: none; }
+  .vpFoot { position: absolute; display: none; pointer-events: none;
+            border: 1px solid #4a4; background: rgba(74, 170, 74, 0.14);
+            box-sizing: border-box; }
   #vpCross { width: 18px; height: 18px; margin: -9px 0 0 -9px;
              background: linear-gradient(#d33,#d33) center / 100% 2px no-repeat,
                          linear-gradient(#d33,#d33) center / 2px 100% no-repeat; }
@@ -167,13 +171,23 @@
     border-bottom: 1px dashed #ece4d4; padding: 0.12rem 0; }
   .derivedRow b { color: #5a4a30; min-width: 90px; }
   .assetCard input[type="checkbox"] { margin: 0 0.2rem; }
-  .kfGrid { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 0.5rem; }
-  .kfCard { border: 1px solid #e7ddcc; border-radius: 6px; padding: 0.35rem;
+  /* 首尾帧步骤：两帧底图、候选网格与当前定稿 */
+  .kfBlock { margin: 0.7rem 0; }
+  .kfRaw { display: flex; gap: 0.7rem; flex-wrap: wrap; }
+  .kfRaw figure { margin: 0; }
+  .kfRaw img { width: 330px; max-width: 100%; height: auto; cursor: zoom-in; }
+  .kfRaw figcaption { font-size: 0.75rem; color: #6b5d48; line-height: 1.5; }
+  .kfStepHead { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
+  .kfStepHead b { color: #5a4a30; }
+  .kfGrid { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.5rem; }
+  .kfRound { border-top: 1px dashed #ece4d4; padding-top: 0.4rem; }
+  .kfRound .rhead { font-size: 0.74rem; color: #8a7c66; margin-bottom: 0.2rem; }
+  .kfRow { display: flex; flex-wrap: wrap; gap: 0.6rem; }
+  .kfItem { border: 1px solid #e7ddcc; border-radius: 6px; padding: 0.3rem;
     background: #fff; width: 180px; }
-  .kfCard img { width: 100%; height: 100px; object-fit: cover; }
-  .kfCard button { margin: 0.15rem 0.1rem 0 0; }
-  #kfAssets label { display: inline-flex; gap: 0.25rem; align-items: center;
-    margin: 0.15rem 0.6rem 0.15rem 0; }
+  .kfItem img { width: 100%; height: 100px; object-fit: cover; cursor: zoom-in; }
+  .kfItem.current { outline: 2px solid #5a7d4a; }
+  .kfItem button { margin: 0.2rem 0 0 0; width: 100%; }
 </style>
 </head>
 <body data-name="{{ name }}" data-flow="{{ flow }}">
@@ -188,7 +202,8 @@
   <div class="meta">全景：拖进度条逐帧查看；点哪里，视口中心就在哪里</div>
   <div id="erpWrap">
     <video id="erpVid" style="width:512px" muted preload="auto"></video>
-    <div id="vpFoot"></div><div id="vpCross"></div>
+    <div id="vpFoots"><div class="vpFoot"></div><div class="vpFoot"></div></div>
+    <div id="vpCross"></div>
   </div>
   <div id="scrub">
     <button id="btnPlay" style="width:34px" title="播放/暂停">▶</button>
@@ -199,6 +214,9 @@
   </div>
   <div class="meta">逐帧走查：检查红框（inner）是否始终框住目标——下方视口图跟随当前帧刷新</div>
   <div class="meta" id="vpMeta">yaw - pitch -</div>
+  <div class="meta">视口尺寸
+    <select id="vpSize" onchange="changeViewportSize()"></select>
+  </div>
   <div class="meta" id="proxyState">预览代理：准备中…</div>
   <div class="meta">视口：按住拖一个框圈住目标区域，松手保存</div>
   <div id="vpWrap"><img id="vpImg" style="width:512px" draggable="false"><div id="innerBox"></div></div>
@@ -229,7 +247,15 @@
   <div id="verList"></div>
 </div>
 
-<!-- ── 生成（三条流程共用；素材侧边栏与工作台在 partials/generate.html）── -->
+{% if flow == "patch" %}
+<!-- ── patch：首尾帧（可选步骤；插在抽取与生成之间）──────────────── -->
+<div class="panel" id="pnl-keyframe">
+  <h3>首尾帧重绘</h3>
+  {% include "partials/keyframe.html" %}
+</div>
+{% endif %}
+
+<!-- ── 生成（三条流程共用；素材侧边栏在 partials/generate.html）── -->
 <div class="panel" id="pnl-generate">
   {% include "partials/generate.html" %}
 </div>
@@ -298,12 +324,12 @@
 <script src="/static/clientlog.js?v=1"></script>
 <script src="/static/pick.js?v=4"></script>
 <script src="/static/erp360.js?v=5"></script>
-<script src="/static/common.js?v=4"></script>
+<script src="/static/common.js?v=5"></script>
 <script src="/static/assets.js?v=3"></script>
-<script src="/static/params.js?v=3"></script>
+<script src="/static/params.js?v=6"></script>
 <script src="/static/prompt.js?v=3"></script>
-<script src="/static/keyframe.js?v=1"></script>
+<script src="/static/keyframe.js?v=3"></script>
 <script src="/static/tasks.js?v=2"></script>
-<script src="/static/wizard.js?v=10"></script>
+<script src="/static/wizard.js?v=12"></script>
 </body>
 </html>

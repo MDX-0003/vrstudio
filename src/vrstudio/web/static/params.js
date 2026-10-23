@@ -37,26 +37,32 @@ function _fillAspect(mode, wanted) {
   return pick;
 }
 
-function _fillDuration(mode) {
+function _fillDuration(mode, autoSeconds) {
   const sel = $("genDuration");
   if (!sel) return;
+  const previous = sel.value;
   sel.innerHTML = "";
   const d = (mode && mode.duration) || {};
+  const autoLabel = autoSeconds ? `自动（约 ${autoSeconds} 秒）` : "自动";
   if (d.type === "range" && d.min != null && d.max != null) {
-    const auto = new Option("自动", "auto");
-    auto.title = "不指定时长，由母版或素材推导";
+    const auto = new Option(autoLabel, "auto");
+    auto.title = autoSeconds
+      ? `不指定时长；按 clip 帧范围与帧率推导，约 ${autoSeconds} 秒`
+      : "不指定时长，由母版或素材推导";
     sel.appendChild(auto);
     for (let i = Number(d.min); i <= Number(d.max); i++) {
       sel.appendChild(new Option(`${i} 秒`, String(i)));
     }
     sel.disabled = false;
   } else {
-    const auto = new Option("自动", "auto");
+    const auto = new Option(autoLabel, "auto");
     auto.title = "由母版/素材推导";
     sel.appendChild(auto);
     sel.disabled = true;
   }
-  sel.value = "auto";
+  // 重画（例如预演返回后）不改用户刚选的时长；选项里没有才退回自动。
+  const values = [...sel.options].map(o => o.value);
+  sel.value = values.includes(previous) ? previous : "auto";
 }
 
 function renderGenParams() {
@@ -89,7 +95,7 @@ function renderGenParams() {
   const mode = _modeMeta(gp, cur.mode) || modeList[0];
   modeSel.value = mode.value;
   _fillAspect(mode, cur.aspect_ratio);
-  _fillDuration(mode);
+  _fillDuration(mode, gp.auto_duration_s);
 
   const inputLabel = (o) => ({ auto: "自动", full: "原尺寸", half: "半尺寸" })[o.value] || o.value;
   const option = (o, text, extra = "") =>
@@ -97,25 +103,33 @@ function renderGenParams() {
     `${o.ok === false ? " disabled" : ""}>${text}${o.ok === false ? "　超限" : ""}${extra}</option>`;
   resSel.innerHTML = (gp.output || []).map(o => option(o, o.value)).join("");
   scaleSel.innerHTML = (gp.input || []).map(o => option(o, inputLabel(o))).join("");
-  // 纯图片模式两者都是空数组：保持空下拉，等素材补齐后重新计算。
-  const noAssets = !(gp.output || []).length || !(gp.input || []).length;
-  if (noAssets) {
-    resSel.disabled = true;
-    scaleSel.disabled = true;
-    hint.textContent = "先添加素材，再计算输入/输出尺寸；纯图片模式不需要视频。";
-  } else {
-    if (cur.resolution) resSel.value = cur.resolution;
+  // 输出与输入分开判断：firstLastFrame 没有输入视频，input 必然为空，
+  // 但输出分辨率仍然可选，不能因为 input 为空就把两个下拉框一起禁用。
+  const noOutput = !(gp.output || []).length;
+  const noInput = !(gp.input || []).length;
+  resSel.disabled = noOutput;
+  scaleSel.disabled = noInput;
+  if (!noOutput && cur.resolution) resSel.value = cur.resolution;
+  if (!noInput) {
     const wanted = [...scaleSel.options].find(o => o.value === cur.scale);
     if (wanted && !wanted.disabled) scaleSel.value = cur.scale;
     else scaleSel.value = ((gp.input || []).find(o => o.ok !== false) || {}).value || "auto";
+  }
+  if (noOutput) {
+    hint.textContent = "先添加素材，再计算输出尺寸。";
   }
   const f = gp.fixed || {};
   if (durSel.disabled && durSel.options.length && f.duration_s) {
     durSel.options[0].textContent = `自动（${f.duration_s} 秒）`;
     durSel.options[0].title = `由母版/素材推导，本次实际为 ${f.duration_s} 秒`;
   }
+  const chosen = durSel.value;
+  const durationText = (chosen && chosen !== "auto")
+    ? `${chosen} 秒`
+    : (gp.auto_duration_s ? `自动（约 ${gp.auto_duration_s} 秒）`
+      : (f.duration_s ? `自动（${f.duration_s} 秒）` : "由输入/素材推导"));
   fixed.textContent =
-    `模型 ${f.model_id}（Seedance 2.5）· 时长 ${f.duration_s || "由输入/素材推导"}` +
+    `模型 ${f.model_id}（Seedance 2.5）· 时长 ${durationText}` +
     ` · 数量 ${f.num}` +
     (mode.value === "firstLastFrame" ? " · 首期全链路固定 16:9" : "");
 }
@@ -124,7 +138,7 @@ function onModeChange() {
   const gp = (info && info.generation_params) || {};
   const mode = _modeMeta(gp, ($("genMode") || {}).value);
   _fillAspect(mode, null);
-  _fillDuration(mode);
+  _fillDuration(mode, gp.auto_duration_s);
   saveGenParams();
 }
 
@@ -244,6 +258,7 @@ async function loadSessions() {
     sessionTree = d;
     renderSessions();
     _setHint(hint, `已获取 ${(d.projects || []).length} 个项目`);
+    if (typeof renderKeyframe === "function") renderKeyframe();   // 首尾帧步骤的计费会话行
   } catch (e) {
     renderSessions();
     _setHint(hint, "会话列表获取失败：" + (e.message || e), "meta bad");

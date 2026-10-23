@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import types
 from fractions import Fraction
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from starlette.testclient import TestClient
 from vrstudio import case as case_mod
 from vrstudio import config as config_mod
 from vrstudio.cli import generate as gen_mod
+from vrstudio import keyframe
 from vrstudio.media.videoio import VideoInfo
 from vrstudio.redraw.geometry import PadSpec, plan_pad
 from vrstudio.redraw.manifest import VideoSettings, from_plan
@@ -258,6 +260,9 @@ def test_viewport_click_sets_yaw_pitch(client, patch_case, tmp_path):
     assert r.status_code == 200
     vp = case_mod.load("p1", tmp_path).viewport
     assert vp["yaw_deg"] == 90.0 and vp["pitch_deg"] == 45.0
+    payload = r.json()
+    assert payload["viewport"]["yaw_deg"] == 90.0
+    assert "previews" in payload and "assets" not in payload
 
 
 def test_inner_drag_submits_fractions(client, patch_case, tmp_path):
@@ -267,6 +272,9 @@ def test_inner_drag_submits_fractions(client, patch_case, tmp_path):
     inner = case_mod.load("p1", tmp_path).inner
     assert (inner["x"], inner["y"]) == (80, 90)            # 分数 × 视口像素
     assert (inner["width"], inner["height"]) == (160, 45)
+    payload = r.json()
+    assert payload["inner"] == inner
+    assert "previews" in payload and "assets" not in payload
 
 
 def test_inner_keeps_preview_store_and_url(client, patch_case, tmp_path):
@@ -289,9 +297,54 @@ def test_inner_keeps_preview_store_and_url(client, patch_case, tmp_path):
 def test_nudge_wraps_yaw_and_clamps_pitch(client, patch_case, tmp_path):
     r = client.post("/api/case/p1/nudge", json={"dyaw": 180.0, "dpitch": 200.0})
     assert r.status_code == 200
-    assert r.json()["nudged"] == {"yaw": -170.0, "pitch": 89.0}
+    payload = r.json()
+    assert payload["nudged"] == {"yaw": -170.0, "pitch": 89.0}
+    assert payload["viewport"]["yaw_deg"] == -170.0
+    assert "previews" in payload and "assets" not in payload
     vp = case_mod.load("p1", tmp_path).viewport
     assert vp["yaw_deg"] == -170.0 and vp["pitch_deg"] == 89.0
+
+
+def test_viewport_size_scales_inner_and_switches_preview(client, patch_case, tmp_path):
+    before = client.get("/api/case/p1").json()
+    r = client.post("/api/case/p1/viewport-size",
+                    json={"width": 1920, "height": 1080})
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert (data["viewport"]["width"], data["viewport"]["height"]) == (1920, 1080)
+    # 320×180 → 1920×1080 是 6 倍；inner 按比例缩放，取景内容不变。
+    inner = data["inner"]
+    assert (inner["x"], inner["y"], inner["width"], inner["height"]) == (
+        480, 240, 960, 600)
+    assert data["previews"]["vp"] != before["previews"]["vp"]
+
+
+def test_viewport_size_rejects_unknown_option(client, patch_case):
+    r = client.post("/api/case/p1/viewport-size",
+                    json={"width": 640, "height": 360})
+    assert r.status_code == 400
+    assert "不支持的视口尺寸" in r.json()["error"]
+
+
+def test_case_info_exposes_viewport_options(client, patch_case):
+    info = client.get("/api/case/p1").json()
+    options = info["viewport_options"]
+    assert any(o["width"] == 1920 and o["height"] == 1080 for o in options)
+    assert isinstance(info["viewport_footprint"], list)
+
+
+def test_footprint_payload_normalizes_to_fractions():
+    store = types.SimpleNamespace(
+        case=types.SimpleNamespace(viewport={
+            "width": 320, "height": 180, "fov_h_deg": 90.0,
+            "yaw_deg": 0.0, "pitch_deg": 0.0}),
+        source_size=(360, 180))
+    rects = web_app._footprint_payload(store)
+    assert len(rects) == 1
+    rect = rects[0]
+    assert 0.0 <= rect["x"] < 1.0 and 0.0 <= rect["y"] < 1.0
+    assert 0.0 < rect["w"] <= 1.0 and 0.0 < rect["h"] <= 1.0
+    assert rect["x"] + rect["w"] <= 1.0 and rect["y"] + rect["h"] <= 1.0
 
 
 def test_reset_draft_restores_from_version(client, patch_case, tmp_path):
@@ -301,6 +354,9 @@ def test_reset_draft_restores_from_version(client, patch_case, tmp_path):
     r = client.post("/api/case/p1/reset-draft", json={"version": "v1"})
     assert r.status_code == 200
     assert case_mod.load("p1", tmp_path).inner == INNER     # 回到版本记录的框
+    payload = r.json()
+    assert payload["inner"] == INNER
+    assert "previews" in payload and "assets" not in payload
 
 
 # ── op 注册表与门控递进 ──────────────────────────────────────────────────
@@ -655,8 +711,9 @@ def test_step_files_patch_uses_extract_version(client, patch_case, tmp_path):
     (d / "clip_mask.png").write_bytes(b"m")
     case_mod.set_extract_current("p1", "v1", root=tmp_path)
     sf = client.get("/api/case/p1").json()["step_files"]
-    assert [f["name"] for f in sf["extract"]["outputs"]] == [
-        "clip.mp4", "clip_mask.png", "clip.json"]
+    names = [f["name"] for f in sf["extract"]["outputs"]]
+    assert names[:3] == ["clip.mp4", "clip_mask.png", "clip.json"]
+    assert names[3:] == ["first_frame_raw.png", "last_frame_raw.png"]
     # 还没 adopt：生成组只有输入，不猜 vrgen 轮次目录
     gen = sf["generate"]["groups"][0]
     assert [f["name"] for f in gen["inputs"]] == ["clip.mp4", "clip_mask.png", "clip.json"]
@@ -806,6 +863,22 @@ def test_prompt_preview_image_case_no_crash(client, tmp_path, monkeypatch):
     assert "error" in r.json()["prompt"]
 
 
+def test_generation_params_exposes_clip_auto_duration(client, patch_case, tmp_path, monkeypatch):
+    _mk_extract("p1", tmp_path, "v1")
+    case_mod.set_extract_current("p1", "v1", root=tmp_path)
+    _add_image("p1", tmp_path, "first", "first_frame")
+    _add_image("p1", tmp_path, "last", "last_frame")
+    case_mod.set_submit_selected("p1", ["i1", "i2"], root=tmp_path)
+    monkeypatch.setattr(web_app, "clip_duration_s", lambda case, root: 10)
+    payload = {"current": {"mode": "firstLastFrame"},
+               "output": [], "input": [],
+               "fixed": {"duration_s": 4, "model_id": 37, "num": 1}}
+    monkeypatch.setattr(web_app, "_vrgen_json", lambda argv: payload)
+    data = web_app._generation_params("p1")
+    assert data["auto_duration_s"] == 10
+    assert data["fixed"]["duration_s"] == 10
+
+
 def test_generate_gate_mode_aware(client, tmp_path, monkeypatch):
     case_mod.create("g5", "gen", root=tmp_path)
     _add_image("g5", tmp_path, "first", "first_frame")
@@ -838,23 +911,57 @@ def test_raw_frames_come_from_extract_and_the_endpoint_is_retired(client, patch_
     assert r.status_code == 410
 
 
-def test_keyframe_run_queues_image_argv(client, patch_case, tmp_path, monkeypatch):
-    _mk_extract("p1", tmp_path, "v1")
+def test_patch_extract_files_list_raw_frames(client, patch_case, tmp_path):
+    d = _mk_extract("p1", tmp_path, "v1")
+    (d / "first_frame_raw.png").write_bytes(b"first")
+    (d / "last_frame_raw.png").write_bytes(b"last")
     case_mod.set_extract_current("p1", "v1", root=tmp_path)
-    _add_image("p1", tmp_path, "first", "first_frame")
-    _add_image("p1", tmp_path, "last", "last_frame")
+    info = client.get("/api/case/p1").json()
+    extract = info["step_files"]["extract"]
+    names = [row["name"] for row in extract["outputs"]]
+    assert names == ["clip.mp4", "clip_mask.png", "clip.json",
+                     "first_frame_raw.png", "last_frame_raw.png"]
+    assert "groups" not in extract          # 一次抽取的产物，不额外分组
+
+
+def test_keyframe_run_queues_image_argv(client, patch_case, tmp_path, monkeypatch):
+    d = _mk_extract("p1", tmp_path, "v1")
+    (d / "first_frame_raw.png").write_bytes(b"first")
+    (d / "last_frame_raw.png").write_bytes(b"last")
+    case_mod.set_extract_current("p1", "v1", root=tmp_path)
+    _add_image("p1", tmp_path, "sheet", "subject_ref")
     captured = []
     monkeypatch.setattr(web_app.QUEUE, "submit",
                         lambda op, name, argv: captured.append((op, name, argv)))
+    monkeypatch.setattr(web_app, "_current_session", lambda name: 123)
     r = client.post("/api/case/p1/keyframe/run", json={
-        "step": "first", "prompt": "换成高官", "assets": ["i1", "i2"],
-        "model_id": 44, "resolution": "2K"})
+        "step": "first", "model_id": 44, "resolution": "2K"})
     assert r.status_code == 200, r.text
     op, name, argv = captured[0]
     assert op == "keyframe" and name == "p1"
     assert "image" in argv and "submit" in argv
     assert "--ratio" in argv and "16:9" in argv
+    assert argv[argv.index("--template") + 1] == "keyframe-first"
+    assert argv[argv.index("--vars-file") + 1] == "keyframe-vars.toml"
+    assert argv[argv.index("--step") + 1] == "first"
+    assert argv[argv.index("--session-id") + 1] == "123"
     assert argv.count("--image") == 2
+    assert argv.count("--image-role") == 2
+    # 图片步只认原始帧 + 绑定的三视图，不读 [submit] selected。
+    case_mod.set_submit_selected("p1", [], root=tmp_path)
+    r = client.post("/api/case/p1/keyframe/run", json={"step": "first"})
+    assert r.status_code == 200, r.text
+
+
+def test_keyframe_run_requires_project_session(client, patch_case, tmp_path, monkeypatch):
+    d = _mk_extract("p1", tmp_path, "v1")
+    (d / "first_frame_raw.png").write_bytes(b"first")
+    case_mod.set_extract_current("p1", "v1", root=tmp_path)
+    _add_image("p1", tmp_path, "sheet", "subject_ref")
+    monkeypatch.setattr(web_app, "_current_session", lambda name: 0)
+    r = client.post("/api/case/p1/keyframe/run", json={"step": "first"})
+    assert r.status_code == 400
+    assert "项目生成会话" in r.json()["error"]
 
 
 def test_keyframe_rounds_lists_candidates(client, patch_case, tmp_path, monkeypatch):
@@ -867,9 +974,12 @@ def test_keyframe_rounds_lists_candidates(client, patch_case, tmp_path, monkeypa
     b.write_bytes(b"b")
     (run_dir / "run.json").write_text(json.dumps({
         "key": "abcdef123456", "stage": "checked",
+        "params": {"kind": "image", "step": "first", "num": 4},
         "results": [str(a), str(b)], "gate": {"verdict": "ok"}}), encoding="utf-8")
     data = client.get("/api/case/p1/keyframe/rounds").json()
     assert data["rounds"][0]["round"] == "img-abc12345"
+    assert data["rounds"][0]["step"] == "first"
+    assert data["rounds"][0]["num"] == 4
     assert [row["index"] for row in data["rounds"][0]["results"]] == [1, 2]
 
 
@@ -903,25 +1013,181 @@ def test_keyframe_pick_rejects_mismatched_pair(client, tmp_path, monkeypatch):
     assert "宽高不一致" in r.json()["error"]
 
 
-def test_gen_page_has_sidebar_workbench_and_duration(client, gen_case):
+def _keyframe_ready(tmp_path, monkeypatch) -> str:
+    """patch case + 抽取 + 两张原始帧 + 一张三视图；返回 case 名。"""
+    d = _mk_extract("p1", tmp_path, "v1")
+    (d / "first_frame_raw.png").write_bytes(b"first")
+    (d / "last_frame_raw.png").write_bytes(b"last")
+    case_mod.set_extract_current("p1", "v1", root=tmp_path)
+    _add_image("p1", tmp_path, "sheet", "subject_ref")
+    monkeypatch.setattr(web_app, "_workdir", lambda: tmp_path / "runs")
+    return "p1"
+
+
+def test_keyframe_sheet_switch_does_not_touch_submit(client, patch_case, tmp_path):
+    _add_image("p1", tmp_path, "a", "subject_ref")
+    _add_image("p1", tmp_path, "b", "subject_ref")
+    case_mod.set_submit_selected("p1", ["i2"], root=tmp_path)
+    r = client.put("/api/case/p1/keyframe/sheet", json={"asset": "i1"})
+    assert r.status_code == 200, r.text
+    assert r.json()["keyframe"]["sheet"] == "i1"
+    assert r.json()["submit_selected"] == ["i2"]
+
+
+def test_keyframe_prompt_uses_vars_file(client, patch_case, tmp_path, monkeypatch):
+    _keyframe_ready(tmp_path, monkeypatch)
+    vars_path = tmp_path / "runs" / "p1" / "keyframe-vars.toml"
+    vars_path.parent.mkdir(parents=True)
+    vars_path.write_text("template = 'keyframe-first'\n[vars]\n", encoding="utf-8")
+    calls = []
+
+    def fake(argv):
+        calls.append(argv)
+        return {"template": "keyframe-first",
+                "vars": {"figure": "x", "pose_first": "y"},
+                "rendered": "图1 = 首帧原始图。",
+                "placeholders": ["image_roles", "pose_first", "figure", "preserve"],
+                "computed_keys": ["image_roles"], "labels": {}, "help": {}}
+
+    monkeypatch.setattr(web_app, "_vrgen_json", fake)
+    r = client.get("/api/case/p1/keyframe/prompt?step=first")
+    assert r.status_code == 200, r.text
+    argv = calls[0]
+    assert argv[0] == "prompt"          # _vrgen_json 自己补可执行文件，不能再传一遍
+    assert argv[argv.index("--vars-file") + 1] == "keyframe-vars.toml"
+    assert argv[argv.index("--template") + 1] == "keyframe-first"
+    assert argv.count("--image-role") == 2
+
+    r = client.put("/api/case/p1/keyframe/prompt",
+                   json={"step": "first", "vars": {"figure": "新外观"}})
+    assert r.status_code == 200, r.text
+    assert "--set" in calls[-1]
+    assert "figure=新外观" in calls[-1]
+
+
+def test_keyframe_pick_first_queues_last(client, patch_case, tmp_path, monkeypatch):
+    _keyframe_ready(tmp_path, monkeypatch)
+    run_dir = tmp_path / "runs" / "p1" / "img-abc12345"
+    run_dir.mkdir(parents=True)
+    candidate = run_dir / "result_1.png"
+    candidate.write_bytes(b"c")
+    (run_dir / "run.json").write_text(json.dumps({
+        "key": "abcdef123456", "results": [str(candidate)]}), encoding="utf-8")
+
+    def fake_capture(argv):
+        Path(argv[argv.index("--out") + 1]).write_bytes(b"picked")
+        return 0, "ok"
+
+    monkeypatch.setattr(web_app, "_capture", fake_capture)
+    monkeypatch.setattr(web_app, "_media_meta",
+                        lambda path, kind: {"width": 1920, "height": 1080})
+    monkeypatch.setattr(web_app, "_current_session", lambda name: 123)
+    monkeypatch.setattr(web_app, "_keyframe_prompt",
+                        lambda name, step: {"vars": {"figure": "x", "pose_last": "y"}})
+    captured = []
+    monkeypatch.setattr(web_app.QUEUE, "submit",
+                        lambda op, name, argv: captured.append((op, name, argv)))
+
+    r = client.post("/api/case/p1/keyframe/pick",
+                    json={"round": "img-abc12345", "index": 1, "role": "first_frame"})
+    assert r.status_code == 200, r.text
+    info = r.json()
+    assert info["keyframe_queued"] is True
+    state = keyframe.load(case_mod.case_dir("p1", tmp_path))
+    assert state.first is not None and state.first.round == "img-abc12345"
+    assert state.first.asset == info["assets"][-1]["id"]
+    op, name, argv = captured[0]
+    assert op == "keyframe" and name == "p1"
+    assert argv[argv.index("--step") + 1] == "last"
+    images = [argv[i + 1] for i, item in enumerate(argv) if item == "--image"]
+    assert len(images) == 3 and Path(images[2]).name.startswith("i")
+
+
+def test_keyframe_handoff_sets_mode_and_selection(client, patch_case, tmp_path, monkeypatch):
+    _keyframe_ready(tmp_path, monkeypatch)
+    _add_image("p1", tmp_path, "first", "first_frame")
+    _add_image("p1", tmp_path, "last", "last_frame")
+    keyframe.save(case_mod.case_dir("p1", tmp_path), keyframe.State(
+        extract="v1", sheet="i1",
+        first=keyframe.Pick("img-a", 1, "i2"),
+        last=keyframe.Pick("img-b", 1, "i3")))
+    modes = []
+    monkeypatch.setattr(web_app, "_save_gen_mode",
+                        lambda name, mode: modes.append(mode) or None)
+    r = client.post("/api/case/p1/keyframe/handoff")
+    assert r.status_code == 200, r.text
+    assert modes == ["firstLastFrame"]
+    assert r.json()["submit_selected"] == ["i2", "i3"]
+
+
+def test_keyframe_pointer_must_match_a_live_role(client, patch_case, tmp_path, monkeypatch):
+    _keyframe_ready(tmp_path, monkeypatch)
+    _add_image("p1", tmp_path, "second_sheet", "subject_ref")
+    cdir = case_mod.case_dir("p1", tmp_path)
+    # 指针指向不存在的素材：不自动改绑另一张三视图。
+    keyframe.save(cdir, keyframe.State(sheet="i9"))
+    info = client.get("/api/case/p1").json()
+    assert info["keyframe"]["sheet"] is None
+    assert len(info["keyframe"]["sheet_candidates"]) == 2
+    # 指针指向的素材角色已经变了：按未定稿处理。
+    keyframe.save(cdir, keyframe.State(
+        sheet="i1", first=keyframe.Pick("img-a", 1, "i1")))
+    info = client.get("/api/case/p1").json()
+    assert info["keyframe"]["first"] is None
+
+
+def test_keyframe_gate_states(client, patch_case, tmp_path, monkeypatch):
+    _keyframe_ready(tmp_path, monkeypatch)
+    info = client.get("/api/case/p1").json()
+    gate = info["gates"]["keyframe"]
+    assert gate["ok"] is False and "首帧" in gate["reason"]
+
+    _add_image("p1", tmp_path, "first", "first_frame")
+    _add_image("p1", tmp_path, "last", "last_frame")
+    cdir = case_mod.case_dir("p1", tmp_path)
+    keyframe.save(cdir, keyframe.State(
+        extract="v1", sheet="i1",
+        first=keyframe.Pick("img-a", 1, "i2"),
+        last=keyframe.Pick("img-b", 1, "i3")))
+    info = client.get("/api/case/p1").json()
+    assert info["gates"]["keyframe"]["ok"] is True
+
+    keyframe.save(cdir, keyframe.State(
+        extract="v0", sheet="i1",
+        first=keyframe.Pick("img-a", 1, "i2"),
+        last=keyframe.Pick("img-b", 1, "i3")))
+    info = client.get("/api/case/p1").json()
+    gate = info["gates"]["keyframe"]
+    assert gate["ok"] is False and "抽取版本" in gate["reason"]
+
+
+def test_gen_page_has_sidebar_and_no_keyframe_step(client, gen_case):
     text = client.get("/case/g1").text
-    assert "素材与本次提交集" in text
-    assert "关键帧工作台" in text
+    assert "素材库与本次视频提交" in text
     assert "时长" in text and "genDuration" in text
     assert "最近成片" in text and "扣费额度" in text
     assert text.count('id="genMode"') == 1        # 控件只在底栏出现
     assert text.count('id="sessProject"') == 1
     assert "pnl-assets" not in text       # 素材步骤已并入生成页侧边栏
+    # gen 的首尾帧入口待“上传两张原始帧”的入口，本轮只接 patch。
+    assert 'id="pnl-keyframe"' not in text
 
 
-def test_fullredraw_page_has_no_workbench(client, fullredraw_case):
+def test_fullredraw_page_has_no_keyframe_step(client, fullredraw_case):
     text = client.get("/case/f1").text
-    assert "素材与本次提交集" in text
-    assert 'id="keyframeWorkbench"' not in text
+    assert "素材库与本次视频提交" in text
+    assert 'id="pnl-keyframe"' not in text
 
 
-def test_patch_page_has_workbench_without_the_old_extract_button(client, patch_case):
+def test_patch_page_has_keyframe_step(client, patch_case):
     text = client.get("/case/p1").text
-    assert "关键帧工作台" in text
+    assert 'id="pnl-keyframe"' in text
+    assert "首尾帧重绘" in text
     assert "从当前 clip 抽首尾原始帧" not in text
-    assert "首尾原始帧由 extract" in text
+    assert "两帧底图" in text
+
+
+def test_patch_page_has_footprint_and_size_control(client, patch_case):
+    text = client.get("/case/p1").text
+    assert 'id="vpFoots"' in text and 'class="vpFoot"' in text
+    assert 'id="vpSize"' in text

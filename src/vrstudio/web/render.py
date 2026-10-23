@@ -98,6 +98,33 @@ class PreviewStore:
         self.save_geometry()
         self.key = self._new_key()
 
+    def set_viewport_size(self, width: int, height: int) -> None:
+        """切换视口分辨率：保持 yaw/pitch/fov，按比例缩放 inner 选区。
+
+        同一宽高比下，选区在画面里的相对位置不变；改成另一种宽高比时，
+        inner 仍按宽高各自的比例缩放，取景内容由新的视口几何决定。
+        """
+        width, height = int(width), int(height)
+        if width <= 0 or height <= 0:
+            raise ValueError("viewport width/height must be positive")
+        vp = self._vp()
+        old_w = int(vp.get("width") or 0)
+        old_h = int(vp.get("height") or 0)
+        inner = dict(self.case.inner or {})
+        if old_w > 0 and old_h > 0 and inner:
+            inner = {
+                "x": round(int(inner.get("x", 0)) * width / old_w),
+                "y": round(int(inner.get("y", 0)) * height / old_h),
+                "width": round(int(inner.get("width", 0)) * width / old_w),
+                "height": round(int(inner.get("height", 0)) * height / old_h),
+            }
+            self.case.inner = inner
+        vp["width"] = width
+        vp["height"] = height
+        self.case.viewport = vp
+        self.save_geometry()
+        self.key = self._new_key()
+
     def set_inner(self, x: int, y: int, w: int, h: int) -> None:
         self.case.inner = {"x": int(x), "y": int(y), "width": int(w), "height": int(h)}
         self.save_geometry()

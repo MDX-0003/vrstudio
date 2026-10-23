@@ -31,14 +31,17 @@ from starlette.staticfiles import StaticFiles
 
 from .. import case as case_mod
 from .. import config as config_mod
+from .. import keyframe as keyframe_mod
 from ..case import CaseError
 from ..cli.generate import (
     GenError,
     assemble,
     candidates,
+    clip_duration_s,
     template_for,
 )
 from ..media.videoio import VideoIOError
+from ..patch.projection import viewport_erp_rects
 from ..procenv import decode_text, utf8_env
 from ..redraw.manifest import Manifest
 from .logging import CLIENT_LOGGER, GEOMETRY_LOGGER, RequestLogMiddleware
@@ -107,6 +110,58 @@ def _remember_store(name: str, store: PreviewStore) -> None:
 def _drop_store(name: str) -> None:
     """代理生成完成后丢掉旧 PreviewStore，下一次预览请求切到代理解码。"""
     _stores.pop(name, None)
+
+
+#: 选区视口的分辨率预设。新增档位只改这张表，前端下拉与后端校验自动跟随。
+PATCH_VIEWPORT_OPTIONS = (
+    {"label": "1920×1080", "width": 1920, "height": 1080, "aspect": "16:9"},
+)
+
+
+def _viewport_options(case: case_mod.Case) -> list[dict]:
+    """可选视口尺寸；当前尺寸不在预设里时也列出来，保证下拉能回显。"""
+    vp = case.viewport or {}
+    current = (int(vp.get("width") or 0), int(vp.get("height") or 0))
+    options = [dict(item) for item in PATCH_VIEWPORT_OPTIONS]
+    if (current[0] > 0 and current[1] > 0
+            and not any((o["width"], o["height"]) == current for o in options)):
+        options.append({"label": f"{current[0]}×{current[1]}",
+                        "width": current[0], "height": current[1], "aspect": ""})
+    return options
+
+
+def _footprint_payload(store: PreviewStore) -> list[dict]:
+    """视口在 ERP 上的示意框，坐标是 0..1 分数（最多两块，跨经线时）。"""
+    vp = store.case.viewport or {}
+    try:
+        width = int(vp["width"])
+        height = int(vp["height"])
+        fov = float(vp["fov_h_deg"])
+        yaw = float(vp["yaw_deg"])
+        pitch = float(vp["pitch_deg"])
+    except (KeyError, TypeError, ValueError):
+        return []
+    erp_w, erp_h = store.source_size
+    rects = viewport_erp_rects(width, height, yaw, pitch, fov, erp_w, erp_h)
+    return [{"x": x0 / erp_w, "y": y0 / erp_h,
+             "w": (x1 - x0) / erp_w, "h": (y1 - y0) / erp_h}
+            for x0, y0, x1, y1 in rects]
+
+
+def _geometry_payload(store: PreviewStore, name: str, **extra) -> dict:
+    """几何交互（点全景、摇杆、拖框）的轻量应答。
+
+    这些请求只改 viewport/inner，不需要重扫素材与 4K 原始帧；返回完整 case
+    info 会让每次点击都等 4–7 秒，下方预览看起来就像没更新。
+    """
+    payload = {
+        "viewport": dict(store.case.viewport or {}),
+        "inner": dict(store.case.inner or {}),
+        "previews": {"vp": f"/img/{name}/vp.png?k={store.key}"},
+        "viewport_footprint": _footprint_payload(store),
+    }
+    payload.update(extra)
+    return payload
 
 
 def _log_geometry(request, name: str, event: str, old: dict, new: dict) -> None:
@@ -347,10 +402,20 @@ def _generation_params(name: str) -> dict:
                         "--workdir", str(_workdir())])
     if "error" in base:
         return base
-    mode = (base.get("current") or {}).get("mode")
-    refs_file: Path | None = None
     try:
         case = case_mod.load(name, _ctx["cases_root"])
+    except CaseError:
+        return base
+    mode = (base.get("current") or {}).get("mode")
+    auto_duration = (clip_duration_s(case, _ctx["cases_root"])
+                     if case.flow == "patch" and mode == "firstLastFrame" else None)
+    if auto_duration is not None:
+        base["auto_duration_s"] = auto_duration
+        fixed = dict(base.get("fixed") or {})
+        fixed["duration_s"] = auto_duration
+        base["fixed"] = fixed
+    refs_file: Path | None = None
+    try:
         submission = assemble(case, _ctx["cases_root"], mode=mode)
         fd, raw = tempfile.mkstemp(prefix=f"vrgen-params-{name}-", suffix=".json")
         os.close(fd)
@@ -358,12 +423,18 @@ def _generation_params(name: str) -> dict:
         refs_file.write_text(
             json.dumps(submission.payload(), ensure_ascii=False, indent=1),
             encoding="utf-8")
-        return _vrgen_json([
+        payload = _vrgen_json([
             "params", "show", "--job", name,
             "--refs", str(refs_file),
             "--canvas", f"{submission.canvas_size[0]}x{submission.canvas_size[1]}",
             "--source", f"{submission.source_size[0]}x{submission.source_size[1]}",
             "--workdir", str(_workdir())])
+        if auto_duration is not None:
+            payload["auto_duration_s"] = auto_duration
+            fixed = dict(payload.get("fixed") or {})
+            fixed["duration_s"] = auto_duration
+            payload["fixed"] = fixed
+        return payload
     except (CaseError, GenError, KeyError, ValueError, OSError):
         return base
     finally:
@@ -524,6 +595,57 @@ def _asset_details(case: case_mod.Case) -> list[dict]:
     return out
 
 
+DEFAULT_KEYFRAME_PRESERVE = (
+    "机位、构图、透视、场景建筑、背景人物、光照与色温保持图1原样；"
+    "除指定人物外不新增、不删除任何物体。")
+
+
+def _pick_row(pick: keyframe_mod.Pick | None, ids: set[str]) -> dict | None:
+    """指针只有在素材仍在库里时才有效；素材被删后按“未定稿”处理。"""
+    if pick is None or pick.asset not in ids:
+        return None
+    return {"round": pick.round, "index": pick.index, "asset": pick.asset}
+
+
+def _keyframe_state(case: case_mod.Case) -> dict:
+    """首尾帧工作台的只读状态：绑定关系、两帧指针、是否过期。
+
+    图片步的输入全部从这里与原始帧解析，不读 ``[submit] selected``；视频提交集
+    仍只由素材侧边栏的勾选决定。"""
+    base = {"enabled": case.flow in ("patch", "gen"), "error": None,
+            "sheet": None, "sheet_candidates": [], "first": None, "last": None,
+            "extract": None, "stale": False, "complete": False}
+    if case.flow not in ("patch", "gen"):
+        return base
+    try:
+        state = keyframe_mod.load(case.dir(_ctx["cases_root"]))
+    except keyframe_mod.KeyframeError as exc:
+        base["error"] = str(exc)
+        return base
+    details = _asset_details(case)
+    sheets = [d for d in details
+              if d["kind"] == "image" and d["role"] == "subject_ref" and d.get("exists")]
+    sheet_ids = {d["id"] for d in sheets}
+    sheet = state.sheet if state.sheet in sheet_ids else None
+    if state.sheet is None and len(sheets) == 1:
+        sheet = sheets[0]["id"]           # 唯一一张三视图：默认绑定，不写文件
+    first = _pick_row(state.first, {d["id"] for d in details
+                                    if d["role"] == "first_frame"})
+    last = _pick_row(state.last, {d["id"] for d in details
+                                  if d["role"] == "last_frame"})
+    stale = bool(state.extract and case.extract_current
+                 and state.extract != case.extract_current)
+    base.update({
+        "sheet": sheet,
+        "sheet_candidates": [{"id": d["id"], "label": d["label"], "path": d["path"]}
+                             for d in sheets],
+        "first": first, "last": last, "extract": state.extract,
+        "stale": stale,
+        "complete": bool(first and last and not stale),
+    })
+    return base
+
+
 def _raw_frames(case: case_mod.Case) -> list[dict]:
     """patch 的当前 extract 导出的首尾原始帧：只进工作台输入区，不是提交候选。"""
     if case.flow != "patch" or not case.extract_current:
@@ -534,8 +656,12 @@ def _raw_frames(case: case_mod.Case) -> list[dict]:
             ("first_raw", "first_frame_raw", "first_frame_raw.png", "首帧原始帧"),
             ("last_raw", "last_frame_raw", "last_frame_raw.png", "尾帧原始帧")):
         path = d / name
+        exists = path.is_file()
+        meta = _media_meta(path, "image") if exists else {}
         rows.append({"id": asset_id, "role": role, "label": label,
-                     "path": str(path), "exists": path.is_file(),
+                     "path": str(path), "exists": exists,
+                     "width": meta.get("width"), "height": meta.get("height"),
+                     "size": path.stat().st_size if exists else None,
                      "url": f"/img/asset/{case.name}/{asset_id}"})
     return rows
 
@@ -644,9 +770,13 @@ def _patch_step_files(case: case_mod.Case, cdir: Path) -> dict:
     frame = cdir / "out" / f"{case.extract_current}_frame.mp4"
     space = cdir / "out" / f"{case.extract_current}_space.mp4"
     outs = [frame] if frame.is_file() else ([space] if space.is_file() else [])
+    # 首尾原始帧是这一步的产物，直接追加到已有的输出列表；它们只给工作台
+    # 当输入底图，不是提交候选，不需要再拆一组。
     steps["extract"] = {
         "inputs": [_file_info(source)],
-        "outputs": [_file_info(clip), _file_info(mask), _file_info(sidecar)],
+        "outputs": [_file_info(clip), _file_info(mask), _file_info(sidecar),
+                    _file_info(d / "first_frame_raw.png"),
+                    _file_info(d / "last_frame_raw.png")],
     }
     steps["generate"] = _generation_groups(
         case, [_file_info(clip), _file_info(mask), _file_info(sidecar)], ai)
@@ -702,12 +832,39 @@ def _gates(case: case_mod.Case, extracts: list[dict]) -> dict:
                     if partial_names else "")
     if case.flow == "patch":
         cur = cdir / "extracts" / (case.extract_current or "")
+        kf = _keyframe_state(case)
+        raw_ok = all((cur / name).is_file()
+                     for name in ("first_frame_raw.png", "last_frame_raw.png"))
+        if not extracted:
+            kf_reason = "先完成选区并运行抽取；首尾帧来自 clip 的首末帧"
+        elif not raw_ok:
+            kf_reason = "当前抽取版本没有两张原始帧；重新抽取一次"
+        elif kf["error"]:
+            kf_reason = kf["error"]
+        elif not kf["sheet"]:
+            kf_reason = ("素材库有多张人物三视图，先在首尾帧步骤选定一张"
+                         if len(kf["sheet_candidates"]) > 1
+                         else "素材库缺少人物三视图；先在素材区添加一张 subject_ref 图片")
+        elif kf["stale"]:
+            kf_reason = "抽取版本已更新，需要重新定稿两帧"
+        elif not kf["first"]:
+            kf_reason = "首帧还没定稿；在首尾帧步骤生成并挑选一张"
+        elif not kf["last"]:
+            kf_reason = "首帧已定，接着生成并挑选尾帧"
+        else:
+            kf_reason = ""
+        kf_ok = bool(extracted and raw_ok and kf["complete"])
         steps = {            "pick": {"ok": missing is None,
                      "reason": f"case.toml 里缺 [{missing}] 段，补齐后才能抽取" if missing else "",
                      "evidence": f"草稿三段（viewport/inner/frames）都在 {case_mod.case_toml(case.name, _ctx['cases_root'])} 里"},
             "extract": {"ok": extracted,
                         "reason": "" if extracted else "先完成选区并运行抽取",
                         "evidence": f"在 {cur}\\ 检测到 clip.json / clip.mp4 / clip_mask.png，当前抽取版本是 {case.extract_current}；想重新抽取，调好选区后再点一次按钮（会生成新版本，旧版本不动）"},
+            "keyframe": {"ok": kf_ok, "ready": extracted and raw_ok,
+                         "reason": kf_reason,
+                         "evidence": (f"在 {cur}\\ 检测到两张原始帧；keyframe.toml 指向首帧 "
+                                      f"{kf['first']['asset']} 与尾帧 {kf['last']['asset']}"
+                                      if kf_ok else "")},
             "generate": {"ok": extracted and (adopted or any(
                 e["has_result"] for e in extracts)),
                 "reason": "" if extracted else "抽取之后才能送生成",
@@ -830,6 +987,7 @@ def _case_info(name: str) -> dict | None:
         "adopt_round": case.adopt_round,
         "assets": _asset_details(case),
         "raw_frames": _raw_frames(case),
+        "keyframe": _keyframe_state(case),
         "submit_selected": case.submit_selected,
         "derived": _derived(case),
         "extracts": extracts,
@@ -837,6 +995,8 @@ def _case_info(name: str) -> dict | None:
         "step_files": _step_files(case),
         "gates": _gates(case, extracts),
         "previews": {"vp": f"/img/{case.name}/vp.png?k={store.key}"} if store else {},
+        "viewport_options": _viewport_options(case) if case.flow == "patch" else [],
+        "viewport_footprint": _footprint_payload(store) if store else [],
         "rounds": _rounds(case.name),
     }
     return info
@@ -946,7 +1106,8 @@ def _mode_ready(case: case_mod.Case, mode: str | None) -> tuple[bool, str]:
         lasts = [c for c in chosen if c.role == "last_frame"]
         if len(firsts) != 1 or len(lasts) != 1:
             return False, ("firstLastFrame 需要勾选恰好一张首帧定稿图与一张尾帧定稿图"
-                           f"（当前 {len(firsts)} 张首帧、{len(lasts)} 张尾帧）")
+                           f"（当前 {len(firsts)} 张首帧、{len(lasts)} 张尾帧）；"
+                           "到「首尾帧」步骤生成并挑选两张定稿图")
         extras = [c.id for c in chosen if c.role not in ("first_frame", "last_frame")]
         if extras:
             return False, f"firstLastFrame 只用首尾定稿图；请取消勾选：{extras}"
@@ -1175,38 +1336,120 @@ RAW_FRAME_FILES = {"first_raw": "first_frame_raw.png",
                    "last_raw": "last_frame_raw.png"}
 
 
-def _keyframe_argv(name: str, body: dict) -> list[str]:
-    case = case_mod.load(name, _ctx["cases_root"])
-    ids = [str(item) for item in (body.get("assets") or [])]
-    if not ids:
-        raise CaseError("工作台至少需要 1 张参考图")
-    if case.flow != "patch" or not case.extract_current:
+KEYFRAME_VARS = "keyframe-vars.toml"
+KEYFRAME_TEMPLATES = {"first": "keyframe-first", "last": "keyframe-last"}
+
+
+def _keyframe_step(value: object) -> str:
+    step = str(value or "first").strip()
+    if step not in KEYFRAME_TEMPLATES:
+        raise CaseError("首尾帧步骤只能是 first 或 last")
+    return step
+
+
+def _current_session(name: str) -> int:
+    """图片生成按项目会话计费：读 generation.toml 的当前会话；读不到就报错。"""
+    payload = _vrgen_json(["params", "show", "--job", name,
+                           "--workdir", str(_workdir())])
+    if "error" in payload:
+        raise CaseError(payload["error"])
+    return int((payload.get("current") or {}).get("session_id") or 0)
+
+
+def _keyframe_inputs(case: case_mod.Case, step: str, *,
+                     require_first: bool = True) -> list[tuple[Path, str]]:
+    """图片步的固定参考图：原始帧 + 绑定的三视图（+ 尾帧的首帧定稿）。
+
+    这里不读 ``[submit] selected``：视频提交集与图片步是两份独立的输入声明。"""
+    state = _keyframe_state(case)
+    if state["error"]:
+        raise CaseError(state["error"])
+    if state["stale"]:
+        raise CaseError("抽取版本已更新，需要重新定稿两帧")
+    if not state["sheet"]:
+        raise CaseError(
+            "素材库有多张人物三视图，先在首尾帧步骤选定一张"
+            if len(state["sheet_candidates"]) > 1
+            else "素材库缺少人物三视图；先添加一张 subject_ref 图片")
+    if not case.extract_current:
         raise CaseError("工作台需要 patch 的当前 extract（首尾原始帧随 extract 产出）")
     raw_dir = case.dir(_ctx["cases_root"]) / "extracts" / case.extract_current
-    paths = []
-    for asset_id in ids:
-        if asset_id in RAW_FRAME_FILES:
-            path = raw_dir / RAW_FRAME_FILES[asset_id]
-        else:
-            path = case.asset(asset_id).resolved(case, _ctx["cases_root"])
+    sheet = case.asset(state["sheet"]).resolved(case, _ctx["cases_root"])
+    if step == "first":
+        pairs = [(raw_dir / RAW_FRAME_FILES["first_raw"], "first_frame_raw"),
+                 (sheet, "subject_ref")]
+    else:
+        first = state["first"]
+        if not first and require_first:
+            raise CaseError("先生成并挑选首帧定稿，再生成尾帧")
+        pairs = [(raw_dir / RAW_FRAME_FILES["last_raw"], "last_frame_raw"),
+                 (sheet, "subject_ref")]
+        if first:
+            first_path = case.asset(first["asset"]).resolved(case, _ctx["cases_root"])
+            pairs.append((first_path, "first_frame"))
+    for path, _role in pairs:
         if not path.is_file():
             raise CaseError(f"参考图不存在：{path}")
-        paths.append(path)
-    prompt = str(body.get("prompt") or "").strip()
-    if not prompt:
-        raise CaseError("提示词不能为空")
-    argv = [_vrgen_exe(), "image", "submit", "--job", name, "--prompt", prompt]
-    for path in paths:
-        argv += ["--image", str(path)]
-    argv += ["--ratio", _keyframe_ratio(case)]
+    return pairs
+
+
+def _keyframe_argv(name: str, body: dict) -> list[str]:
+    case = case_mod.load(name, _ctx["cases_root"])
+    if case.flow != "patch":
+        raise CaseError("首尾帧工作台首期只接 patch（gen 的入口待上传原始帧的入口）")
+    step = _keyframe_step(body.get("step"))
+    pairs = _keyframe_inputs(case, step)
+    session = _current_session(name)
+    if session <= 0:
+        raise CaseError("图片生成按项目会话计费；先在底栏选择项目生成会话")
+    argv = [_vrgen_exe(), "image", "submit", "--job", name,
+            "--template", KEYFRAME_TEMPLATES[step],
+            "--vars-file", KEYFRAME_VARS,
+            "--step", step,
+            "--session-id", str(session),
+            "--ratio", _keyframe_ratio(case),
+            "--workdir", str(_workdir())]
+    for path, role in pairs:
+        argv += ["--image", str(path), "--image-role", role]
     if body.get("model_id") is not None:
         argv += ["--model-id", str(body["model_id"])]
     if body.get("resolution"):
         argv += ["--resolution", str(body["resolution"])]
     if body.get("num") is not None:
         argv += ["--num", str(body["num"])]
-    argv += ["--workdir", str(_workdir())]
     return argv
+
+
+def _keyframe_prompt(name: str, step: str) -> dict:
+    """读图片步的提示词草稿并展开；首次访问把四个变量写成空值/通用默认。
+
+    尾帧预览在首帧定稿前也允许读取（少图3 的分工说明），否则四个字段里
+    「尾帧姿态」的显示名与说明要等首帧挑完才能出现。"""
+    case = case_mod.load(name, _ctx["cases_root"])
+    step = _keyframe_step(step)
+    pairs = _keyframe_inputs(case, step, require_first=False)
+    vars_path = _workdir() / name / KEYFRAME_VARS
+    if not vars_path.is_file():
+        seed = ["prompt", "save", "--job", name,
+                "--template", KEYFRAME_TEMPLATES[step],
+                "--vars-file", KEYFRAME_VARS,
+                "--set", "figure=", "--set", "pose_first=",
+                "--set", "pose_last=",
+                "--set", f"preserve={DEFAULT_KEYFRAME_PRESERVE}",
+                "--workdir", str(_workdir())]
+        seeded = _vrgen_json(seed)
+        if "error" in seeded:
+            raise CaseError(seeded["error"])
+    argv = ["prompt", "show", "--job", name,
+            "--template", KEYFRAME_TEMPLATES[step],
+            "--vars-file", KEYFRAME_VARS,
+            "--workdir", str(_workdir())]
+    for _path, role in pairs:
+        argv += ["--image-role", role]
+    payload = _vrgen_json(argv)
+    if "error" in payload:
+        raise CaseError(payload["error"])
+    return payload
 
 
 def _keyframe_rounds(name: str) -> dict:
@@ -1225,8 +1468,12 @@ def _keyframe_rounds(name: str) -> dict:
             if Path(raw).is_file():
                 results.append({"index": index,
                                 "url": f"/img/keyframe/{name}/{directory.name}/{index}"})
+        params = blob.get("params") or {}
         rows.append({"round": directory.name, "key": blob.get("key", ""),
                      "stage": blob.get("stage", ""),
+                     "step": str(params.get("step") or ""),
+                     "model_id": params.get("model_id"),
+                     "num": params.get("num"),
                      "gate": blob.get("gate") or {}, "results": results})
     return {"rounds": rows}
 
@@ -1247,6 +1494,107 @@ async def api_keyframe_rounds(request):
     if not case_mod.case_toml(name, _ctx["cases_root"]).is_file():
         return JSONResponse({"error": "no such case"}, status_code=404)
     return JSONResponse(await asyncio.to_thread(_keyframe_rounds, name))
+
+
+def _keyframe_save_prompt(name: str, step: str, sets: dict) -> dict:
+    case = case_mod.load(name, _ctx["cases_root"])
+    step = _keyframe_step(step)
+    pairs = _keyframe_inputs(case, step)
+    argv = ["prompt", "save", "--job", name,
+            "--template", KEYFRAME_TEMPLATES[step],
+            "--vars-file", KEYFRAME_VARS,
+            "--workdir", str(_workdir())]
+    for key, value in sets.items():
+        argv += ["--set", f"{key}={value}"]
+    for _path, role in pairs:
+        argv += ["--image-role", role]
+    payload = _vrgen_json(argv)
+    if "error" in payload:
+        raise CaseError(payload["error"])
+    return payload
+
+
+async def api_keyframe_sheet(request):
+    name = request.path_params["name"]
+    try:
+        case = case_mod.load(name, _ctx["cases_root"])
+    except CaseError:
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    if request.method == "GET":
+        state = _keyframe_state(case)
+        return JSONResponse({"sheet": state["sheet"],
+                             "candidates": state["sheet_candidates"]})
+    body = await request.json()
+    asset_id = str(body.get("asset") or "").strip()
+    if asset_id:
+        try:
+            asset = case.asset(asset_id)
+        except CaseError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if asset.kind != "image" or asset.role != "subject_ref":
+            return JSONResponse({"error": "图片步绑定的三视图必须是 subject_ref 图片"},
+                                status_code=400)
+    try:
+        state = keyframe_mod.load(case.dir(_ctx["cases_root"]))
+        state.sheet = asset_id or None
+        keyframe_mod.save(case.dir(_ctx["cases_root"]), state)
+    except (keyframe_mod.KeyframeError, OSError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(await asyncio.to_thread(_info_with_generation, name))
+
+
+async def api_keyframe_prompt(request):
+    name = request.path_params["name"]
+    if request.method == "GET":
+        step = request.query_params.get("step") or "first"
+        try:
+            payload = await asyncio.to_thread(_keyframe_prompt, name, step)
+        except (CaseError, OSError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse(payload)
+    body = await request.json()
+    step = body.get("step") or "first"
+    sets = body.get("vars") or {}
+    if not isinstance(sets, dict):
+        return JSONResponse({"error": "vars 必须是对象"}, status_code=400)
+    allowed = {"figure", "pose_first", "pose_last", "preserve"}
+    bad = sorted(set(sets) - allowed)
+    if bad:
+        return JSONResponse({"error": f"这些变量不能改：{bad}"}, status_code=400)
+    try:
+        payload = await asyncio.to_thread(
+            _keyframe_save_prompt, name, str(step), {k: str(v) for k, v in sets.items()})
+    except (CaseError, OSError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(payload)
+
+
+async def api_keyframe_handoff(request):
+    name = request.path_params["name"]
+
+    def _do() -> dict:
+        case = case_mod.load(name, _ctx["cases_root"])
+        state = _keyframe_state(case)
+        if state["error"]:
+            raise CaseError(state["error"])
+        if state["stale"]:
+            raise CaseError("抽取版本已更新，需要重新定稿两帧")
+        if not state["first"] or not state["last"]:
+            raise CaseError("首帧与尾帧都定稿后才能交给视频")
+        _keyframe_ratio(case)
+        error = _save_gen_mode(name, "firstLastFrame")
+        if error:
+            raise CaseError(error)
+        case_mod.set_submit_selected(
+            name, [state["first"]["asset"], state["last"]["asset"]],
+            _ctx["cases_root"])
+        return _info_with_generation(name)
+
+    try:
+        info = await asyncio.to_thread(_do)
+    except (CaseError, OSError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(info)
 
 
 async def api_keyframe_pick(request):
@@ -1286,23 +1634,71 @@ async def api_keyframe_pick(request):
         if not _is_16_9(width, height):
             return JSONResponse({"error": f"候选图不是 16:9（{width}x{height}）"},
                                 status_code=400)
-        other_role = "last_frame" if role == "first_frame" else "first_frame"
-        existing = next((a for a in case_mod.load(name, _ctx["cases_root"]).assets
-                         if a.role == other_role), None)
-        if existing is not None:
-            other = await asyncio.to_thread(
-                _media_meta, existing.resolved(case_mod.load(name, _ctx["cases_root"]),
-                                               _ctx["cases_root"]), "image")
-            if (int(other.get("width") or 0), int(other.get("height") or 0)) != (width, height):
-                return JSONResponse(
-                    {"error": "首帧与尾帧宽高不一致，请重新出图"}, status_code=400)
-        await asyncio.to_thread(case_mod.add_assets, name, [(target, role)],
-                                _ctx["cases_root"])
+        if role == "last_frame":
+            # 尾帧必须与当前首帧同宽高；首帧换新时旧尾帧会被废弃，不拿它比。
+            current = case_mod.load(name, _ctx["cases_root"])
+            first = next((a for a in current.assets if a.role == "first_frame"), None)
+            if first is not None:
+                other = await asyncio.to_thread(
+                    _media_meta, first.resolved(current, _ctx["cases_root"]), "image")
+                if (int(other.get("width") or 0),
+                        int(other.get("height") or 0)) != (width, height):
+                    return JSONResponse(
+                        {"error": "首帧与尾帧宽高不一致，请重新出图"}, status_code=400)
+        info = await asyncio.to_thread(_keyframe_accept, name, role, round_name,
+                                       index, target)
     except (CaseError, OSError, VideoIOError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     finally:
         target.unlink(missing_ok=True)
-    return JSONResponse(await asyncio.to_thread(_info_with_generation, name))
+    return JSONResponse(info)
+
+
+def _keyframe_accept(name: str, role: str, round_name: str, index: int,
+                     target: Path) -> dict:
+    """落素材、更新 keyframe.toml；首帧换新时清掉旧尾帧并自动排队尾帧批次。"""
+    case = case_mod.load(name, _ctx["cases_root"])
+    cdir = case.dir(_ctx["cases_root"])
+    state = keyframe_mod.load(cdir)
+    state.extract = case.extract_current
+    old_last = state.last
+    same_first = (role == "first_frame" and state.first is not None
+                  and state.first.round == round_name and state.first.index == index)
+    updated = case_mod.add_assets(name, [(target, role)], _ctx["cases_root"])
+    new_id = updated.assets[-1].id
+    if role == "first_frame":
+        state.first = keyframe_mod.Pick(round_name, index, new_id)
+        if not same_first:
+            state.last = None
+        keyframe_mod.save(cdir, state)
+        if old_last is not None and not same_first:
+            selected = [x for x in (updated.submit_selected or [])
+                        if x != old_last.asset]
+            if selected != (updated.submit_selected or []):
+                case_mod.set_submit_selected(name, selected, _ctx["cases_root"])
+        queued, hint = False, "首帧已定稿"
+        if not same_first:
+            try:
+                payload = _keyframe_prompt(name, "last")
+                values = payload.get("vars") or {}
+                if (not str(values.get("figure") or "").strip()
+                        or not str(values.get("pose_last") or "").strip()):
+                    hint = ("首帧已定稿；尾帧提示词还缺人物外观或尾帧姿态，"
+                            "补齐后点「生成尾帧候选」")
+                else:
+                    argv = _keyframe_argv(name, {"step": "last"})
+                    QUEUE.submit("keyframe", name, argv)
+                    queued, hint = True, "首帧已定稿；尾帧已自动开始生成"
+            except CaseError as exc:
+                hint = f"首帧已定稿；尾帧没有自动开始：{exc}"
+    else:
+        state.last = keyframe_mod.Pick(round_name, index, new_id)
+        keyframe_mod.save(cdir, state)
+        queued, hint = False, "尾帧已定稿"
+    info = _info_with_generation(name)
+    info["keyframe_queued"] = queued
+    info["keyframe_hint"] = hint
+    return info
 
 
 async def keyframe_img(request):
@@ -1434,7 +1830,35 @@ async def api_viewport(request):
                             float(body["fx"]), float(body["fy"]))
     _remember_store(name, store)
     _log_geometry(request, name, "viewport", old, dict(store.case.viewport or {}))
-    return JSONResponse(_case_info(name))
+    return JSONResponse(_geometry_payload(store, name))
+
+
+async def api_viewport_size(request):
+    """切换选区视口分辨率；档位由 PATCH_VIEWPORT_OPTIONS 提供。"""
+    name = request.path_params["name"]
+    store = get_store(name)
+    if store is None:
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    body = await request.json()
+    try:
+        width = int(body.get("width") or 0)
+        height = int(body.get("height") or 0)
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "width/height 必须是整数"}, status_code=400)
+    options = _viewport_options(store.case)
+    if not any(o["width"] == width and o["height"] == height for o in options):
+        available = "、".join(f"{o['width']}×{o['height']}" for o in options)
+        return JSONResponse(
+            {"error": f"不支持的视口尺寸 {width}×{height}；可用：{available}"},
+            status_code=400)
+    old = dict(store.case.viewport or {})
+    try:
+        await asyncio.to_thread(store.set_viewport_size, width, height)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    _remember_store(name, store)
+    _log_geometry(request, name, "viewport_size", old, dict(store.case.viewport or {}))
+    return JSONResponse(_geometry_payload(store, name))
 
 
 async def api_inner(request):
@@ -1454,7 +1878,7 @@ async def api_inner(request):
     await asyncio.to_thread(store.set_inner, x, y, w, h)
     _remember_store(name, store)
     _log_geometry(request, name, "inner", old, dict(store.case.inner or {}))
-    return JSONResponse(_case_info(name))
+    return JSONResponse(_geometry_payload(store, name))
 
 
 async def api_nudge(request):
@@ -1468,9 +1892,8 @@ async def api_nudge(request):
         store.nudge, float(body.get("dyaw", 0.0)), float(body.get("dpitch", 0.0)))
     _remember_store(name, store)
     _log_geometry(request, name, "nudge", old, dict(store.case.viewport or {}))
-    info = _case_info(name)                  # 回完整 info：前端 post() 统一就地刷新
-    info["nudged"] = {"yaw": yaw, "pitch": pitch}
-    return JSONResponse(info)
+    return JSONResponse(_geometry_payload(
+        store, name, nudged={"yaw": yaw, "pitch": pitch}))
 
 
 async def api_reset_draft(request):
@@ -1490,7 +1913,10 @@ async def api_reset_draft(request):
     case_mod.set_draft(name, root=_ctx["cases_root"],
                        viewport=seg["viewport"], inner=seg["inner"])
     _stores.pop(name, None)
-    return JSONResponse(_case_info(name))
+    store = get_store(name)
+    if store is None:
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    return JSONResponse(_geometry_payload(store, name))
 
 
 # ── 流水线：统一入口 submit(op) → 单通道队列跑 CLI ───────────────────────
@@ -1737,9 +2163,16 @@ routes = [
     Route("/api/case/{name}/keyframe/run", api_keyframe_run, methods=["POST"]),
     Route("/api/case/{name}/keyframe/rounds", api_keyframe_rounds),
     Route("/api/case/{name}/keyframe/pick", api_keyframe_pick, methods=["POST"]),
+    Route("/api/case/{name}/keyframe/sheet", api_keyframe_sheet,
+          methods=["GET", "PUT"]),
+    Route("/api/case/{name}/keyframe/prompt", api_keyframe_prompt,
+          methods=["GET", "PUT"]),
+    Route("/api/case/{name}/keyframe/handoff", api_keyframe_handoff,
+          methods=["POST"]),
     Route("/api/sessions", api_sessions),
     Route("/api/modes", api_modes),
     Route("/api/case/{name}/viewport", api_viewport, methods=["POST"]),
+    Route("/api/case/{name}/viewport-size", api_viewport_size, methods=["POST"]),
     Route("/api/case/{name}/inner", api_inner, methods=["POST"]),
     Route("/api/case/{name}/nudge", api_nudge, methods=["POST"]),
     Route("/api/case/{name}/reset-draft", api_reset_draft, methods=["POST"]),

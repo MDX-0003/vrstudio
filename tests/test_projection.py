@@ -3,7 +3,7 @@
 import numpy as np
 from vrstudio.patch.projection import (
     erp_to_rect, rect_to_erp, camera_rotation, focal_from_fov,
-    _direction_to_erp_px,
+    viewport_erp_rects, _direction_to_erp_px,
 )
 
 
@@ -32,6 +32,24 @@ def test_viewport_center():
     phi = np.arcsin(np.clip(fwd[1], -1, 1))
     assert abs(lam - yaw) < 1e-9
     assert abs(phi - pitch) < 1e-9
+
+
+def test_viewport_footprint_centered():
+    # yaw=0 对应 ERP 画面中心，不跨经线。
+    rects = viewport_erp_rects(160, 90, 0.0, 0.0, 90.0, 360, 180)
+    assert len(rects) == 1
+    x0, y0, x1, y1 = rects[0]
+    assert x0 < 180 < x1 and y0 < 90 < y1
+    assert 80 <= x1 - x0 <= 110     # 90° 水平视角约 90 像素，加少量 padding
+    assert 50 <= y1 - y0 <= 80
+
+
+def test_viewport_footprint_splits_at_seam():
+    # yaw=180 对应 ERP 的 0/360 经线，示意框必须拆成左右两块。
+    rects = viewport_erp_rects(160, 90, 180.0, 0.0, 59.0, 360, 180)
+    assert len(rects) == 2
+    assert any(rect[0] == 0 for rect in rects)
+    assert any(rect[2] == 360 for rect in rects)
 
 
 def test_smooth_roundtrip():

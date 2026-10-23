@@ -2,40 +2,6 @@
 
 {% include "partials/assets.html" %}
 
-{% if flow != "fullredraw" %}
-<details id="keyframeWorkbench" class="fold">
-  <summary>关键帧工作台（首帧 / 尾帧重绘）</summary>
-  <div class="meta">图片模型每次出 4 张候选，人工挑 1 张落成 first_frame / last_frame。
-    首期比例固定 16:9；首帧与尾帧必须同宽高，工作台会在挑选时校验。</div>
-  <div class="row" style="align-items:center">
-    <label class="meta">步骤
-      <select id="kfStep" onchange="renderKeyframe()">
-        <option value="first">首帧</option>
-        <option value="last">尾帧</option>
-      </select>
-    </label>
-    <label class="meta">图片模型
-      <input id="kfModel" value="44" style="width:70px">
-    </label>
-    <label class="meta">分辨率
-      <select id="kfResolution">
-        <option>4K</option><option>2K</option><option>1K</option>
-      </select>
-    </label>
-    <button onclick="runKeyframe()">运行图片生成</button>
-    <button onclick="loadKeyframeRounds()">刷新候选</button>
-  </div>
-  <div class="meta">参考图（勾选顺序即传给图片模型的 图1/图2/图3）：</div>
-  <div id="kfAssets" class="meta">（还没有首尾原始帧）</div>
-  <div class="meta">首尾原始帧由 extract 从 clip 首末帧导出，只作为工作台输入；
-    勾选顺序按面板从上到下。首帧用原始首帧 + 三视图，尾帧再加首帧定稿图。点击候选缩略图可放大。</div>
-  <textarea id="kfPrompt" style="width:100%;height:110px;margin-top:0.3rem"
-    placeholder="粘贴首帧或尾帧提示词（首帧用场景起点图 + 三视图；尾帧再加首帧产物）"></textarea>
-  <div class="meta" id="kfHint"></div>
-  <div id="kfRounds" class="kfGrid"><span class="meta">还没有图片轮次</span></div>
-</details>
-{% endif %}
-
 {% include "partials/prompt.html" %}
 
 <details id="externalPanel" class="fold">

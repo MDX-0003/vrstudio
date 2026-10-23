@@ -1,8 +1,9 @@
 <details id="assetSidebar" class="fold" open>
-  <summary>素材与本次提交集 <span class="sum" id="assetSummary"></span></summary>
-  <div class="meta">勾选即提交，没有默认集。流程母版（patch 的 clip、fullredraw 的 pad）与
-    文件素材同为主要候选；mask 由流程自动附加，不出现在候选里。
-    提示词里的 @VideoN / @ImageN 按勾选结果重新编号。</div>
+  <summary>素材库与本次视频提交 <span class="sum" id="assetSummary"></span></summary>
+  <div class="meta">素材库存放本 case 的文件（三视图、首尾定稿、其他参考图）；这里的勾选只表示
+    「参与本次视频生成」，没有默认集。图片步的参考图由「首尾帧」步骤自己决定，不受这里的勾选影响。
+    流程母版（patch 的 clip、fullredraw 的 pad）与文件素材同为主要候选；mask 由流程自动附加，
+    不出现在候选里。提示词里的 @VideoN / @ImageN 按勾选结果重新编号。</div>
 
   <div class="row" style="align-items:center;margin:0.4rem 0">
     <button onclick="_setAllSelected(true)">全选</button>

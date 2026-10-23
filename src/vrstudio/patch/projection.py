@@ -118,13 +118,8 @@ def rect_to_erp(rect, yaw, pitch, fov_h, erp_w, erp_h):
     return patch, mask
 
 
-def _viewport_erp_bounds(rect_w, rect_h, yaw, pitch, fov, erp_w, erp_h):
-    """Bounding box (x0, y0, x1, y1) in ERP pixels covering the whole viewport.
-
-    Samples the viewport's four edges (the curved footprint in ERP) and takes
-    the min/max with padding. Falls back to the full canvas if the viewport
-    crosses the longitude seam.
-    """
+def _viewport_erp_samples(rect_w, rect_h, yaw, pitch, fov, erp_w, erp_h):
+    """Sample the viewport's four edges into ERP pixel coordinates."""
     f = focal_from_fov(fov, rect_w)
     cx, cy = rect_w / 2.0, rect_h / 2.0
     R = camera_rotation(yaw, pitch)
@@ -141,7 +136,17 @@ def _viewport_erp_bounds(rect_w, rect_h, yaw, pitch, fov, erp_w, erp_h):
     nn = np.sqrt(Xc * Xc + Yc * Yc + Zc * Zc)
     d = np.stack([Xc / nn, Yc / nn, Zc / nn], axis=-1)
     dw = d @ R.T
-    px, py = _direction_to_erp_px(dw, erp_w, erp_h)
+    return _direction_to_erp_px(dw, erp_w, erp_h)
+
+
+def _viewport_erp_bounds(rect_w, rect_h, yaw, pitch, fov, erp_w, erp_h):
+    """Bounding box (x0, y0, x1, y1) in ERP pixels covering the whole viewport.
+
+    Samples the viewport's four edges (the curved footprint in ERP) and takes
+    the min/max with padding. Falls back to the full canvas if the viewport
+    crosses the longitude seam.
+    """
+    px, py = _viewport_erp_samples(rect_w, rect_h, yaw, pitch, fov, erp_w, erp_h)
 
     if px.max() - px.min() > erp_w / 2.0:
         return 0, 0, erp_w, erp_h  # crosses the seam; use full width
@@ -152,6 +157,42 @@ def _viewport_erp_bounds(rect_w, rect_h, yaw, pitch, fov, erp_w, erp_h):
     y0 = max(0, int(np.floor(py.min())) - pad)
     y1 = min(erp_h, int(np.ceil(py.max())) + pad)
     return x0, y0, x1, y1
+
+
+def viewport_erp_rects(rect_w, rect_h, yaw_deg, pitch_deg, fov_h_deg,
+                       erp_w, erp_h):
+    """Viewport footprint on the ERP as 1–2 pixel rects (x0, y0, x1, y1).
+
+    The pick page draws these as a box. A viewport crossing the 0/360 seam
+    returns two rects so both halves are visible instead of a full-width box.
+    """
+    if min(rect_w, rect_h, fov_h_deg, erp_w, erp_h) <= 0:
+        return []
+    px, py = _viewport_erp_samples(
+        rect_w, rect_h, np.radians(yaw_deg), np.radians(pitch_deg),
+        np.radians(fov_h_deg), erp_w, erp_h)
+    pad = max(2, erp_w // 400)
+    y0 = max(0, int(np.floor(py.min())) - pad)
+    y1 = min(erp_h, int(np.ceil(py.max())) + pad)
+    if y1 <= y0:
+        return []
+    if px.max() - px.min() <= erp_w / 2.0:
+        x0 = max(0, int(np.floor(px.min())) - pad)
+        x1 = min(erp_w, int(np.ceil(px.max())) + pad)
+        return [(x0, y0, x1, y1)] if x1 > x0 else []
+
+    shifted = np.where(px < erp_w / 2.0, px + erp_w, px)
+    x0 = int(np.floor(shifted.min())) - pad
+    x1 = int(np.ceil(shifted.max())) + pad
+    if x1 - x0 >= erp_w:
+        return [(0, y0, erp_w, y1)]
+    rects = []
+    left_start, left_end = max(0, x0), min(erp_w, x1)
+    if left_end > left_start:
+        rects.append((left_start, y0, left_end, y1))
+    if x1 > erp_w:
+        rects.append((0, y0, min(erp_w, x1 - erp_w), y1))
+    return [rect for rect in rects if rect[2] > rect[0] and rect[3] > rect[1]]
 
 
 def rect_to_erp_bbox(rect, yaw, pitch, fov, erp_w, erp_h):

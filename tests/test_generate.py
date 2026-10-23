@@ -292,6 +292,39 @@ def test_patch_firstlast_branch_builds_refs(tmp_path, src_video, monkeypatch):
     assert [a["role"] for a in data["assets"]] == ["first_frame", "last_frame"]
 
 
+def test_clip_duration_uses_frozen_frame_range(tmp_path, src_video):
+    case = _patch_16_9_case(tmp_path, src_video)
+    # clip.json: 0..239 @30fps = 240 帧 = 8.0 秒
+    assert gen.clip_duration_s(case, tmp_path) == 8
+
+
+def test_submit_firstlast_defaults_to_clip_duration(tmp_path, src_video):
+    _patch_16_9_case(tmp_path, src_video)
+    first, last = _image_assets(tmp_path)
+    case_mod.add_assets("p1", [(first, "first_frame"), (last, "last_frame")],
+                        root=tmp_path)
+    case_mod.set_submit_selected("p1", ["i1", "i2"], root=tmp_path)
+    r = runner.invoke(gen.app, ["submit", "--case", "p1", "--mode", "firstLastFrame",
+                                "--dry-run", "--cases-dir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    lines = [line.strip() for line in r.output.splitlines()]
+    assert lines[lines.index("--duration") + 1] == "8"
+
+
+def test_submit_firstlast_explicit_duration_wins(tmp_path, src_video):
+    _patch_16_9_case(tmp_path, src_video)
+    first, last = _image_assets(tmp_path)
+    case_mod.add_assets("p1", [(first, "first_frame"), (last, "last_frame")],
+                        root=tmp_path)
+    case_mod.set_submit_selected("p1", ["i1", "i2"], root=tmp_path)
+    r = runner.invoke(gen.app, ["submit", "--case", "p1", "--mode", "firstLastFrame",
+                                "--duration", "10", "--dry-run",
+                                "--cases-dir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    lines = [line.strip() for line in r.output.splitlines()]
+    assert lines[lines.index("--duration") + 1] == "10"
+
+
 def test_patch_firstlast_requires_16_9_viewport(tmp_path, src_video):
     _patch_16_9_case(tmp_path, src_video, size=(1920, 1052))
     first, last = _image_assets(tmp_path)

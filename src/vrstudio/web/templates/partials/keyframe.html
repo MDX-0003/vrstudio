@@ -1,0 +1,53 @@
+<div id="kfBody">
+  <div class="meta">用首尾帧生成视频时才需要这一步；只用 videoEdit 的 case 可以直接跳到「生成」。
+    每次提交会请求 4 张候选，平台按批次返回；候选区显示这一批的全部结果，首期比例固定 16:9。</div>
+  <div class="meta" id="kfStatus"></div>
+
+  <div class="kfBlock">
+    <h3>① 两帧底图</h3>
+    <div id="kfRawFrames" class="kfRaw"><span class="meta">（还没有抽取版本）</span></div>
+  </div>
+
+  <div class="kfBlock">
+    <h3>② 人物与姿势</h3>
+    <div class="row" style="align-items:center">
+      <label class="meta">图片模型
+        <select id="kfModel">
+          <option value="44">专业图片-2.5</option>
+          <option value="25">Seedream 4.5</option>
+        </select>
+      </label>
+      <label class="meta">分辨率
+        <select id="kfResolution">
+          <option>4K</option><option>2K</option><option>1K</option>
+        </select>
+      </label>
+      <label class="meta">人物三视图
+        <select id="kfSheet" onchange="setKeyframeSheet(this.value)"></select>
+      </label>
+      <span class="meta" id="kfSheetHint"></span>
+    </div>
+    <div class="row" style="align-items:center">
+      <span class="meta" id="kfSession"></span>
+      <button onclick="gotoSession()">去选择会话</button>
+    </div>
+    <div id="kfVars"><span class="meta">（提示词草稿读取中）</span></div>
+  </div>
+
+  <div class="kfBlock" id="kfFirst"></div>
+  <div class="kfBlock" id="kfLast"></div>
+
+  <div class="kfBlock">
+    <h3>⑤ 交给视频</h3>
+    <div class="meta">两帧定稿后，切到 firstLastFrame 并勾选这一对；真正的提交仍在「生成」步骤的底栏，
+      这样扣费入口只有一处。</div>
+    <button class="big" id="kfHandoff" onclick="handoffKeyframe()" disabled>用这两帧生成视频</button>
+  </div>
+
+  <details class="fold inner" id="kfHistory">
+    <summary>更早的批次</summary>
+    <div id="kfOldRounds" class="meta">（没有历史批次）</div>
+  </details>
+
+  <div class="meta" id="kfHint"></div>
+</div>

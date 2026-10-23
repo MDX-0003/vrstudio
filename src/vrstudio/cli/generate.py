@@ -57,6 +57,31 @@ def template_for(flow: str, mode: str | None) -> str:
     return TEMPLATE_BY_FLOW[flow]
 
 
+def clip_duration_s(case: case_mod.Case, root: str | Path | None = None) -> int | None:
+    """patch 当前 clip 的时长（整秒，至少 4）：帧范围 ÷ clip.json 的帧率。
+
+    firstLastFrame 没有输入视频，vrgen 的“自动”只能回退到 4 秒；patch 的时长
+    其实由已冻结的 clip 决定，所以在 vrstudio 侧推导后显式传给 vrgen。
+    """
+    if case.flow != "patch" or not case.extract_current:
+        return None
+    path = case.dir(root) / "extracts" / case.extract_current / "clip.json"
+    if not path.is_file():
+        return None
+    from ..patch.sidecar import load_sidecar
+    try:
+        sidecar = load_sidecar(path)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if len(sidecar.segments) != 1 or sidecar.fps <= 0:
+        return None
+    segment = sidecar.segments[0]
+    frames = int(segment.frame_end) - int(segment.frame_start) + 1
+    if frames <= 0:
+        return None
+    return max(4, round(frames / sidecar.fps))
+
+
 def _image_size(path: Path) -> tuple[int, int]:
     import cv2
 
@@ -413,6 +438,10 @@ def submit(
         argv += ["--mode", mode]
     if resolution is not None:
         argv += ["--resolution", resolution]
+    if duration is None and mode == "firstLastFrame":
+        # 首尾帧没有输入视频，vrgen 的自动值只有 4 秒；patch 用 clip 的实际
+        # 帧范围与帧率推导，显式传下去，CLI 与网页走同一条规则。
+        duration = clip_duration_s(case, cases_dir)
     if duration is not None:
         argv += ["--duration", str(duration)]
     if num is not None:
