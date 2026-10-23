@@ -1,72 +1,271 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { Refresh } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
+import { fetchTasks } from '@/api/tasks'
+import type { TaskState, TaskView } from '@/types/task'
 
-interface TaskRow {
-  kind: string
-  case: string
-  owner: string
-  status: 'running' | 'queued' | 'done' | 'failed'
-  position: string
-  started: string
+const tasks = ref<TaskView[]>([])
+const loading = ref(false)
+const error = ref('')
+const scope = ref<'all' | 'mine'>('all')
+const drawerOpen = ref(false)
+const selected = ref<TaskView | null>(null)
+let timer: ReturnType<typeof setInterval> | null = null
+let inFlight = false
+
+const statusMeta: Record<
+  TaskState,
+  { text: string; type: 'primary' | 'warning' | 'success' | 'danger' }
+> = {
+  queued: { text: '排队中', type: 'warning' },
+  running: { text: '进行中', type: 'primary' },
+  done: { text: '已完成', type: 'success' },
+  failed: { text: '失败', type: 'danger' },
 }
 
-const tasks = ref<TaskRow[]>([
-  { kind: '空间合并', case: 'dacne', owner: 'MDX', status: 'running', position: '运行中', started: '16:38' },
-  { kind: '抽取', case: 'walk_02', owner: 'LQ', status: 'queued', position: '第 2 位', started: '—' },
-  { kind: '提交生成', case: 'ship_01', owner: 'MDX', status: 'failed', position: '—', started: '15:02' },
-  { kind: '首尾帧图片', case: 'walk_4k', owner: 'MDX', status: 'done', position: '—', started: '14:41' },
-])
-
-const statusText: Record<TaskRow['status'], string> = {
-  running: '进行中',
-  queued: '排队中',
-  done: '已完成',
-  failed: '失败',
+function statusOf(status: string): { text: string; type: 'primary' | 'warning' | 'success' | 'danger' } {
+  return statusMeta[status as TaskState] ?? statusMeta.queued
 }
 
-const statusType: Record<TaskRow['status'], 'primary' | 'warning' | 'success' | 'danger'> = {
-  running: 'primary',
-  queued: 'warning',
-  done: 'success',
-  failed: 'danger',
+function positionText(task: TaskView): string {
+  if (task.status === 'running') return '运行中'
+  return task.queue_position ? `第 ${task.queue_position} 位` : '—'
 }
 
-function statusTextOf(status: string): string {
-  return statusText[status as TaskRow['status']]
+function formatTime(value: string | null): string {
+  if (!value) return '—'
+  return value.replace('T', ' ').slice(0, 19)
 }
 
-function statusTypeOf(status: string): 'primary' | 'warning' | 'success' | 'danger' {
-  return statusType[status as TaskRow['status']]
+function durationText(task: TaskView): string {
+  if (!task.started_at) return '—'
+  const start = new Date(task.started_at).getTime()
+  const end = task.finished_at ? new Date(task.finished_at).getTime() : Date.now()
+  const seconds = Math.max(0, Math.round((end - start) / 1000))
+  if (seconds < 60) return `${seconds} 秒`
+  return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
 }
+
+async function loadTasks(): Promise<void> {
+  if (inFlight || document.hidden) return
+  inFlight = true
+  loading.value = tasks.value.length === 0
+  error.value = ''
+  try {
+    const data = await fetchTasks(scope.value)
+    tasks.value = data.tasks
+    if (selected.value) {
+      selected.value = data.tasks.find((task) => task.id === selected.value?.id) ?? selected.value
+    }
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '读取任务失败'
+  } finally {
+    loading.value = false
+    inFlight = false
+  }
+}
+
+function openTask(task: TaskView): void {
+  selected.value = task
+  drawerOpen.value = true
+}
+
+function startPolling(): void {
+  if (timer) clearInterval(timer)
+  timer = setInterval(() => {
+    void loadTasks()
+  }, 2000)
+}
+
+function stopPolling(): void {
+  if (timer) {
+    clearInterval(timer)
+    timer = null
+  }
+}
+
+onMounted(() => {
+  void loadTasks()
+  startPolling()
+})
+
+onUnmounted(stopPolling)
+
+watch(scope, () => {
+  void loadTasks()
+})
 </script>
 
 <template>
   <div class="page">
     <PageHeader
       title="任务中心"
-      subtitle="原型阶段展示任务视图的字段；Phase 1 接入 /api/tasks，Phase 4 增加我的/全部筛选。"
-    />
+      subtitle="读取真实 /api/tasks；Phase 4 增加按人筛选与扣费归属，Phase 5 增加完整日志下载。"
+    >
+      <el-select v-model="scope" style="width: 130px">
+        <el-option label="全部任务" value="all" />
+        <el-option label="我的任务" value="mine" />
+      </el-select>
+      <el-button :icon="Refresh" :loading="loading" @click="loadTasks">刷新</el-button>
+    </PageHeader>
+
+    <div v-if="error" class="load-error">
+      <span>{{ error }}</span>
+      <el-button link type="primary" @click="loadTasks">重试</el-button>
+    </div>
+
     <div class="panel">
-      <el-table :data="tasks" row-key="kind">
-        <el-table-column prop="kind" label="任务" width="150" />
-        <el-table-column prop="case" label="Case" width="150" />
-        <el-table-column prop="owner" label="负责人" width="100" />
-        <el-table-column label="状态" width="110">
+      <el-table
+        v-loading="loading"
+        :data="tasks"
+        row-key="id"
+        @row-click="openTask"
+      >
+        <el-table-column label="状态" width="100">
           <template #default="{ row }">
-            <el-tag :type="statusTypeOf(row.status)" effect="light" size="small">
-              {{ statusTextOf(row.status) }}
+            <el-tag :type="statusOf(row.status).type" effect="light" size="small">
+              {{ statusOf(row.status).text }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="position" label="排队位置" width="110" />
-        <el-table-column prop="started" label="开始时间" width="110" />
-        <el-table-column label="" min-width="120" align="right">
-          <template #default>
-            <el-button link type="primary">查看日志</el-button>
+        <el-table-column label="任务" min-width="160">
+          <template #default="{ row }">
+            <div class="task-kind">{{ row.kind }}</div>
+            <div class="task-id mono">{{ row.id }}</div>
           </template>
         </el-table-column>
+        <el-table-column prop="case" label="Case" width="140" />
+        <el-table-column label="负责人" width="110">
+          <template #default="{ row }">{{ row.owner_name || '未归属' }}</template>
+        </el-table-column>
+        <el-table-column label="排队位置" width="110">
+          <template #default="{ row }">{{ positionText(row) }}</template>
+        </el-table-column>
+        <el-table-column label="提交时间" width="180">
+          <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
+        </el-table-column>
+        <el-table-column label="耗时" width="120">
+          <template #default="{ row }">{{ durationText(row) }}</template>
+        </el-table-column>
+        <el-table-column label="" width="90" align="right">
+          <template #default="{ row }">
+            <el-button link type="primary" @click.stop="openTask(row)">查看</el-button>
+          </template>
+        </el-table-column>
+        <template #empty>
+          <el-empty description="还没有任务" />
+        </template>
       </el-table>
     </div>
+
+    <el-drawer
+      v-model="drawerOpen"
+      :title="selected ? `任务 ${selected.kind} · ${selected.case}` : '任务详情'"
+      size="620px"
+    >
+      <template v-if="selected">
+        <el-descriptions :column="2" border>
+          <el-descriptions-item label="状态">
+            {{ statusOf(selected.status).text }}
+          </el-descriptions-item>
+          <el-descriptions-item label="任务 ID">
+            <span class="mono">{{ selected.id }}</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="负责人">
+            {{ selected.owner_name || '未归属' }}
+          </el-descriptions-item>
+          <el-descriptions-item label="排队位置">
+            {{ positionText(selected) }}
+          </el-descriptions-item>
+          <el-descriptions-item label="提交时间">
+            {{ formatTime(selected.created_at) }}
+          </el-descriptions-item>
+          <el-descriptions-item label="开始时间">
+            {{ formatTime(selected.started_at) }}
+          </el-descriptions-item>
+          <el-descriptions-item label="结束时间">
+            {{ formatTime(selected.finished_at) }}
+          </el-descriptions-item>
+          <el-descriptions-item label="请求 ID">
+            <span class="mono">{{ selected.request_id || '—' }}</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="日志路径" :span="2">
+            <span class="mono path">{{ selected.log_path || '—' }}</span>
+          </el-descriptions-item>
+        </el-descriptions>
+
+        <el-alert
+          v-if="selected.error"
+          type="error"
+          :closable="false"
+          :title="selected.error"
+          class="task-error"
+        />
+
+        <h3 class="log-title">日志尾部</h3>
+        <pre class="log-tail">{{ selected.tail.length ? selected.tail.join('\n') : '没有日志输出' }}</pre>
+        <p class="muted log-note">完整日志下载在 Phase 5 接入。</p>
+      </template>
+    </el-drawer>
   </div>
 </template>
+
+<style scoped>
+.task-kind {
+  font-weight: 600;
+}
+
+.task-id {
+  color: var(--color-text-faint);
+  font-size: var(--text-xs);
+}
+
+.load-error {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius-md);
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+}
+
+.task-error {
+  margin-top: var(--space-4);
+}
+
+.log-title {
+  margin: var(--space-4) 0 var(--space-2);
+  font-size: var(--text-base);
+}
+
+.log-tail {
+  max-height: 320px;
+  margin: 0;
+  padding: var(--space-3);
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: #0f172a;
+  color: #e2e8f0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.log-note {
+  font-size: var(--text-xs);
+}
+
+.path {
+  word-break: break-all;
+}
+
+:deep(.el-table__row) {
+  cursor: pointer;
+}
+</style>
