@@ -11,7 +11,7 @@ import {
   savePromptVar,
   saveSubmitSelection,
 } from '@/api/case'
-import type { SaveParamsPayload } from '@/api/case'
+import type { RunPayload, SaveParamsPayload } from '@/api/case'
 import { fetchSessions } from '@/api/sessions'
 import AssetUploadDialog from '@/components/upload/AssetUploadDialog.vue'
 import GenerateAssets from '@/components/generate/GenerateAssets.vue'
@@ -477,18 +477,12 @@ const runBlockReason = computed(() => {
   return firstLastFrameIssue.value
 })
 
-function submitBody() {
-  const body = {
+function submitBody(): RunPayload {
+  const body: RunPayload = {
     mode: mode.value,
     aspect_ratio: ratio.value,
     resolution: resolution.value,
     scale: scale.value,
-  } as {
-    mode: string
-    aspect_ratio: string
-    resolution: string
-    scale: string
-    duration?: number
   }
   if (duration.value !== 'auto') body.duration = Number(duration.value)
   return body

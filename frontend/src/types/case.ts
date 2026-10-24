@@ -75,11 +75,3 @@ export interface PromptVariable {
   help: string
   value: string
 }
-
-export interface CandidateRound {
-  id: string
-  title: string
-  time: string
-  status: 'ready' | 'picked' | 'failed'
-  images: number
-}

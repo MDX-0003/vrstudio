@@ -1,11 +1,23 @@
 import type { CaseInfo } from '@/types/case-info'
-import { getJson, postJson, putJson, rememberRevision } from './client'
+import {
+  ApiRequestError,
+  forgetRevision,
+  getJson,
+  postJson,
+  putJson,
+  rememberRevision,
+} from './client'
 import { casePath } from './path'
 
 export async function fetchCase(name: string): Promise<CaseInfo> {
-  const data = await getJson<CaseInfo>(casePath(name))
-  rememberRevision(name, data.meta?.revision ?? 0)
-  return data
+  try {
+    const data = await getJson<CaseInfo>(casePath(name))
+    rememberRevision(name, data.meta?.revision ?? 0)
+    return data
+  } catch (err) {
+    if (err instanceof ApiRequestError && err.status === 404) forgetRevision(name)
+    throw err
+  }
 }
 
 export function saveSubmitSelection(name: string, selected: string[]): Promise<CaseInfo> {
@@ -53,14 +65,6 @@ export function runOperation(
   payload: RunPayload = {},
 ): Promise<{ submitted: string; case: string }> {
   return postJson<{ submitted: string; case: string }>(`${casePath(name)}/run`, { op, ...payload })
-}
-
-export function addAssetsByPaths(
-  name: string,
-  paths: string[],
-  roles: string[],
-): Promise<CaseInfo> {
-  return postJson<CaseInfo>(`${casePath(name)}/assets`, { op: 'add', paths, roles })
 }
 
 export function addAssetsByUploads(

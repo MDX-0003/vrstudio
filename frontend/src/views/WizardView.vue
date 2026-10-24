@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Check } from '@element-plus/icons-vue'
 import { fetchCase } from '@/api/case'
+import { ApiRequestError } from '@/api/client'
 import { acquireLock, releaseLock } from '@/api/lock'
 import type { GeometryPayload } from '@/api/workflow'
 import CompareStep from '@/views/wizard/CompareStep.vue'
@@ -39,6 +40,7 @@ const saveState = ref<SaveState>('saved')
 const lockHolder = ref<string | null>(null)
 let lockTimer: ReturnType<typeof setInterval> | null = null
 let caseLoadSeq = 0
+let conflictDialogOpen = false
 
 function applyCaseInfo(data: CaseInfo): void {
   caseInfo.value = data
@@ -113,7 +115,10 @@ async function acquireCaseLock(): Promise<void> {
     const payload = await acquireLock(caseName.value)
     lockHolder.value = payload.mine ? null : (payload.lock?.owner_name ?? null)
   } catch (err) {
-    const detail = (err as { payload?: { lock?: { owner_name?: string } } }).payload
+    const detail =
+      err instanceof ApiRequestError
+        ? (err.payload as { lock?: { owner_name?: string } } | undefined)
+        : undefined
     lockHolder.value = detail?.lock?.owner_name ?? null
     if (lockHolder.value) {
       ElMessage.warning(`case 正被 ${lockHolder.value} 使用；保存仍会写入，请先沟通`)
@@ -143,6 +148,8 @@ onUnmounted(() => {
 })
 
 function onCaseConflict(event: Event): void {
+  if (conflictDialogOpen) return
+  conflictDialogOpen = true
   const detail = (event as CustomEvent<{ error?: string }>).detail
   void ElMessageBox.confirm(
     detail?.error || 'case 已被其他人修改，当前页面的保存会覆盖对方的改动。',
@@ -155,6 +162,9 @@ function onCaseConflict(event: Event): void {
   )
     .then(() => loadCase())
     .catch(() => undefined)
+    .finally(() => {
+      conflictDialogOpen = false
+    })
 }
 
 watch(caseName, (_next, previous) => {

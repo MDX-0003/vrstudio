@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiRequestError, getJson, postJson } from '@/api/client'
+import { ApiRequestError, forgetRevision, getJson, postJson, rememberRevision } from '@/api/client'
 import { createUpload, putChunk } from '@/api/uploads'
 
 afterEach(() => {
@@ -58,6 +58,36 @@ describe('api client', () => {
     const assertion = expect(pending).rejects.toThrow('请求超时')
     await vi.advanceTimersByTimeAsync(30_000)
     await assertion
+  })
+
+  it('sends a remembered revision and forgets it on demand', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse({})))
+    vi.stubGlobal('fetch', fetchMock)
+
+    rememberRevision('rev-case', 7)
+    await getJson('/api/case/rev-case')
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/case/rev-case',
+      expect.objectContaining({
+        headers: expect.objectContaining({ 'X-Case-Revision': '7' }),
+      }),
+    )
+
+    forgetRevision('rev-case')
+    fetchMock.mockClear()
+    await getJson('/api/case/rev-case')
+    const headers = fetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>
+    expect(headers['X-Case-Revision']).toBeUndefined()
+  })
+
+  it('bounds the revision cache', async () => {
+    for (let index = 0; index < 101; index += 1) rememberRevision(`rev-${index}`, index)
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({}))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await getJson('/api/case/rev-0')
+    const headers = fetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>
+    expect(headers['X-Case-Revision']).toBeUndefined()
   })
 })
 

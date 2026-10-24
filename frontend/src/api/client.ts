@@ -11,11 +11,22 @@ export class ApiRequestError extends Error {
 }
 
 const revisions = new Map<string, number>()
+const MAX_REVISIONS = 100
 const DEFAULT_TIMEOUT_MS = 30_000
 const BLOB_TIMEOUT_MS = 120_000
 
+function setRevision(caseName: string, revision: number): void {
+  revisions.delete(caseName)
+  revisions.set(caseName, revision)
+  while (revisions.size > MAX_REVISIONS) {
+    const oldest = revisions.keys().next().value
+    if (oldest === undefined) break
+    revisions.delete(oldest)
+  }
+}
+
 export function rememberRevision(caseName: string, revision: number): void {
-  if (caseName && Number.isFinite(revision)) revisions.set(caseName, revision)
+  if (caseName && Number.isFinite(revision)) setRevision(caseName, revision)
 }
 
 export function forgetRevision(caseName: string): void {
@@ -40,7 +51,7 @@ function noteRevision(path: string, response: Response): void {
   const raw = response.headers.get('x-case-revision')
   if (!name || raw === null) return
   const value = Number(raw)
-  if (Number.isFinite(value)) revisions.set(name, value)
+  if (Number.isFinite(value)) setRevision(name, value)
 }
 
 function noteConflict(data: unknown, status: number): void {

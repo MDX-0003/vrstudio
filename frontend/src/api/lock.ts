@@ -1,4 +1,4 @@
-import { getJson, postJson } from './client'
+import { postJson } from './client'
 import { casePath } from './path'
 
 export interface CaseLock {
@@ -15,10 +15,6 @@ export interface LockPayload {
 
 function path(name: string): string {
   return `${casePath(name)}/lock`
-}
-
-export function fetchLock(name: string): Promise<LockPayload> {
-  return getJson<LockPayload>(path(name))
 }
 
 export function acquireLock(name: string): Promise<LockPayload> {

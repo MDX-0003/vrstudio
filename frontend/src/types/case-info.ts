@@ -1,4 +1,4 @@
-import type { Flow } from '@/types/case'
+import type { Flow, Gates } from '@/types/case'
 
 export interface AssetDetail {
   id: string
@@ -222,10 +222,7 @@ export interface CaseInfo {
   extracts: ExtractVersion[]
   outputs: OutputFile[]
   step_files: Record<string, StepFiles>
-  gates: Record<
-    string,
-    { ok: boolean; ready?: boolean; reason?: string; evidence?: string } | undefined
-  >
+  gates: Gates
   previews: { vp?: string }
   viewport_options: ViewportOption[]
   viewport_footprint: Footprint[]

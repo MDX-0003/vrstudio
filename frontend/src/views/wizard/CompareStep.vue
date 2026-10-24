@@ -14,7 +14,6 @@ const currentTime = ref(0)
 const duration = ref(0)
 const playing = ref(false)
 const split = ref(50)
-const fullscreen = ref(false)
 const viewerError = ref('')
 
 const wrap = ref<HTMLElement | null>(null)
@@ -106,10 +105,8 @@ async function toggleFullscreen(): Promise<void> {
   if (!wrap.value) return
   if (document.fullscreenElement) {
     await document.exitFullscreen()
-    fullscreen.value = false
   } else {
     await wrap.value.requestFullscreen()
-    fullscreen.value = true
   }
 }
 
@@ -235,8 +232,6 @@ function onKeydown(event: KeyboardEvent): void {
   split.value = Math.min(98, Math.max(2, split.value + delta))
   viewer?.setSplit(split.value / 100)
 }
-
-defineExpose({ initViewer })
 </script>
 
 <template>
