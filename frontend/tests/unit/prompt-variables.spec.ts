@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { buildPromptVariables, shouldExpirePreview } from '@/utils/prompt'
+import { buildPromptVariables, promptVariablesToRecord, shouldExpirePreview } from '@/utils/prompt'
 import type { PromptPayload } from '@/types/case-info'
+import type { PromptVariable } from '@/types/case'
 
 function payload(overrides: Partial<PromptPayload> = {}): PromptPayload {
   return {
@@ -53,5 +54,15 @@ describe('shouldExpirePreview', () => {
     expect(shouldExpirePreview(false, '预演通过')).toBe(false)
     expect(shouldExpirePreview(true, '预演通过')).toBe(true)
     expect(shouldExpirePreview(true, '未预演')).toBe(false)
+  })
+})
+
+describe('promptVariablesToRecord', () => {
+  it('submits every editable variable instead of a hardcoded key allowlist', () => {
+    const variables: PromptVariable[] = [
+      { key: 'figure', label: '人物外观', help: '', value: 'a' },
+      { key: 'new_pose', label: '新姿态', help: '', value: 'b' },
+    ]
+    expect(promptVariablesToRecord(variables)).toEqual({ figure: 'a', new_pose: 'b' })
   })
 })

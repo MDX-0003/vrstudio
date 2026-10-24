@@ -15,6 +15,8 @@ import {
 import type { KeyframeRound } from '@/api/keyframe'
 import { useCaseTasks } from '@/composables/useCaseTasks'
 import VariableCard from '@/components/prompt/VariableCard.vue'
+import { KEYFRAME_MAX_CANDIDATES, KEYFRAME_RESOLUTIONS } from '@/constants/keyframe'
+import { buildPromptVariables, promptVariablesToRecord } from '@/utils/prompt'
 import type { CaseInfo, PromptPayload } from '@/types/case-info'
 import type { PromptVariable } from '@/types/case'
 
@@ -85,22 +87,10 @@ function isPicked(round: KeyframeRound, index: number): boolean {
   return Boolean(pick && pick.round === round.round && pick.index === index)
 }
 
-const KEYFRAME_LABELS: Record<string, string> = {
-  figure: '人物外观',
-  pose_first: '首帧姿态',
-  pose_last: '尾帧姿态',
-  preserve: '必须保持',
-}
-
 function applyPrompt(data: PromptPayload): void {
   prompt.value = data
   promptError.value = data.error || ''
-  promptVars.value = Object.entries(data.vars ?? {}).map(([key, value]) => ({
-    key,
-    label: data.labels?.[key] || KEYFRAME_LABELS[key] || key,
-    help: data.help?.[key] || '',
-    value,
-  }))
+  promptVars.value = buildPromptVariables(data)
 }
 
 async function loadPrompt(current: Step = step.value): Promise<void> {
@@ -123,11 +113,7 @@ async function flushPrompt(): Promise<boolean> {
     clearTimeout(promptTimer)
     promptTimer = null
   }
-  const vars: Record<string, string> = {}
-  const allowed = new Set(['figure', 'pose_first', 'pose_last', 'preserve'])
-  for (const item of promptVars.value) {
-    if (allowed.has(item.key)) vars[item.key] = item.value
-  }
+  const vars = promptVariablesToRecord(promptVars.value)
   promptSaving.value = true
   try {
     applyPrompt(await saveKeyframePrompt(props.caseName, step.value, vars))
@@ -369,11 +355,14 @@ onUnmounted(() => {
         />
         <div class="run-row">
           <el-select v-model="resolution" size="small" style="width: 110px">
-            <el-option label="1K" value="1K" />
-            <el-option label="2K" value="2K" />
-            <el-option label="4K" value="4K" />
+            <el-option
+              v-for="item in KEYFRAME_RESOLUTIONS"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
           </el-select>
-          <el-input-number v-model="num" :min="1" :max="4" size="small" />
+          <el-input-number v-model="num" :min="1" :max="KEYFRAME_MAX_CANDIDATES" size="small" />
           <el-button
             type="primary"
             size="small"

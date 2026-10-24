@@ -25,6 +25,11 @@ export function promptVariableFilled(variable: PromptVariable): boolean {
   return variable.value.trim().length > 0
 }
 
+/** 保存时按页面当前变量原样提交，不再维护第二份 key 白名单。 */
+export function promptVariablesToRecord(variables: PromptVariable[]): Record<string, string> {
+  return Object.fromEntries(variables.map((item) => [item.key, item.value]))
+}
+
 /** 只有真正保存了改动，才需要让上一次预演失效。 */
 export function shouldExpirePreview(hadPending: boolean, status: string): boolean {
   return hadPending && status === '预演通过'
