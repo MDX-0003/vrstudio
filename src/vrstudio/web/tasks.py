@@ -191,7 +191,7 @@ class TaskQueue:
                     return task
         return None
 
-    def list(self, user=None, scope: str = "all") -> list[dict]:
+    def list(self, user=None, scope: str = "all", case: str | None = None) -> list[dict]:
         """任务视图：当前任务、排队任务、最近历史；history 新→旧。"""
         with self._lock:
             current = self.current
@@ -205,6 +205,8 @@ class TaskQueue:
         rows.extend(task.view(None) for task in history)
         if scope == "mine" and user is not None:
             rows = [row for row in rows if row["owner_id"] == user.id]
+        if case:
+            rows = [row for row in rows if row["case"] == case]
         return rows
 
     def _drain(self):

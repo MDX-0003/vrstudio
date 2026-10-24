@@ -52,18 +52,19 @@ describe('useCaseTasks', () => {
     fetchTasksMock.mockReset()
   })
 
-  it('filters tasks by the requested case and kind', async () => {
-    fetchTasksMock.mockResolvedValue({
+  it('asks the server for one case and keeps the kind filter local', async () => {
+    fetchTasksMock.mockImplementation(async (_scope, caseName) => ({
       tasks: [
         task({ id: 'a-extract', case: 'A' }),
         task({ id: 'b-extract', case: 'B' }),
         task({ id: 'a-merge', case: 'A', kind: 'merge' }),
-      ],
-    })
+      ].filter((item) => item.case === caseName),
+    }))
     const { api, wrapper } = setup()
 
     await api.refresh()
 
+    expect(fetchTasksMock).toHaveBeenCalledWith('all', 'A')
     expect(api.tasks.value.map((item) => item.id)).toEqual(['a-extract'])
     wrapper.unmount()
   })

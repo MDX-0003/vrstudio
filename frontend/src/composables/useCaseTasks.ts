@@ -28,10 +28,9 @@ export function useCaseTasks(caseName: MaybeRef<string>, kinds?: string[]) {
     if (!requested) return tasks.value
     inFlight = true
     try {
-      const data = await fetchTasks('all')
+      const data = await fetchTasks('all', requested)
       if (requested !== currentCase()) return tasks.value
       const rows = data.tasks
-        .filter((task) => task.case === requested)
         .filter((task) => !kinds || kinds.includes(task.kind))
         .sort((a, b) => createdAt(b) - createdAt(a))
       tasks.value = rows

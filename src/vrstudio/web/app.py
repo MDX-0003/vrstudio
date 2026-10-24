@@ -2394,7 +2394,8 @@ async def api_tasks(request):
     scope = request.query_params.get("scope", "all")
     if scope not in ("all", "mine"):
         return JSONResponse({"error": "scope 必须是 all 或 mine"}, status_code=400)
-    return JSONResponse({"tasks": QUEUE.list(current_user(request), scope)})
+    case = (request.query_params.get("case") or "").strip() or None
+    return JSONResponse({"tasks": QUEUE.list(current_user(request), scope, case)})
 
 
 async def api_task_detail(request):

@@ -1481,3 +1481,7 @@ def test_tasks_api_returns_owner_and_positions(client, monkeypatch):
     assert tasks[2]["queue_position"] is None
     assert tasks[0]["owner_name"] == "MDX"
     assert client.get("/api/tasks?scope=bad").status_code == 400
+
+    filtered = client.get("/api/tasks?scope=all&case=p2")
+    assert filtered.status_code == 200
+    assert [task["kind"] for task in filtered.json()["tasks"]] == ["merge"]
