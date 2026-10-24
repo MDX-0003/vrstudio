@@ -232,18 +232,6 @@ watch(scope, () => {
   font-size: var(--text-xs);
 }
 
-.load-error {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  margin-bottom: var(--space-4);
-  border: 1px solid var(--color-danger);
-  border-radius: var(--radius-md);
-  background: var(--color-danger-soft);
-  color: var(--color-danger);
-}
-
 .task-error {
   margin-top: var(--space-4);
 }
@@ -260,8 +248,8 @@ watch(scope, () => {
   overflow: auto;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  background: #0f172a;
-  color: #e2e8f0;
+  background: var(--color-video-bg);
+  color: var(--color-video-text);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   line-height: 1.6;

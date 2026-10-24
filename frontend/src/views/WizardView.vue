@@ -374,18 +374,6 @@ watch(caseName, (_next, previous) => {
   color: var(--color-success);
 }
 
-.load-error {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  margin-bottom: var(--space-4);
-  border: 1px solid var(--color-danger);
-  border-radius: var(--radius-md);
-  background: var(--color-danger-soft);
-  color: var(--color-danger);
-}
-
 .loading-panel {
   padding: var(--space-5);
 }

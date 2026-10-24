@@ -161,30 +161,8 @@ function formatRoundTime(value: string): string {
   padding: var(--space-2) 0;
 }
 
-.task-summary {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: var(--text-sm);
-}
-
 .task-error {
   margin-top: var(--space-2);
-}
-
-.task-tail {
-  max-height: 180px;
-  margin: var(--space-2) 0 0;
-  padding: var(--space-2);
-  overflow: auto;
-  border-radius: var(--radius-sm);
-  background: #0f172a;
-  color: #e2e8f0;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  line-height: 1.55;
-  white-space: pre-wrap;
 }
 
 .output-frame {
@@ -199,7 +177,7 @@ function formatRoundTime(value: string): string {
   border-radius: var(--radius-md);
   background:
     radial-gradient(circle at 30% 25%, rgba(37, 99, 235, 0.35), transparent 55%),
-    linear-gradient(135deg, #0f172a, #334155);
+    linear-gradient(135deg, var(--color-video-bg), #334155);
   color: rgba(255, 255, 255, 0.86);
   font-size: var(--text-xs);
 }
@@ -210,7 +188,7 @@ function formatRoundTime(value: string): string {
   max-width: 560px;
   aspect-ratio: 16 / 9;
   border-radius: var(--radius-md);
-  background: #0f172a;
+  background: var(--color-video-bg);
 }
 
 .output-meta {

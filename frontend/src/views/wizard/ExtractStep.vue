@@ -274,35 +274,9 @@ watch(latest, async (task) => {
   border-bottom: 0;
 }
 
-.task-summary {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: var(--text-sm);
-}
-
-.task-tail {
-  max-height: 220px;
-  margin: var(--space-2) 0 0;
-  padding: var(--space-2);
-  overflow: auto;
-  border-radius: var(--radius-sm);
-  background: #0f172a;
-  color: #e2e8f0;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  line-height: 1.55;
-  white-space: pre-wrap;
-}
-
 .task-note {
   margin: var(--space-2) 0 0;
   font-size: var(--text-xs);
-}
-
-.empty {
-  padding: var(--space-3);
 }
 
 @media (max-width: 1280px) {

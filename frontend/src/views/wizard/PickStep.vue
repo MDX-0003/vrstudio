@@ -487,7 +487,7 @@ onUnmounted(() => {
   position: relative;
   overflow: hidden;
   border-radius: var(--radius-md);
-  background: #0f172a;
+  background: var(--color-video-bg);
 }
 
 .erp-wrap video {
@@ -555,7 +555,7 @@ onUnmounted(() => {
   margin-top: var(--space-2);
   border-radius: var(--radius-md);
   overflow: hidden;
-  background: #0f172a;
+  background: var(--color-video-bg);
   user-select: none;
 }
 
@@ -620,14 +620,6 @@ onUnmounted(() => {
   align-items: center;
   gap: var(--space-3);
   margin-top: var(--space-3);
-}
-
-.ctl {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  color: var(--color-text-muted);
-  font-size: var(--text-xs);
 }
 
 @media (max-width: 1280px) {

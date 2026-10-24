@@ -503,7 +503,7 @@ onUnmounted(() => {
   position: relative;
   overflow: hidden;
   border-radius: var(--radius-md);
-  background: #0f172a;
+  background: var(--color-video-bg);
   aspect-ratio: 16 / 9;
 }
 
@@ -607,7 +607,7 @@ onUnmounted(() => {
   overflow: hidden;
   border: 2px solid transparent;
   border-radius: var(--radius-md);
-  background: #0f172a;
+  background: var(--color-video-bg);
   cursor: pointer;
 }
 
@@ -663,16 +663,12 @@ onUnmounted(() => {
   padding: var(--space-2);
   overflow: auto;
   border-radius: var(--radius-sm);
-  background: #0f172a;
-  color: #e2e8f0;
+  background: var(--color-video-bg);
+  color: var(--color-video-text);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   line-height: 1.55;
   white-space: pre-wrap;
-}
-
-.empty {
-  padding: var(--space-2);
 }
 
 @media (max-width: 1280px) {

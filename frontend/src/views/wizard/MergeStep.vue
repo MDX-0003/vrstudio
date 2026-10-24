@@ -322,32 +322,6 @@ watch(latest, async (task) => {
   font-size: var(--text-sm);
 }
 
-.task-summary {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: var(--text-sm);
-}
-
-.task-tail {
-  max-height: 200px;
-  margin: var(--space-2) 0 0;
-  padding: var(--space-2);
-  overflow: auto;
-  border-radius: var(--radius-sm);
-  background: #0f172a;
-  color: #e2e8f0;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  line-height: 1.55;
-  white-space: pre-wrap;
-}
-
-.empty {
-  padding: var(--space-2);
-}
-
 @media (max-width: 1280px) {
   .merge-layout {
     grid-template-columns: minmax(0, 1fr);

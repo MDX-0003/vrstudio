@@ -287,18 +287,6 @@ onMounted(loadCases)
   align-items: center;
 }
 
-.load-error {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  margin-bottom: var(--space-4);
-  border: 1px solid var(--color-danger);
-  border-radius: var(--radius-md);
-  background: var(--color-danger-soft);
-  color: var(--color-danger);
-}
-
 .field-hint {
   margin-top: var(--space-1);
   color: var(--color-text-muted);

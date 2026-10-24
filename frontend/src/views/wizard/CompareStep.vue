@@ -352,7 +352,7 @@ function onKeydown(event: KeyboardEvent): void {
   position: relative;
   overflow: hidden;
   border-radius: var(--radius-lg);
-  background: #0f172a;
+  background: var(--color-video-bg);
   min-height: 420px;
 }
 
@@ -388,7 +388,7 @@ function onKeydown(event: KeyboardEvent): void {
   inset: 0;
   display: grid;
   place-items: center;
-  color: #e2e8f0;
+  color: var(--color-video-text);
   font-size: var(--text-sm);
 }
 
@@ -418,14 +418,6 @@ function onKeydown(event: KeyboardEvent): void {
   white-space: nowrap;
 }
 
-.ctl {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  color: var(--color-text-muted);
-  font-size: var(--text-xs);
-}
-
 .hint {
   margin: 0;
   font-size: var(--text-xs);
@@ -433,7 +425,7 @@ function onKeydown(event: KeyboardEvent): void {
 
 .compare-page:fullscreen {
   padding: var(--space-4);
-  background: #0f172a;
+  background: var(--color-video-bg);
 }
 
 .compare-page:fullscreen .compare-stage {

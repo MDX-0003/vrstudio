@@ -67,7 +67,7 @@ function scaleLabel(option: InputOption): string {
       <div class="submit-row">
         <label class="ctl">
           <span>模式</span>
-          <el-select v-model="mode" size="small" style="width: 180px">
+          <el-select v-model="mode" size="small" class="w-mode">
             <el-option
               v-for="item in modeOptions"
               :key="item.value"
@@ -79,7 +79,7 @@ function scaleLabel(option: InputOption): string {
         </label>
         <label class="ctl">
           <span>比例</span>
-          <el-select v-model="ratio" size="small" style="width: 110px">
+          <el-select v-model="ratio" size="small" class="w-ratio">
             <el-option
               v-for="value in ratioOptions"
               :key="value"
@@ -90,7 +90,7 @@ function scaleLabel(option: InputOption): string {
         </label>
         <label class="ctl">
           <span>输出分辨率</span>
-          <el-select v-model="resolution" size="small" style="width: 170px">
+          <el-select v-model="resolution" size="small" class="w-resolution">
             <el-option
               v-for="item in resolutionOptions"
               :key="item.value"
@@ -101,7 +101,7 @@ function scaleLabel(option: InputOption): string {
         </label>
         <label class="ctl">
           <span>输入分辨率</span>
-          <el-select v-model="scale" size="small" style="width: 190px">
+          <el-select v-model="scale" size="small" class="w-scale">
             <el-option
               v-for="item in scaleOptions"
               :key="item.value"
@@ -113,7 +113,7 @@ function scaleLabel(option: InputOption): string {
         </label>
         <label class="ctl">
           <span>时长</span>
-          <el-select v-model="duration" size="small" style="width: 150px">
+          <el-select v-model="duration" size="small" class="w-duration">
             <el-option
               v-for="item in durationOptions"
               :key="item.value"
@@ -130,7 +130,7 @@ function scaleLabel(option: InputOption): string {
           <el-select
             v-model="selectedProject"
             size="small"
-            style="width: 170px"
+            class="w-resolution"
             :loading="sessionsLoading"
           >
             <el-option
@@ -146,7 +146,7 @@ function scaleLabel(option: InputOption): string {
           <el-select
             v-model="selectedEpisode"
             size="small"
-            style="width: 160px"
+            class="w-episode"
             :disabled="!episodes.length"
           >
             <el-option
@@ -159,7 +159,7 @@ function scaleLabel(option: InputOption): string {
         </label>
         <label class="ctl">
           <span>会话</span>
-          <el-select v-model="selectedSession" size="small" style="width: 220px">
+          <el-select v-model="selectedSession" size="small" class="w-session">
             <el-option label="个人额度（不使用项目会话）" value="0" />
             <el-option
               v-for="item in sessions"
@@ -221,9 +221,9 @@ function scaleLabel(option: InputOption): string {
   right: 0;
   bottom: 0;
   z-index: 20;
-  background: rgba(255, 255, 255, 0.97);
+  background: var(--color-overlay);
   border-top: 1px solid var(--color-border);
-  box-shadow: 0 -8px 24px rgba(15, 23, 42, 0.08);
+  box-shadow: var(--shadow-submitbar);
   backdrop-filter: blur(8px);
   transition: left var(--duration-base) ease;
 }
@@ -261,21 +261,44 @@ function scaleLabel(option: InputOption): string {
   margin-left: auto;
 }
 
-.ctl {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  color: var(--color-text-muted);
-  font-size: var(--text-xs);
-  white-space: nowrap;
-}
-
 .run-state {
   display: inline-flex;
   align-items: center;
   color: var(--color-text-muted);
   font-size: var(--text-sm);
   white-space: nowrap;
+}
+
+.w-mode {
+  width: 180px;
+}
+
+.w-ratio {
+  width: 110px;
+}
+
+.w-resolution {
+  width: 170px;
+}
+
+.w-scale {
+  width: 190px;
+}
+
+.w-duration {
+  width: 150px;
+}
+
+.w-project {
+  width: 170px;
+}
+
+.w-episode {
+  width: 160px;
+}
+
+.w-session {
+  width: 220px;
 }
 
 .run-detail {
