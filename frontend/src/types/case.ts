@@ -11,12 +11,15 @@ export interface CaseRow {
   updatedAt: string
   taskStatus: TaskStatus
   taskLabel: string
+  nextStepKey: string
   outputs: number
 }
 
 export interface Gate {
   ok: boolean
+  ready?: boolean
   reason?: string
+  evidence?: string
 }
 
 export type Gates = Record<string, Gate | undefined>

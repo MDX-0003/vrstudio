@@ -23,6 +23,7 @@ import {
   savePromptVar,
   saveSubmitSelection,
 } from '@/api/case'
+import type { SaveParamsPayload } from '@/api/case'
 import { fetchSessions } from '@/api/sessions'
 import { fetchTasks } from '@/api/tasks'
 import { acquireLock, releaseLock } from '@/api/lock'
@@ -35,6 +36,13 @@ import MergeStep from '@/views/wizard/MergeStep.vue'
 import PickStep from '@/views/wizard/PickStep.vue'
 import { ASSET_ROLE_LABELS, ASSET_ROLE_OPTIONS } from '@/constants/assetRoles'
 import { flowMeta } from '@/constants/flow'
+import { stepsForFlow } from '@/constants/steps'
+import { taskStatusMeta } from '@/constants/taskStatus'
+import { useCaseLoader } from '@/composables/useCaseLoader'
+import { useCaseSaveQueue } from '@/composables/useCaseSaveQueue'
+import { buildPromptVariables, shouldExpirePreview } from '@/utils/prompt'
+import { roundResultText, roundResultType, visibleRounds } from '@/utils/rounds'
+import { aggregateSaveState, type SaveState } from '@/utils/saveState'
 import type { AssetRow, Flow, PromptVariable } from '@/types/case'
 import type {
   AssetDetail,
@@ -54,30 +62,7 @@ const router = useRouter()
 const caseName = computed(() => String(route.params.name ?? ''))
 const flow = ref<Flow>('patch')
 
-interface StepDef {
-  key: string
-  label: string
-}
-
-const steps = computed<StepDef[]>(() => {
-  if (flow.value === 'fullredraw') {
-    return [
-      { key: 'pad', label: '扩充画面' },
-      { key: 'generate', label: '生成' },
-      { key: 'recompose', label: '裁回原尺寸' },
-      { key: 'compare', label: '对比' },
-    ]
-  }
-  if (flow.value === 'gen') return [{ key: 'generate', label: '生成' }]
-  return [
-    { key: 'pick', label: '选区' },
-    { key: 'extract', label: '抽取' },
-    { key: 'keyframe', label: '首尾帧' },
-    { key: 'generate', label: '生成' },
-    { key: 'merge', label: '合并' },
-    { key: 'compare', label: '对比' },
-  ]
-})
+const steps = computed(() => stepsForFlow(flow.value))
 
 const activeStep = computed(() => {
   const raw = String(route.params.step ?? '')
@@ -94,18 +79,31 @@ const promptVars = ref<PromptVariable[]>([])
 const promptRendered = ref('')
 const promptRenderError = ref('')
 const promptSaving = ref(false)
-const pendingPromptSaves = new Map<string, string>()
-let promptTimer: ReturnType<typeof setTimeout> | null = null
 const caseInfo = ref<CaseInfo | null>(null)
-const caseLoading = ref(false)
-const caseError = ref('')
+const promptSaveQueue = useCaseSaveQueue<string>(
+  async (entry) => {
+    if (entry.caseName === caseName.value) saveState.value = 'saving'
+    const data = await savePromptVar(entry.caseName, entry.key, entry.payload)
+    if (entry.caseName !== caseName.value) return
+    caseInfo.value = data
+    promptRendered.value = data.prompt?.rendered || promptRendered.value
+    promptRenderError.value = data.prompt?.render_error || ''
+  },
+  {
+    delayMs: 400,
+    onFlush: (ok, name) => {
+      if (name && name !== caseName.value) return
+      saveState.value = ok ? 'saved' : 'unsaved'
+    },
+  },
+)
 const lockHolder = ref<string | null>(null)
 let lockTimer: ReturnType<typeof setInterval> | null = null
 const selectionSaving = ref(false)
 const paramsError = ref('')
 const paramsSaving = ref(false)
-let paramsTimer: ReturnType<typeof setTimeout> | null = null
 let hydrating = true
+let caseLoadSeq = 0
 
 const recentOutput = computed(() => {
   const outputs = caseInfo.value?.outputs ?? []
@@ -116,6 +114,7 @@ const recentOutput = computed(() => {
   return outputs.find((item) => item.version === adopted) ?? outputs[outputs.length - 1]
 })
 const rounds = computed<RoundSummary[]>(() => caseInfo.value?.rounds?.rounds ?? [])
+const visibleRoundRows = computed(() => visibleRounds(rounds.value))
 const roundsHint = computed(() => caseInfo.value?.rounds?.hint ?? '')
 
 const latestUsableRound = computed<RoundSummary | null>(() => {
@@ -143,8 +142,13 @@ const selectedCount = computed(() => assets.value.filter((asset) => asset.select
 const promptOpen = ref(false)
 const uploadOpen = ref(false)
 
-type SaveState = 'saved' | 'saving' | 'unsaved'
 const saveState = ref<SaveState>('saved')
+const effectiveSaveState = computed(() =>
+  aggregateSaveState(
+    saveState.value,
+    promptSaving.value || paramsSaving.value || selectionSaving.value,
+  ),
+)
 
 type RunStatus =
   | '未预演'
@@ -161,9 +165,17 @@ const statusDetail = ref('')
 const previewPassedSig = ref<string | null>(null)
 const caseTasks = ref<TaskView[]>([])
 const activeTask = ref<TaskView | null>(null)
+const showTaskTail = ref(false)
 const adopting = ref(false)
 let taskTimer: ReturnType<typeof setInterval> | null = null
 let taskInFlight = false
+
+watch(
+  () => activeTask.value?.id,
+  () => {
+    showTaskTail.value = false
+  },
+)
 
 function assetTone(asset: AssetDetail): string {
   if (asset.kind === 'video') return 'linear-gradient(135deg, #1e3a8a, #3b82f6)'
@@ -203,24 +215,25 @@ function applyCaseInfo(data: CaseInfo): void {
   const selected = new Set(data.submit_selected ?? [])
   assets.value = (data.assets ?? []).map((asset) => toAssetRow(asset, selected))
 
+  const promptDirty = promptSaveQueue.has(caseName.value)
   const prompt = data.prompt
   if (prompt?.error) {
     promptRenderError.value = prompt.error
-  } else if (prompt) {
-    promptVars.value = Object.entries(prompt.vars ?? {}).map(([key, value]) => ({
-      key,
-      label: prompt.labels?.[key] || key,
-      help: prompt.help?.[key] || '',
-      value,
-    }))
+    if (!promptDirty) {
+      promptVars.value = []
+      promptRendered.value = ''
+    }
+  } else if (prompt && !promptDirty) {
+    promptVars.value = buildPromptVariables(prompt)
     promptRendered.value = prompt.rendered || prompt.template_text || ''
     promptRenderError.value = prompt.render_error || ''
   }
 
+  const paramsDirty = paramsSaveQueue.has(caseName.value)
   const params = data.generation_params
   if (params?.error) {
     paramsError.value = params.error
-  } else if (params) {
+  } else if (params && !paramsDirty) {
     generationParams.value = params
     modeOptions.value = params.modes ?? []
     resolutionOptions.value = params.output ?? []
@@ -248,23 +261,30 @@ function applyCaseInfo(data: CaseInfo): void {
   }
 }
 
+const {
+  loading: caseLoading,
+  error: caseError,
+  load: loadCaseDocument,
+} = useCaseLoader<CaseInfo>({
+  fetchCase,
+  apply: applyCaseInfo,
+  errorMessage: (err) => (err instanceof Error ? err.message : '读取 case 失败'),
+})
+
 async function loadCase(): Promise<void> {
+  const seq = ++caseLoadSeq
   if (!caseName.value) {
     caseError.value = '缺少 case 名称'
+    hydrating = false
     return
   }
-  caseLoading.value = true
-  caseError.value = ''
   hydrating = true
   try {
-    applyCaseInfo(await fetchCase(caseName.value))
-  } catch (err) {
-    caseError.value = err instanceof Error ? err.message : '读取 case 失败'
-    assets.value = []
+    const data = await loadCaseDocument(caseName.value)
+    if (!data && caseError.value) assets.value = []
   } finally {
-    caseLoading.value = false
     await nextTick()
-    hydrating = false
+    if (seq === caseLoadSeq) hydrating = false
   }
 }
 
@@ -370,45 +390,26 @@ function scaleLabel(option: InputOption): string {
 }
 
 function schedulePromptSave(key: string, value: string): void {
-  pendingPromptSaves.set(key, value)
+  promptSaveQueue.schedule(caseName.value, key, value)
   saveState.value = 'unsaved'
-  if (promptTimer) clearTimeout(promptTimer)
-  promptTimer = setTimeout(() => {
-    void flushPromptSaves()
-  }, 400)
 }
 
 async function flushPromptSaves(): Promise<boolean> {
-  if (promptTimer) {
-    clearTimeout(promptTimer)
-    promptTimer = null
-  }
-  const entries = [...pendingPromptSaves.entries()]
-  if (!entries.length) {
+  const name = caseName.value
+  if (!promptSaveQueue.has(name)) {
     if (saveState.value === 'unsaved') saveState.value = 'saved'
     return true
   }
   promptSaving.value = true
   saveState.value = 'saving'
-  let latest: CaseInfo | null = null
   try {
-    for (let index = 0; index < entries.length; index += 1) {
-      const [key, value] = entries[index]
-      latest = await savePromptVar(caseName.value, key, value)
-      pendingPromptSaves.delete(key)
-    }
-    if (latest) {
-      caseInfo.value = latest
-      promptRendered.value = latest.prompt?.rendered || promptRendered.value
-      promptRenderError.value = latest.prompt?.render_error || ''
-    }
-    saveState.value = 'saved'
-    return true
-  } catch (err) {
-    for (const [key, value] of entries) {
-      if (!pendingPromptSaves.has(key)) pendingPromptSaves.set(key, value)
+    const ok = await promptSaveQueue.flush(name)
+    if (ok) {
+      saveState.value = 'saved'
+      return true
     }
     saveState.value = 'unsaved'
+    const err = promptSaveQueue.lastError.value
     ElMessage.error(err instanceof Error ? err.message : '保存提示词失败')
     return false
   } finally {
@@ -416,16 +417,8 @@ async function flushPromptSaves(): Promise<boolean> {
   }
 }
 
-function paramsBody() {
-  const body: {
-    mode: string
-    aspect_ratio: string
-    resolution?: string
-    scale?: string
-    session_id?: number
-    project_id?: number
-    episode?: number
-  } = {
+function paramsBody(): SaveParamsPayload {
+  const body: SaveParamsPayload = {
     mode: mode.value,
     aspect_ratio: ratio.value,
   }
@@ -445,16 +438,42 @@ function paramsBody() {
   return body
 }
 
+const paramsSaveQueue = useCaseSaveQueue<SaveParamsPayload>(
+  async (entry) => {
+    const current = entry.caseName === caseName.value
+    if (current) paramsSaving.value = true
+    try {
+      const data = await saveParams(entry.caseName, entry.payload)
+      if (entry.caseName !== caseName.value) return
+      if (data.generation_params) {
+        generationParams.value = data.generation_params
+        paramsError.value = data.generation_params.error ?? ''
+      }
+    } catch (err) {
+      if (current) {
+        const message = err instanceof Error ? err.message : '保存生成参数失败'
+        paramsError.value = message
+        ElMessage.error(message)
+      }
+      throw err
+    } finally {
+      if (current) paramsSaving.value = false
+    }
+  },
+  { delayMs: 300 },
+)
+
 async function persistParams(): Promise<boolean> {
   if (hydrating || !caseName.value) return true
-  if (paramsTimer) {
-    clearTimeout(paramsTimer)
-    paramsTimer = null
+  const name = caseName.value
+  if (paramsSaveQueue.has(name)) {
+    const queued = await paramsSaveQueue.flush(name)
+    if (!queued) paramsSaveQueue.cancel(name)
   }
   paramsSaving.value = true
   try {
-    const data = await saveParams(caseName.value, paramsBody())
-    if (data.generation_params) {
+    const data = await saveParams(name, paramsBody())
+    if (name === caseName.value && data.generation_params) {
       generationParams.value = data.generation_params
       paramsError.value = data.generation_params.error ?? ''
     }
@@ -470,11 +489,9 @@ async function persistParams(): Promise<boolean> {
 }
 
 function scheduleParamsSave(): void {
-  if (hydrating) return
-  if (paramsTimer) clearTimeout(paramsTimer)
-  paramsTimer = setTimeout(() => {
-    void persistParams()
-  }, 300)
+  if (hydrating || !caseName.value) return
+  paramsSaving.value = true
+  paramsSaveQueue.schedule(caseName.value, 'params', paramsBody())
 }
 
 watch(ratioOptions, (options) => {
@@ -533,11 +550,12 @@ function openPrompt(): void {
 }
 
 async function savePrompt(): Promise<void> {
+  const hadPending = promptSaveQueue.has(caseName.value)
   const saved = await flushPromptSaves()
   if (!saved) return
   promptOpen.value = false
-  if (status.value === '预演通过') status.value = '预演已过期'
-  ElMessage.success('提示词已保存，预演状态回到未预演')
+  if (shouldExpirePreview(hadPending, status.value)) status.value = '预演已过期'
+  ElMessage.success(hadPending ? '提示词已保存' : '提示词没有改动')
 }
 
 const previewSignature = computed(() =>
@@ -858,6 +876,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  void promptSaveQueue.flush()
+  void paramsSaveQueue.flush()
   if (taskTimer) {
     clearInterval(taskTimer)
     taskTimer = null
@@ -886,7 +906,21 @@ function onCaseConflict(event: Event): void {
 }
 
 watch(caseName, (_next, previous) => {
-  if (previous) releaseLock(previous)
+  if (previous) {
+    void promptSaveQueue.flush(previous)
+    void paramsSaveQueue.flush(previous)
+    releaseLock(previous)
+  }
+  activeKind.value = null
+  activeTask.value = null
+  showTaskTail.value = false
+  caseTasks.value = []
+  status.value = '未预演'
+  statusDetail.value = ''
+  previewPassedSig.value = null
+  saveState.value = 'saved'
+  promptSaving.value = false
+  paramsSaving.value = false
   void loadCase()
   void loadCaseTasks()
   void acquireCaseLock()
@@ -906,20 +940,6 @@ function formatRoundTime(value: string): string {
   if (Number.isNaN(date.getTime())) return value
   return date.toLocaleString('zh-CN', { hour12: false })
 }
-
-function roundResultType(round: RoundSummary): 'success' | 'danger' | 'info' | 'warning' {
-  if (round.result === 'yes') return 'success'
-  if (round.stage === 'failed') return 'danger'
-  if (round.stage === 'prepared') return 'warning'
-  return 'info'
-}
-
-function roundResultText(round: RoundSummary): string {
-  if (round.result === 'yes') return '可用'
-  if (round.stage === 'failed') return '失败'
-  if (round.stage === 'prepared') return '已准备'
-  return '未出片'
-}
 </script>
 
 <template>
@@ -935,9 +955,21 @@ function roundResultText(round: RoundSummary): string {
       <div class="save-state">
         <span
           class="status-dot"
-          :class="saveState === 'saved' ? 'done' : saveState === 'saving' ? 'queued' : 'stale'"
+          :class="
+            effectiveSaveState === 'saved'
+              ? 'done'
+              : effectiveSaveState === 'saving'
+                ? 'queued'
+                : 'stale'
+          "
         />
-        {{ saveState === 'saved' ? '已保存' : saveState === 'saving' ? '保存中' : '未保存' }}
+        {{
+          effectiveSaveState === 'saved'
+            ? '已保存'
+            : effectiveSaveState === 'saving'
+              ? '保存中'
+              : '未保存'
+        }}
       </div>
     </div>
 
@@ -970,9 +1002,10 @@ function roundResultText(round: RoundSummary): string {
       <el-button link type="primary" @click="loadCase">重试</el-button>
     </div>
 
-    <template v-else-if="caseInfo">
+    <template v-else-if="caseInfo && caseInfo.name === caseName">
       <PickStep
         v-if="activeStep === 'pick'"
+        :key="caseName"
         :case-name="caseName"
         :info="caseInfo"
         @updated="onStepUpdated"
@@ -980,12 +1013,14 @@ function roundResultText(round: RoundSummary): string {
       />
       <ExtractStep
         v-else-if="activeStep === 'extract'"
+        :key="caseName"
         :case-name="caseName"
         :info="caseInfo"
         @updated="onStepUpdated"
       />
       <KeyframeStep
         v-else-if="activeStep === 'keyframe'"
+        :key="caseName"
         :case-name="caseName"
         :info="caseInfo"
         @updated="onStepUpdated"
@@ -993,11 +1028,17 @@ function roundResultText(round: RoundSummary): string {
       />
       <MergeStep
         v-else-if="['merge', 'pad', 'recompose'].includes(activeStep)"
+        :key="caseName"
         :case-name="caseName"
         :info="caseInfo"
         @updated="onStepUpdated"
       />
-      <CompareStep v-else-if="activeStep === 'compare'" :case-name="caseName" :info="caseInfo" />
+      <CompareStep
+        v-else-if="activeStep === 'compare'"
+        :key="caseName"
+        :case-name="caseName"
+        :info="caseInfo"
+      />
 
       <template v-else>
         <div v-loading="caseLoading" class="gen-layout">
@@ -1084,7 +1125,7 @@ function roundResultText(round: RoundSummary): string {
                   </div>
                 </div>
                 <div class="asset-note muted">
-                  排序、角色与勾选会即时保存；上传素材下一小步接入。
+                  勾选决定本次提交哪些素材；排序会影响提示词里的 @Video1 / @Image1 编号。
                 </div>
               </div>
             </div>
@@ -1102,21 +1143,13 @@ function roundResultText(round: RoundSummary): string {
                   :title="promptRenderError"
                   class="prompt-error"
                 />
-                <div class="prompt-chips">
-                  <span v-for="item in promptVars" :key="item.key" class="prompt-chip">
-                    {{ item.label }}
-                  </span>
-                </div>
-                <div class="prompt-summary">
-                  <div class="prompt-line">
-                    <span class="prompt-label">{{ promptVars[0]?.label }}</span>
-                    <span>{{ promptVars[0]?.value }}</span>
-                  </div>
-                  <div class="prompt-line">
-                    <span class="prompt-label">{{ promptVars[2]?.label }}</span>
-                    <span>{{ promptVars[2]?.value }}</span>
+                <div v-if="promptVars.length" class="prompt-summary">
+                  <div v-for="item in promptVars" :key="item.key" class="prompt-line">
+                    <span class="prompt-label">{{ item.label }}</span>
+                    <span class="prompt-value">{{ item.value || '未填写' }}</span>
                   </div>
                 </div>
+                <div v-else class="muted">没有可编辑的提示词变量。</div>
                 <div class="prompt-note muted">
                   模板正文只读；变量改动会自动保存，提交与预演前会先写入。
                 </div>
@@ -1179,27 +1212,25 @@ function roundResultText(round: RoundSummary): string {
 
             <div class="panel">
               <div class="panel-head">
-                <h2 class="panel-title">生成轮次</h2>
-                <span class="muted">{{ rounds.length }} 轮</span>
+                <h2 class="panel-title">生成记录</h2>
+                <span class="muted">{{ visibleRoundRows.length }} 条记录</span>
               </div>
               <div class="panel-body candidate-list">
-                <div v-if="!rounds.length" class="candidate-empty">
-                  <el-empty description="还没有生成轮次" :image-size="72" />
-                  <p v-if="roundsHint" class="muted rounds-hint">{{ roundsHint }}</p>
+                <div v-if="!visibleRoundRows.length" class="candidate-empty">
+                  <el-empty description="还没有可用成片" :image-size="72" />
+                  <p v-if="rounds.length" class="muted rounds-hint">
+                    预演轮次已隐藏；生成出片后会显示在这里。
+                  </p>
+                  <p v-else-if="roundsHint" class="muted rounds-hint">{{ roundsHint }}</p>
                 </div>
-                <div v-for="round in rounds" :key="round.round" class="candidate">
+                <div v-for="round in visibleRoundRows" :key="round.round" class="candidate">
                   <div class="candidate-head">
-                    <span class="round-name">{{ round.round }}</span>
-                    <span class="muted mono">{{ formatRoundTime(round.updated) }}</span>
+                    <span class="round-name">{{ formatRoundTime(round.updated) }}</span>
                   </div>
                   <div class="round-tags">
-                    <el-tag size="small" effect="light">{{ round.stage || '未知阶段' }}</el-tag>
                     <el-tag size="small" effect="light" :type="roundResultType(round)">
                       {{ roundResultText(round) }}
                     </el-tag>
-                    <span v-if="round.gate && round.gate !== '?'" class="muted mono">
-                      gate={{ round.gate }}
-                    </span>
                   </div>
                 </div>
               </div>
@@ -1211,15 +1242,9 @@ function roundResultText(round: RoundSummary): string {
                   v-if="activeTask"
                   size="small"
                   effect="light"
-                  :type="
-                    activeTask.status === 'failed'
-                      ? 'danger'
-                      : activeTask.status === 'done'
-                        ? 'success'
-                        : 'primary'
-                  "
+                  :type="taskStatusMeta(activeTask.status).type"
                 >
-                  {{ activeTask.kind }} · {{ activeTask.status }}
+                  {{ activeTask.kind }} · {{ taskStatusMeta(activeTask.status).text }}
                 </el-tag>
                 <span v-else class="muted">无</span>
               </div>
@@ -1240,7 +1265,15 @@ function roundResultText(round: RoundSummary): string {
                     :title="activeTask.error"
                     class="task-error"
                   />
-                  <pre v-if="activeTask.tail.length" class="task-tail">{{
+                  <el-button
+                    v-if="activeTask.tail.length"
+                    link
+                    size="small"
+                    @click="showTaskTail = !showTaskTail"
+                  >
+                    {{ showTaskTail ? '收起技术详情' : '查看技术详情' }}
+                  </el-button>
+                  <pre v-if="showTaskTail && activeTask.tail.length" class="task-tail">{{
                     activeTask.tail.join('\n')
                   }}</pre>
                 </template>
@@ -1403,11 +1436,14 @@ function roundResultText(round: RoundSummary): string {
         </div>
       </template>
     </template>
+    <div v-else-if="caseLoading" class="panel loading-panel">
+      <el-skeleton :rows="5" animated />
+    </div>
 
     <el-drawer v-model="promptOpen" title="编辑提示词" size="760px">
       <div class="prompt-editor">
         <section class="template-block">
-          <h3>模板正文（只读）</h3>
+          <h3>完整提示词（只读）</h3>
           <el-alert
             v-if="promptRenderError"
             type="warning"
@@ -1415,7 +1451,7 @@ function roundResultText(round: RoundSummary): string {
             :title="promptRenderError"
             class="prompt-error"
           />
-          <pre>{{ promptRendered || '还没有模板正文' }}</pre>
+          <pre>{{ promptRendered || '还没有提示词内容' }}</pre>
         </section>
         <section class="vars-block">
           <el-empty
@@ -1425,14 +1461,14 @@ function roundResultText(round: RoundSummary): string {
           />
           <div v-for="item in promptVars" :key="item.key" class="var-card">
             <div class="var-head">
-              <span class="var-label">{{ item.label }}</span>
-              <span class="var-key mono">{{ item.key }}</span>
+              <span class="var-label" :title="`内部键名：${item.key}`">{{ item.label }}</span>
             </div>
-            <p class="var-help">{{ item.help }}</p>
+            <p v-if="item.help" class="var-help">{{ item.help }}</p>
             <el-input
               v-model="item.value"
               type="textarea"
-              :autosize="{ minRows: 3, maxRows: 8 }"
+              :autosize="{ minRows: 3 }"
+              class="prompt-var-input"
               @input="schedulePromptSave(item.key, item.value)"
             />
           </div>
@@ -1742,7 +1778,7 @@ function roundResultText(round: RoundSummary): string {
 
 .prompt-line {
   display: grid;
-  grid-template-columns: 76px minmax(0, 1fr);
+  grid-template-columns: minmax(88px, max-content) minmax(0, 1fr);
   gap: var(--space-2);
   color: var(--color-text);
   font-size: var(--text-sm);
@@ -1933,7 +1969,7 @@ function roundResultText(round: RoundSummary): string {
 }
 
 .template-block pre {
-  max-height: 260px;
+  max-height: 65vh;
   margin: 0;
   padding: var(--space-3);
   overflow: auto;
@@ -1951,6 +1987,15 @@ function roundResultText(round: RoundSummary): string {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+}
+
+.vars-block :deep(textarea) {
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.loading-panel {
+  padding: var(--space-5);
 }
 
 .var-card {

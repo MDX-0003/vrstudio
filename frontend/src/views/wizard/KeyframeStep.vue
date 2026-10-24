@@ -43,7 +43,10 @@ let startedAt = 0
 let promptTimer: ReturnType<typeof setTimeout> | null = null
 let roundsTimer: ReturnType<typeof setInterval> | null = null
 
-const { latest, start: startTasks } = useCaseTasks(props.caseName, ['keyframe'])
+const { latest, start: startTasks } = useCaseTasks(
+  computed(() => props.caseName),
+  ['keyframe'],
+)
 
 const keyframe = computed(() => props.info.keyframe)
 const ready = computed(() => props.info.gates.keyframe)

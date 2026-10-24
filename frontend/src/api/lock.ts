@@ -1,4 +1,5 @@
 import { getJson, postJson } from './client'
+import { casePath } from './path'
 
 export interface CaseLock {
   owner_id: string | null
@@ -13,7 +14,7 @@ export interface LockPayload {
 }
 
 function path(name: string): string {
-  return `/api/case/${encodeURIComponent(name)}/lock`
+  return `${casePath(name)}/lock`
 }
 
 export function fetchLock(name: string): Promise<LockPayload> {

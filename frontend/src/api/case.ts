@@ -1,9 +1,6 @@
 import type { CaseInfo } from '@/types/case-info'
 import { getJson, postJson, putJson, rememberRevision } from './client'
-
-function casePath(name: string): string {
-  return `/api/case/${encodeURIComponent(name)}`
-}
+import { casePath } from './path'
 
 export async function fetchCase(name: string): Promise<CaseInfo> {
   const data = await getJson<CaseInfo>(casePath(name))

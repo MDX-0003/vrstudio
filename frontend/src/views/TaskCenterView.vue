@@ -3,7 +3,8 @@ import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import { fetchTasks } from '@/api/tasks'
-import type { TaskState, TaskView } from '@/types/task'
+import { taskStatusMeta as statusOf } from '@/constants/taskStatus'
+import type { TaskView } from '@/types/task'
 
 const tasks = ref<TaskView[]>([])
 const loading = ref(false)
@@ -13,23 +14,6 @@ const drawerOpen = ref(false)
 const selected = ref<TaskView | null>(null)
 let timer: ReturnType<typeof setInterval> | null = null
 let inFlight = false
-
-const statusMeta: Record<
-  TaskState,
-  { text: string; type: 'primary' | 'warning' | 'success' | 'danger' }
-> = {
-  queued: { text: '排队中', type: 'warning' },
-  running: { text: '进行中', type: 'primary' },
-  done: { text: '已完成', type: 'success' },
-  failed: { text: '失败', type: 'danger' },
-}
-
-function statusOf(status: string): {
-  text: string
-  type: 'primary' | 'warning' | 'success' | 'danger'
-} {
-  return statusMeta[status as TaskState] ?? statusMeta.queued
-}
 
 function positionText(task: TaskView): string {
   if (task.status === 'running') return '运行中'

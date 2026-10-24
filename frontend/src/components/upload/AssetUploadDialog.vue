@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, UploadFilled } from '@element-plus/icons-vue'
 import { addAssetsByUploads } from '@/api/case'
 import { cancelUpload, completeUpload, createUpload, getUpload, putChunk } from '@/api/uploads'
 import { ASSET_ROLE_OPTIONS, defaultRole } from '@/constants/assetRoles'
+import { formatSize } from '@/utils/format'
 import type { CaseInfo } from '@/types/case-info'
 
 type RowStatus = 'queued' | 'uploading' | 'done' | 'error' | 'canceled'
@@ -35,6 +36,7 @@ const rows = ref<Row[]>([])
 const adding = ref(false)
 const dragOver = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
+let disposed = false
 
 const completed = computed(() => rows.value.filter((row) => row.status === 'done' && row.uploadId))
 const uploading = computed(() => rows.value.some((row) => row.status === 'uploading'))
@@ -52,17 +54,6 @@ function kindOf(name: string): 'video' | 'image' | null {
 
 function storageKey(file: File): string {
   return `vrstudio-upload:${file.name}:${file.size}:${file.lastModified}`
-}
-
-function formatSize(value: number): string {
-  const units = ['B', 'KB', 'MB', 'GB']
-  let size = value
-  let index = 0
-  while (size >= 1024 && index < units.length - 1) {
-    size /= 1024
-    index += 1
-  }
-  return `${index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`
 }
 
 function progressOf(row: Row): number {
@@ -85,6 +76,10 @@ async function sleep(ms: number): Promise<void> {
 async function uploadRow(row: Row): Promise<void> {
   row.status = 'uploading'
   row.error = ''
+  if (disposed) {
+    row.status = 'canceled'
+    return
+  }
   const key = storageKey(row.file)
   try {
     if (!row.uploadId) {
@@ -117,11 +112,12 @@ async function uploadRow(row: Row): Promise<void> {
     const uploadId = row.uploadId
     const chunkSize = 8 * 1024 * 1024
     while (row.received < row.file.size) {
-      if ((row.status as RowStatus) === 'canceled') return
+      if (disposed || (row.status as RowStatus) === 'canceled') return
       const end = Math.min(row.received + chunkSize, row.file.size)
       const chunk = row.file.slice(row.received, end)
       let attempt = 0
       for (;;) {
+        if (disposed || (row.status as RowStatus) === 'canceled') return
         try {
           const result = await putChunk(uploadId, row.received, chunk)
           row.received = result.received
@@ -133,6 +129,7 @@ async function uploadRow(row: Row): Promise<void> {
         }
       }
     }
+    if (disposed) return
     await completeUpload(uploadId)
     localStorage.removeItem(key)
     row.status = 'done'
@@ -228,6 +225,9 @@ async function beforeClose(done: () => void): Promise<void> {
       cancelButtonText: '继续上传',
     })
     rows.value.forEach((row) => {
+      if (row.status === 'uploading' && row.uploadId) {
+        void cancelUpload(row.uploadId).catch(() => undefined)
+      }
       row.status = 'canceled'
       localStorage.removeItem(storageKey(row.file))
     })
@@ -236,6 +236,16 @@ async function beforeClose(done: () => void): Promise<void> {
     // 继续上传
   }
 }
+
+onUnmounted(() => {
+  disposed = true
+  for (const row of rows.value) {
+    if (row.status !== 'uploading') continue
+    row.status = 'canceled'
+    localStorage.removeItem(storageKey(row.file))
+    if (row.uploadId) void cancelUpload(row.uploadId).catch(() => undefined)
+  }
+})
 </script>
 
 <template>

@@ -1,9 +1,6 @@
 import type { CaseInfo, FrameRange, Footprint, Inner, Viewport } from '@/types/case-info'
 import { getJson, postJson } from './client'
-
-function casePath(name: string): string {
-  return `/api/case/${encodeURIComponent(name)}`
-}
+import { casePath } from './path'
 
 export interface GeometryPayload {
   viewport: Viewport

@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Bell, ArrowLeft } from '@element-plus/icons-vue'
+import { stepLabel } from '@/constants/steps'
 import { useSessionStore } from '@/stores/session'
 import { useUiStore } from '@/stores/ui'
 
@@ -13,18 +14,6 @@ const ui = useUiStore()
 const isCasePage = computed(() => route.name === 'case')
 const caseName = computed(() => String(route.params.name ?? ''))
 const step = computed(() => String(route.params.step ?? 'generate'))
-
-function stepLabel(value: string): string {
-  const labels: Record<string, string> = {
-    pick: '选区',
-    extract: '抽取',
-    keyframe: '首尾帧',
-    generate: '生成',
-    merge: '合并',
-    compare: '对比',
-  }
-  return labels[value] ?? value
-}
 
 function goBack(): void {
   router.push('/cases')

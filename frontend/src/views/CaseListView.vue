@@ -6,7 +6,8 @@ import { Plus, Refresh, Search } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import { createCaseRequest, fetchCases, fetchModes, fetchSources } from '@/api/cases'
 import { flowMeta } from '@/constants/flow'
-import type { CaseBrief, CaseRow, Flow, ModeOption } from '@/types/case'
+import { nextStepForFlow } from '@/utils/caseFlow'
+import type { CaseBrief, CaseRow, Flow, ModeOption, TaskStatus } from '@/types/case'
 
 const router = useRouter()
 
@@ -32,32 +33,23 @@ const filteredRows = computed(() => {
   })
 })
 
-function nextStepLabel(brief: CaseBrief): string {
-  const gates = brief.gates ?? {}
-  if (brief.flow === 'patch') {
-    if (!gates.pick?.ok) return '等待选区'
-    if (!gates.extract?.ok) return '等待抽取'
-    if (!gates.generate?.ok) return '等待生成'
-    if (!gates.merge?.ok) return '等待合并'
-    return '等待对比'
+function taskStatusOf(value: string | null): TaskStatus {
+  if (value === 'queued' || value === 'running' || value === 'done' || value === 'failed') {
+    return value
   }
-  if (brief.flow === 'fullredraw') {
-    if (!gates.pad?.ok) return '等待扩充画面'
-    if (!gates.generate?.ok) return '等待生成'
-    if (!gates.recompose?.ok) return '等待裁回尺寸'
-    return '等待对比'
-  }
-  return gates.generate?.ok ? '可以提交' : '等待生成'
+  return 'idle'
 }
 
 function briefToRow(brief: CaseBrief): CaseRow {
+  const next = nextStepForFlow(brief.flow, brief.gates ?? {})
   return {
     name: brief.name,
     flow: brief.flow,
     owner: brief.owner ?? '未归属',
     updatedAt: brief.updated_at ?? '—',
-    taskStatus: 'idle',
-    taskLabel: nextStepLabel(brief),
+    taskStatus: taskStatusOf(brief.task_status),
+    taskLabel: next.label,
+    nextStepKey: next.key,
     outputs: brief.outputs,
   }
 }
@@ -97,7 +89,7 @@ async function loadCreateOptions(): Promise<void> {
 }
 
 function openCase(row: CaseRow): void {
-  router.push({ name: 'case', params: { name: row.name, step: 'generate' } })
+  router.push({ name: 'case', params: { name: row.name, step: row.nextStepKey || 'generate' } })
 }
 
 async function openCreate(): Promise<void> {
@@ -133,7 +125,8 @@ async function createCase(): Promise<void> {
     createOpen.value = false
     ElMessage.success(`已创建 ${result.name}`)
     await loadCases()
-    router.push({ name: 'case', params: { name: result.name, step: 'generate' } })
+    const next = nextStepForFlow(form.flow, {})
+    router.push({ name: 'case', params: { name: result.name, step: next.key } })
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : '创建 case 失败')
   } finally {
@@ -156,7 +149,7 @@ onMounted(loadCases)
   <div class="page">
     <PageHeader
       title="Case 列表"
-      subtitle="每个 case 是一段素材加一条流程。列表读取真实 /api/cases，任务与负责人字段等 Phase 4 接入。"
+      subtitle="每个 case 是一段素材加一条流程；点开后会进入当前该做的那一步。"
     >
       <el-button :icon="Refresh" :loading="loading" @click="loadCases">刷新</el-button>
       <el-button type="primary" :icon="Plus" @click="openCreate">新建 case</el-button>

@@ -4,12 +4,18 @@ import { ElMessage } from 'element-plus'
 import { Download, Refresh, VideoPlay } from '@element-plus/icons-vue'
 import { fetchCase, runOperation } from '@/api/case'
 import { useCaseTasks } from '@/composables/useCaseTasks'
+import { gateBlocked } from '@/utils/gates'
+import { formatSize } from '@/utils/format'
+import { taskStatusMeta } from '@/constants/taskStatus'
 import type { CaseInfo } from '@/types/case-info'
 
 const props = defineProps<{ caseName: string; info: CaseInfo }>()
 const emit = defineEmits<{ updated: [data: CaseInfo] }>()
 
-const { latest, start } = useCaseTasks(props.caseName, ['merge', 'assemble', 'pad', 'recompose'])
+const { latest, start } = useCaseTasks(
+  computed(() => props.caseName),
+  ['merge', 'assemble', 'pad', 'recompose'],
+)
 const running = ref('')
 const allowCrop = ref(false)
 let startedAt = 0
@@ -22,18 +28,6 @@ const patchFiles = computed(() => props.info.step_files.merge)
 const padFiles = computed(() => props.info.step_files.pad)
 const recomposeFiles = computed(() => props.info.step_files.recompose)
 const outputs = computed(() => props.info.outputs)
-
-function formatSize(value: number | null): string {
-  if (value === null) return '—'
-  const units = ['B', 'KB', 'MB', 'GB']
-  let size = value
-  let index = 0
-  while (size >= 1024 && index < units.length - 1) {
-    size /= 1024
-    index += 1
-  }
-  return `${index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`
-}
 
 function outputUrl(file: string): string {
   return `/video/out/${encodeURIComponent(props.caseName)}/${encodeURIComponent(file)}`
@@ -142,7 +136,7 @@ watch(latest, async (task) => {
             <el-button
               size="small"
               :loading="running === 'pad'"
-              :disabled="Boolean(padGate && !padGate.ok && padGate.reason === '')"
+              :disabled="gateBlocked(padGate)"
               @click="runOp('pad')"
             >
               扩充画面
@@ -151,7 +145,7 @@ watch(latest, async (task) => {
               type="primary"
               size="small"
               :loading="running === 'recompose'"
-              :disabled="Boolean(recomposeGate && !recomposeGate.ready)"
+              :disabled="gateBlocked(recomposeGate)"
               @click="runOp('recompose')"
             >
               裁回原尺寸
@@ -224,18 +218,8 @@ watch(latest, async (task) => {
         <div v-if="!latest" class="muted">还没有合并或裁回任务。</div>
         <template v-else>
           <div class="task-summary">
-            <el-tag
-              size="small"
-              effect="light"
-              :type="
-                latest.status === 'failed'
-                  ? 'danger'
-                  : latest.status === 'done'
-                    ? 'success'
-                    : 'primary'
-              "
-            >
-              {{ latest.kind }} · {{ latest.status }}
+            <el-tag size="small" effect="light" :type="taskStatusMeta(latest.status).type">
+              {{ latest.kind }} · {{ taskStatusMeta(latest.status).text }}
             </el-tag>
             <span class="mono">{{ latest.id }}</span>
             <span v-if="latest.queue_position" class="muted"

@@ -4,12 +4,17 @@ import { ElMessage } from 'element-plus'
 import { Download, Refresh, VideoPlay } from '@element-plus/icons-vue'
 import { fetchCase, runOperation } from '@/api/case'
 import { useCaseTasks } from '@/composables/useCaseTasks'
+import { formatSize } from '@/utils/format'
+import { taskStatusMeta } from '@/constants/taskStatus'
 import type { CaseInfo, FileInfo } from '@/types/case-info'
 
 const props = defineProps<{ caseName: string; info: CaseInfo }>()
 const emit = defineEmits<{ updated: [data: CaseInfo] }>()
 
-const { latest, start } = useCaseTasks(props.caseName, ['extract'])
+const { latest, start } = useCaseTasks(
+  computed(() => props.caseName),
+  ['extract'],
+)
 const running = ref(false)
 let startedAt = 0
 
@@ -17,18 +22,6 @@ const pickGate = computed(() => props.info.gates.pick)
 const extractGate = computed(() => props.info.gates.extract)
 const outputs = computed<FileInfo[]>(() => props.info.step_files.extract?.outputs ?? [])
 const current = computed(() => props.info.extract_current)
-
-function formatSize(value: number | null): string {
-  if (value === null) return '—'
-  const units = ['B', 'KB', 'MB', 'GB']
-  let size = value
-  let index = 0
-  while (size >= 1024 && index < units.length - 1) {
-    size /= 1024
-    index += 1
-  }
-  return `${index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`
-}
 
 function fileUrl(file: FileInfo): string {
   if (!current.value) return ''
@@ -179,18 +172,8 @@ watch(latest, async (task) => {
         <div v-if="!latest" class="muted">还没有抽取任务。</div>
         <template v-else>
           <div class="task-summary">
-            <el-tag
-              size="small"
-              effect="light"
-              :type="
-                latest.status === 'failed'
-                  ? 'danger'
-                  : latest.status === 'done'
-                    ? 'success'
-                    : 'primary'
-              "
-            >
-              {{ latest.status }}
+            <el-tag size="small" effect="light" :type="taskStatusMeta(latest.status).type">
+              {{ taskStatusMeta(latest.status).text }}
             </el-tag>
             <span class="mono">{{ latest.id }}</span>
             <span v-if="latest.queue_position" class="muted"

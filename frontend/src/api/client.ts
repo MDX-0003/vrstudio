@@ -11,6 +11,8 @@ export class ApiRequestError extends Error {
 }
 
 const revisions = new Map<string, number>()
+const DEFAULT_TIMEOUT_MS = 30_000
+const BLOB_TIMEOUT_MS = 120_000
 
 export function rememberRevision(caseName: string, revision: number): void {
   if (caseName && Number.isFinite(revision)) revisions.set(caseName, revision)
@@ -77,18 +79,38 @@ function describeError(data: unknown, status: number): string {
   return `请求失败（${status}）`
 }
 
-export async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(path, {
-    headers: withRevision(path, { Accept: 'application/json' }),
-  })
-  noteRevision(path, response)
-  const data = await parseBody(response)
-  if (!response.ok) throw failure(data, response.status)
-  return data as T
+async function request<T>(
+  path: string,
+  init: RequestInit,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<T> {
+  const controller = new AbortController()
+  const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null
+  try {
+    const response = await fetch(path, { ...init, signal: controller.signal })
+    noteRevision(path, response)
+    const data = await parseBody(response)
+    if (!response.ok) throw failure(data, response.status)
+    return data as T
+  } catch (err) {
+    if (err instanceof ApiRequestError) throw err
+    if ((err as { name?: string } | null)?.name === 'AbortError') {
+      throw new ApiRequestError('请求超时，请检查后端或网络', 0)
+    }
+    throw err
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
-export async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(path, {
+export function getJson<T>(path: string): Promise<T> {
+  return request<T>(path, {
+    headers: withRevision(path, { Accept: 'application/json' }),
+  })
+}
+
+export function postJson<T>(path: string, body: unknown): Promise<T> {
+  return request<T>(path, {
     method: 'POST',
     headers: withRevision(path, {
       'Content-Type': 'application/json',
@@ -96,14 +118,10 @@ export async function postJson<T>(path: string, body: unknown): Promise<T> {
     }),
     body: JSON.stringify(body),
   })
-  noteRevision(path, response)
-  const data = await parseBody(response)
-  if (!response.ok) throw failure(data, response.status)
-  return data as T
 }
 
-export async function putJson<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(path, {
+export function putJson<T>(path: string, body: unknown): Promise<T> {
+  return request<T>(path, {
     method: 'PUT',
     headers: withRevision(path, {
       'Content-Type': 'application/json',
@@ -111,34 +129,26 @@ export async function putJson<T>(path: string, body: unknown): Promise<T> {
     }),
     body: JSON.stringify(body),
   })
-  noteRevision(path, response)
-  const data = await parseBody(response)
-  if (!response.ok) throw failure(data, response.status)
-  return data as T
 }
 
-export async function putBlob<T>(path: string, body: Blob): Promise<T> {
-  const response = await fetch(path, {
-    method: 'PUT',
-    headers: withRevision(path, {
-      'Content-Type': 'application/octet-stream',
-      Accept: 'application/json',
-    }),
-    body,
-  })
-  noteRevision(path, response)
-  const data = await parseBody(response)
-  if (!response.ok) throw failure(data, response.status)
-  return data as T
+export function putBlob<T>(path: string, body: Blob): Promise<T> {
+  return request<T>(
+    path,
+    {
+      method: 'PUT',
+      headers: withRevision(path, {
+        'Content-Type': 'application/octet-stream',
+        Accept: 'application/json',
+      }),
+      body,
+    },
+    BLOB_TIMEOUT_MS,
+  )
 }
 
-export async function deleteJson<T>(path: string): Promise<T> {
-  const response = await fetch(path, {
+export function deleteJson<T>(path: string): Promise<T> {
+  return request<T>(path, {
     method: 'DELETE',
     headers: withRevision(path, { Accept: 'application/json' }),
   })
-  noteRevision(path, response)
-  const data = await parseBody(response)
-  if (!response.ok) throw failure(data, response.status)
-  return data as T
 }

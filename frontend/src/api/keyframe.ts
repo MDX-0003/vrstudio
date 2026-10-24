@@ -1,9 +1,6 @@
 import type { CaseInfo, PromptPayload } from '@/types/case-info'
 import { getJson, postJson, putJson } from './client'
-
-function casePath(name: string): string {
-  return `/api/case/${encodeURIComponent(name)}`
-}
+import { casePath } from './path'
 
 export interface KeyframeRound {
   round: string

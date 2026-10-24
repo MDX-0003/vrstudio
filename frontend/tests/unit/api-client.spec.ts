@@ -4,6 +4,7 @@ import { createUpload, putChunk } from '@/api/uploads'
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.useRealTimers()
 })
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -38,6 +39,25 @@ describe('api client', () => {
         body: JSON.stringify({ display_name: '小王' }),
       }),
     )
+  })
+
+  it('aborts a request that exceeds the timeout', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init: RequestInit) => {
+        return new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => {
+            reject(new DOMException('Aborted', 'AbortError'))
+          })
+        })
+      }),
+    )
+
+    const pending = getJson('/api/cases')
+    const assertion = expect(pending).rejects.toThrow('请求超时')
+    await vi.advanceTimersByTimeAsync(30_000)
+    await assertion
   })
 })
 
