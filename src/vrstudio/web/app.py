@@ -1451,6 +1451,10 @@ async def api_uploads_create(request):
         return JSONResponse({"error": "文件大小必须大于 0"}, status_code=400)
     if size > max_bytes:
         return JSONResponse({"error": f"文件超过上限 {max_bytes} 字节"}, status_code=413)
+    try:
+        _cleanup_uploads()
+    except OSError:
+        pass
     upload_id = uuid.uuid4().hex
     directory = _uploads_root() / upload_id
     directory.mkdir(parents=True)

@@ -10,6 +10,7 @@ import json
 import os
 import time
 import types
+from datetime import datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
 
@@ -290,6 +291,22 @@ def test_upload_rejects_bad_type_and_size(client):
     upload_id = r.json()["upload_id"]
     r = client.put(f"/api/uploads/{upload_id}?offset=0", content=b"toolong")
     assert r.status_code == 400
+
+
+def test_upload_create_cleans_expired_sessions(client, tmp_path):
+    r = client.post("/api/uploads", json={"name": "old.png", "size": 4})
+    old_id = r.json()["upload_id"]
+    meta_path = tmp_path / ".uploads" / old_id / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["created_at"] = (
+        datetime.now().astimezone() - timedelta(hours=25)
+    ).isoformat(timespec="seconds")
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    r = client.post("/api/uploads", json={"name": "new.png", "size": 4})
+    assert r.status_code == 200
+    assert not (tmp_path / ".uploads" / old_id).exists()
+    assert (tmp_path / ".uploads" / r.json()["upload_id"]).is_dir()
 
 
 def test_media_extract_serves_version_file(client, patch_case, tmp_path):

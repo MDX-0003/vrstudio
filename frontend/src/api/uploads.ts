@@ -45,3 +45,11 @@ export function completeUpload(uploadId: string): Promise<CompletedUpload> {
 export function cancelUpload(uploadId: string): Promise<{ deleted: string }> {
   return deleteJson(`/api/uploads/${encodeURIComponent(uploadId)}`)
 }
+
+/** 页面卸载时使用：keepalive 让 DELETE 不随文档销毁被中止。 */
+export function cancelUploadKeepalive(uploadId: string): void {
+  void fetch(`/api/uploads/${encodeURIComponent(uploadId)}`, {
+    method: 'DELETE',
+    keepalive: true,
+  }).catch(() => undefined)
+}

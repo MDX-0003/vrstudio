@@ -1,9 +1,16 @@
 <script setup lang="ts">
-import { computed, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, UploadFilled } from '@element-plus/icons-vue'
 import { addAssetsByUploads } from '@/api/case'
-import { cancelUpload, completeUpload, createUpload, getUpload, putChunk } from '@/api/uploads'
+import {
+  cancelUpload,
+  cancelUploadKeepalive,
+  completeUpload,
+  createUpload,
+  getUpload,
+  putChunk,
+} from '@/api/uploads'
 import { ASSET_ROLE_OPTIONS, defaultRole } from '@/constants/assetRoles'
 import { formatSize } from '@/utils/format'
 import type { CaseInfo } from '@/types/case-info'
@@ -37,6 +44,7 @@ const adding = ref(false)
 const dragOver = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 let disposed = false
+const canceledUploads = new Set<string>()
 
 const completed = computed(() => rows.value.filter((row) => row.status === 'done' && row.uploadId))
 const uploading = computed(() => rows.value.some((row) => row.status === 'uploading'))
@@ -108,6 +116,13 @@ async function uploadRow(row: Row): Promise<void> {
       row.uploadId = session.upload_id
       row.received = 0
       localStorage.setItem(key, session.upload_id)
+      if (disposed || (row.status as RowStatus) === 'canceled') {
+        if (!canceledUploads.has(session.upload_id)) {
+          canceledUploads.add(session.upload_id)
+          cancelUploadKeepalive(session.upload_id)
+        }
+        return
+      }
     }
     const uploadId = row.uploadId
     const chunkSize = 8 * 1024 * 1024
@@ -134,6 +149,7 @@ async function uploadRow(row: Row): Promise<void> {
     localStorage.removeItem(key)
     row.status = 'done'
   } catch (err) {
+    if (disposed || (row.status as RowStatus) === 'canceled') return
     row.status = 'error'
     row.error = err instanceof Error ? err.message : '上传失败'
     if (row.uploadId) localStorage.setItem(key, row.uploadId)
@@ -174,8 +190,29 @@ function onDrop(event: DragEvent): void {
   addFiles(Array.from(event.dataTransfer?.files ?? []))
 }
 
+function cancelUploadingRows(keepalive: boolean): void {
+  for (const row of rows.value) {
+    if (row.status !== 'uploading') continue
+    row.status = 'canceled'
+    localStorage.removeItem(storageKey(row.file))
+    if (!row.uploadId || canceledUploads.has(row.uploadId)) continue
+    canceledUploads.add(row.uploadId)
+    if (keepalive) {
+      cancelUploadKeepalive(row.uploadId)
+    } else {
+      void cancelUpload(row.uploadId).catch(() => undefined)
+    }
+  }
+}
+
+function onPageHide(): void {
+  disposed = true
+  cancelUploadingRows(true)
+}
+
 async function removeRow(row: Row): Promise<void> {
   if (row.status === 'uploading' && row.uploadId) {
+    canceledUploads.add(row.uploadId)
     try {
       await cancelUpload(row.uploadId)
     } catch {
@@ -224,27 +261,21 @@ async function beforeClose(done: () => void): Promise<void> {
       confirmButtonText: '关闭',
       cancelButtonText: '继续上传',
     })
-    rows.value.forEach((row) => {
-      if (row.status === 'uploading' && row.uploadId) {
-        void cancelUpload(row.uploadId).catch(() => undefined)
-      }
-      row.status = 'canceled'
-      localStorage.removeItem(storageKey(row.file))
-    })
+    cancelUploadingRows(false)
     done()
   } catch {
     // 继续上传
   }
 }
 
+onMounted(() => {
+  window.addEventListener('pagehide', onPageHide)
+})
+
 onUnmounted(() => {
+  window.removeEventListener('pagehide', onPageHide)
   disposed = true
-  for (const row of rows.value) {
-    if (row.status !== 'uploading') continue
-    row.status = 'canceled'
-    localStorage.removeItem(storageKey(row.file))
-    if (row.uploadId) void cancelUpload(row.uploadId).catch(() => undefined)
-  }
+  cancelUploadingRows(false)
 })
 </script>
 
