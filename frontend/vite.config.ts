@@ -18,6 +18,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': 'http://127.0.0.1:8760',
+      '/file': 'http://127.0.0.1:8760',
       '/img': 'http://127.0.0.1:8760',
       '/video': 'http://127.0.0.1:8760',
     },
