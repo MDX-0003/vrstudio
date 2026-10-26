@@ -58,6 +58,16 @@ export function saveKeyframePrompt(
   return putJson<PromptPayload>(`${casePath(name)}/keyframe/prompt`, { step, vars })
 }
 
+export interface KeyframeRefInput {
+  asset: string
+  role: 'subject_ref' | 'detail_ref'
+  note: string
+}
+
+export function setKeyframeRefs(name: string, refs: KeyframeRefInput[]): Promise<CaseInfo> {
+  return putJson<CaseInfo>(`${casePath(name)}/keyframe/refs`, { refs })
+}
+
 export function setKeyframeSheet(name: string, asset: string): Promise<CaseInfo> {
   return putJson<CaseInfo>(`${casePath(name)}/keyframe/sheet`, { asset })
 }

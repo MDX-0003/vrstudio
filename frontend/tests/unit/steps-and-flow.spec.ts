@@ -15,6 +15,11 @@ describe('flow steps', () => {
     expect(stepLabel('recompose')).toBe('裁回原尺寸')
   })
 
+  it('labels the case library view without adding it to flow steps', () => {
+    expect(stepLabel('library')).toBe('素材库')
+    expect(stepsForFlow('patch').map((step) => step.key)).not.toContain('library')
+  })
+
   it('uses ready for actionability and ok for completion', () => {
     expect(
       nextStepForFlow('patch', {

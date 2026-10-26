@@ -20,7 +20,30 @@ vi.mock('@/api/tasks', () => ({
 }))
 
 import GenerateStep from '@/views/wizard/GenerateStep.vue'
-import type { CaseInfo } from '@/types/case-info'
+import type { AssetDetail, CaseInfo } from '@/types/case-info'
+
+function asset(id: string, role: string, name: string): AssetDetail {
+  return {
+    id,
+    kind: 'image',
+    role,
+    label: role,
+    path: `E:/repo/cases/p1/assets/${name}`,
+    source: 'asset',
+    role_fixed: false,
+    url: `/img/asset/p1/${id}`,
+    name,
+    rel: `cases/p1/assets/${name}`,
+    exists: true,
+    mtime: null,
+    size: 1024,
+    width: 1920,
+    height: 1080,
+    duration: null,
+    fps: null,
+    open_url: `/file?root=cases&p=cases%2Fp1%2Fassets%2F${name}`,
+  }
+}
 
 const ButtonStub = defineComponent({
   props: { disabled: Boolean, loading: Boolean },
@@ -36,17 +59,27 @@ const stubs = {
   'el-tag': true,
   'el-alert': true,
   'el-icon': true,
+  'el-dialog': true,
   'el-drawer': true,
   'el-input': true,
-  AssetUploadDialog: true,
 }
 
 function info(): CaseInfo {
   return {
     name: 'p1',
     flow: 'patch',
-    assets: [],
-    submit_selected: [],
+    assets: [
+      asset('i2', 'first_frame', 'i2_first.png'),
+      asset('i4', 'last_frame', 'i4_last.png'),
+      asset('i9', 'subject_ref', 'i9_unselected.png'),
+    ],
+    submit_selected: ['i2', 'i4'],
+    submit_roles: { i2: 'first_frame', i4: 'last_frame' },
+    submit_entries: [
+      { asset: 'i2', role: 'first_frame' },
+      { asset: 'i4', role: 'last_frame' },
+    ],
+    role_help: {},
     outputs: [],
     adopt_round: null,
     rounds: { rounds: [], hint: '' },
@@ -116,6 +149,15 @@ async function mountStep() {
 }
 
 describe('GenerateStep', () => {
+  it('renders only the submit entries, not the whole library', async () => {
+    const wrapper = await mountStep()
+    expect(wrapper.findAll('.ref-row')).toHaveLength(2)
+    expect(wrapper.text()).toContain('i2_first.png')
+    expect(wrapper.text()).toContain('i4_last.png')
+    expect(wrapper.text()).not.toContain('i9_unselected.png')
+    wrapper.unmount()
+  })
+
   it('renders prompt aliases in template order without showing internal keys', async () => {
     const wrapper = await mountStep()
     const text = wrapper.text()

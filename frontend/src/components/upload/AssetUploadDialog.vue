@@ -11,7 +11,7 @@ import {
   getUpload,
   putChunk,
 } from '@/api/uploads'
-import { ASSET_ROLE_OPTIONS, defaultRole } from '@/constants/assetRoles'
+import { defaultRole } from '@/constants/assetRoles'
 import { formatSize } from '@/utils/format'
 import type { CaseInfo } from '@/types/case-info'
 
@@ -324,19 +324,6 @@ onUnmounted(() => {
             :stroke-width="6"
           />
         </div>
-        <el-select
-          v-model="row.role"
-          size="small"
-          style="width: 132px"
-          :disabled="row.status === 'uploading'"
-        >
-          <el-option
-            v-for="role in ASSET_ROLE_OPTIONS"
-            :key="role.value"
-            :label="role.label"
-            :value="role.value"
-          />
-        </el-select>
         <el-button v-if="row.status === 'error'" link type="primary" @click="retry(row)"
           >重试</el-button
         >

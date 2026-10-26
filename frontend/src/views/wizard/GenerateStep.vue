@@ -1,11 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import {
-  changeAssetRole,
   fetchCase,
-  removeAsset,
-  reorderAssets,
   runOperation,
   saveParams,
   savePromptVar,
@@ -13,18 +10,19 @@ import {
 } from '@/api/case'
 import type { RunPayload, SaveParamsPayload } from '@/api/case'
 import { fetchSessions } from '@/api/sessions'
-import AssetUploadDialog from '@/components/upload/AssetUploadDialog.vue'
-import GenerateAssets from '@/components/generate/GenerateAssets.vue'
+import AssetPickerDialog from '@/components/assets/AssetPickerDialog.vue'
+import GenerateSubmitList from '@/components/generate/GenerateSubmitList.vue'
 import GeneratePrompt from '@/components/generate/GeneratePrompt.vue'
 import GenerateResults from '@/components/generate/GenerateResults.vue'
 import GenerateSubmitBar from '@/components/generate/GenerateSubmitBar.vue'
-import { ASSET_ROLE_LABELS } from '@/constants/assetRoles'
+import { defaultRole } from '@/constants/assetRoles'
 import { useCaseSaveQueue } from '@/composables/useCaseSaveQueue'
 import { useCaseTasks } from '@/composables/useCaseTasks'
 import { buildPromptVariables, shouldExpirePreview } from '@/utils/prompt'
 import { visibleRounds } from '@/utils/rounds'
 import { aggregateSaveState, type SaveState } from '@/utils/saveState'
-import type { AssetRow, PromptVariable } from '@/types/case'
+import type { PromptVariable } from '@/types/case'
+import type { ReferenceRow } from '@/types/reference'
 import type {
   AssetDetail,
   CaseInfo,
@@ -45,7 +43,6 @@ const emit = defineEmits<{
 
 const caseName = computed(() => props.caseName)
 
-const assets = ref<AssetRow[]>([])
 const promptVars = ref<PromptVariable[]>([])
 const promptRendered = ref('')
 const promptRenderError = ref('')
@@ -54,7 +51,7 @@ const selectionSaving = ref(false)
 const paramsError = ref('')
 const paramsSaving = ref(false)
 const promptOpen = ref(false)
-const uploadOpen = ref(false)
+const pickerOpen = ref(false)
 let syncing = true
 
 const saveState = ref<SaveState>('saved')
@@ -117,7 +114,7 @@ const modeOptions = ref<ModeInfo[]>([])
 const resolutionOptions = ref<OutputOption[]>([])
 const scaleOptions = ref<InputOption[]>([])
 
-const selectedCount = computed(() => assets.value.filter((asset) => asset.selected).length)
+const selectedCount = computed(() => submitRows.value.length)
 
 type RunStatus =
   | '未预演'
@@ -146,45 +143,38 @@ const {
   ['dry_run', 'submit', 'adopt'],
 )
 
-function assetTone(asset: AssetDetail): string {
-  if (asset.kind === 'video') return 'linear-gradient(135deg, #1e3a8a, #3b82f6)'
-  if (asset.role === 'subject_ref') return 'linear-gradient(135deg, #7c2d12, #f59e0b)'
-  if (asset.role === 'scene_ref') return 'linear-gradient(135deg, #134e4a, #14b8a6)'
-  return 'linear-gradient(135deg, #4c1d95, #8b5cf6)'
-}
+const submitRows = computed<ReferenceRow[]>(() => {
+  const byId = new Map((props.info.assets ?? []).map((asset) => [asset.id, asset]))
+  return (props.info.submit_entries ?? []).map((entry, index) => {
+    const asset = byId.get(entry.asset)
+    return {
+      asset: entry.asset,
+      role: entry.role,
+      number: index + 1,
+      url: asset?.url ?? null,
+      exists: asset?.exists ?? false,
+      roleFixed: asset?.role_fixed,
+      file: asset
+        ? {
+            name: asset.name,
+            rel: asset.rel,
+            path: asset.path,
+            exists: asset.exists,
+            mtime: asset.mtime,
+            size: asset.size,
+            open_url: asset.open_url,
+          }
+        : null,
+    }
+  })
+})
 
-function assetMeta(asset: AssetDetail): string {
-  const parts: string[] = []
-  if (asset.width && asset.height) parts.push(`${asset.width}×${asset.height}`)
-  if (asset.duration) parts.push(`${asset.duration.toFixed(2)} 秒`)
-  if (asset.fps) parts.push(`${asset.fps}fps`)
-  if (!asset.exists) parts.push('文件缺失')
-  return parts.join(' · ') || asset.rel || asset.path
-}
-
-function toAssetRow(asset: AssetDetail, selected: Set<string>): AssetRow {
-  return {
-    id: asset.id,
-    name: `${asset.label} · ${asset.name}`,
-    kind: asset.kind,
-    role: ASSET_ROLE_LABELS[asset.role] ?? asset.role,
-    roleRaw: asset.role,
-    roleFixed: asset.role_fixed,
-    meta: assetMeta(asset),
-    selected: selected.has(asset.id),
-    tone: assetTone(asset),
-    url: asset.url,
-    exists: asset.exists,
-    rel: asset.rel,
-    path: asset.path,
-    open_url: asset.open_url,
-  }
+function assetById(id: string): AssetDetail | undefined {
+  return (props.info.assets ?? []).find((asset) => asset.id === id)
 }
 
 function applyInfo(data: CaseInfo): void {
   syncing = true
-  const selected = new Set(data.submit_selected ?? [])
-  assets.value = (data.assets ?? []).map((asset) => toAssetRow(asset, selected))
 
   const promptDirty = promptSaveQueue.has(caseName.value)
   const prompt = data.prompt
@@ -235,36 +225,74 @@ function applyInfo(data: CaseInfo): void {
   })
 }
 
-async function toggleAsset(asset: AssetRow, selected: boolean): Promise<void> {
+async function saveSubmit(
+  ids: string[],
+  roles: Record<string, string>,
+): Promise<void> {
   if (selectionSaving.value) return
-  const previous = asset.selected
-  asset.selected = selected
   selectionSaving.value = true
   try {
-    const ids = assets.value.filter((item) => item.selected).map((item) => item.id)
-    const data = await saveSubmitSelection(caseName.value, ids)
+    const data = await saveSubmitSelection(caseName.value, ids, roles)
     emit('updated', data)
-    const next = new Set(data.submit_selected ?? [])
-    assets.value.forEach((item) => {
-      item.selected = next.has(item.id)
-    })
   } catch (err) {
-    asset.selected = previous
-    ElMessage.error(err instanceof Error ? err.message : '保存提交集失败')
+    ElMessage.error(err instanceof Error ? err.message : '保存提交清单失败')
   } finally {
     selectionSaving.value = false
   }
 }
 
-async function updateAssetRole(asset: AssetRow, role: string): Promise<void> {
-  try {
-    const data = await changeAssetRole(caseName.value, asset.id, role)
-    emit('updated', data)
-    const selected = new Set(data.submit_selected ?? [])
-    assets.value = (data.assets ?? []).map((item) => toAssetRow(item, selected))
-  } catch (err) {
-    ElMessage.error(err instanceof Error ? err.message : '修改素材角色失败')
+function defaultSubmitRole(id: string, usedRoles: string[]): string {
+  if (mode.value === 'firstLastFrame') {
+    if (!usedRoles.includes('first_frame')) return 'first_frame'
+    if (!usedRoles.includes('last_frame')) return 'last_frame'
+    return 'first_frame'
   }
+  return defaultRole(assetById(id)?.kind ?? 'image')
+}
+
+async function addFromPicker(ids: string[]): Promise<void> {
+  const entries = props.info.submit_entries ?? []
+  const roles = { ...(props.info.submit_roles ?? {}) }
+  const next = entries.map((entry) => entry.asset)
+  const usedRoles = entries.map((entry) => roles[entry.asset] ?? entry.role)
+  for (const id of ids) {
+    if (next.includes(id)) continue
+    const role = defaultSubmitRole(id, usedRoles)
+    next.push(id)
+    roles[id] = role
+    usedRoles.push(role)
+  }
+  pickerOpen.value = false
+  await saveSubmit(next, roles)
+}
+
+async function removeSubmit(id: string): Promise<void> {
+  const next = (props.info.submit_entries ?? [])
+    .map((entry) => entry.asset)
+    .filter((asset) => asset !== id)
+  const roles = { ...(props.info.submit_roles ?? {}) }
+  delete roles[id]
+  await saveSubmit(next, roles)
+}
+
+async function moveSubmit(id: string, delta: number): Promise<void> {
+  const ids = (props.info.submit_entries ?? []).map((entry) => entry.asset)
+  const index = ids.indexOf(id)
+  const target = index + delta
+  if (index < 0 || target < 0 || target >= ids.length) return
+  const next = [...ids]
+  const [moved] = next.splice(index, 1)
+  next.splice(target, 0, moved)
+  await saveSubmit(next, { ...(props.info.submit_roles ?? {}) })
+}
+
+async function changeSubmitRole(id: string, role: string): Promise<void> {
+  const ids = (props.info.submit_entries ?? []).map((entry) => entry.asset)
+  await saveSubmit(ids, { ...(props.info.submit_roles ?? {}), [id]: role })
+}
+
+function onPickerUpdated(data: CaseInfo): void {
+  emit('updated', data)
 }
 
 const mode = ref('firstLastFrame')
@@ -459,9 +487,13 @@ async function addPromptVar(key: string, value: string): Promise<void> {
 
 const previewSignature = computed(() =>
   JSON.stringify({
-    assets: assets.value
-      .filter((item) => item.selected)
-      .map((item) => [item.id, item.roleRaw, item.meta]),
+    assets: submitRows.value.map((row) => [
+      row.asset,
+      row.role,
+      row.exists,
+      row.file?.mtime ?? null,
+      row.file?.size ?? null,
+    ]),
     params: [mode.value, ratio.value, resolution.value, scale.value, duration.value],
     prompt: [promptVars.value.map((item) => [item.key, item.value]), promptRendered.value],
     quota: [selectedProject.value, selectedEpisode.value, selectedSession.value],
@@ -478,9 +510,9 @@ const generateGate = computed(() => props.info.gates?.generate)
 
 const firstLastFrameIssue = computed(() => {
   if (mode.value !== 'firstLastFrame') return ''
-  const selected = assets.value.filter((asset) => asset.selected)
-  const first = selected.filter((asset) => asset.roleRaw === 'first_frame')
-  const last = selected.filter((asset) => asset.roleRaw === 'last_frame')
+  const selected = submitRows.value
+  const first = selected.filter((row) => row.role === 'first_frame')
+  const last = selected.filter((row) => row.role === 'last_frame')
   if (first.length !== 1 || last.length !== 1) {
     return 'firstLastFrame 需要恰好一张首帧定稿和一张尾帧定稿'
   }
@@ -632,54 +664,6 @@ async function adoptResult(): Promise<void> {
   }
 }
 
-function applyAssetData(data: CaseInfo): void {
-  emit('updated', data)
-  const selected = new Set(data.submit_selected ?? [])
-  assets.value = (data.assets ?? []).map((item) => toAssetRow(item, selected))
-}
-
-function onAssetsAdded(data: CaseInfo): void {
-  applyAssetData(data)
-  uploadOpen.value = false
-}
-
-async function deleteAsset(asset: AssetRow): Promise<void> {
-  try {
-    await ElMessageBox.confirm(`删除素材「${asset.name}」？文件会从 case 里移除。`, '删除素材', {
-      type: 'warning',
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
-    })
-    const data = await removeAsset(caseName.value, asset.id)
-    applyAssetData(data)
-    ElMessage.success('素材已删除')
-  } catch (err) {
-    if (err === 'cancel' || err === 'close') return
-    ElMessage.error(err instanceof Error ? err.message : '删除素材失败')
-  }
-}
-
-async function moveAsset(asset: AssetRow, delta: number): Promise<void> {
-  const index = assets.value.findIndex((item) => item.id === asset.id)
-  const target = index + delta
-  if (index < 0 || target < 0 || target >= assets.value.length) return
-  const previous = [...assets.value]
-  const next = [...assets.value]
-  const [moved] = next.splice(index, 1)
-  next.splice(target, 0, moved)
-  assets.value = next
-  try {
-    const data = await reorderAssets(
-      caseName.value,
-      next.map((item) => item.id),
-    )
-    applyAssetData(data)
-  } catch (err) {
-    assets.value = previous
-    ElMessage.error(err instanceof Error ? err.message : '调整素材顺序失败')
-  }
-}
-
 async function loadSessions(): Promise<boolean> {
   sessionsLoading.value = true
   sessionError.value = ''
@@ -749,15 +733,17 @@ function statusTone(): string {
 <template>
   <div class="gen-layout">
     <section class="gen-main">
-      <GenerateAssets
-        :assets="assets"
+      <GenerateSubmitList
+        :case-name="caseName"
+        :rows="submitRows"
+        :mode="mode"
+        :role-help="info.role_help || {}"
         :selected-count="selectedCount"
-        :saving="selectionSaving"
-        @toggle="toggleAsset"
-        @role="updateAssetRole"
-        @move="moveAsset"
-        @remove="deleteAsset"
-        @upload="uploadOpen = true"
+        :disabled="selectionSaving"
+        @add="pickerOpen = true"
+        @remove="removeSubmit"
+        @move="moveSubmit"
+        @role="changeSubmitRole"
       />
       <GeneratePrompt
         v-model:open="promptOpen"
@@ -820,7 +806,14 @@ function statusTone(): string {
     @submit="submit"
   />
 
-  <AssetUploadDialog v-model="uploadOpen" :case-name="caseName" @added="onAssetsAdded" />
+  <AssetPickerDialog
+    v-model="pickerOpen"
+    :case-name="caseName"
+    :info="info"
+    mode="video"
+    @confirm="addFromPicker"
+    @updated="onPickerUpdated"
+  />
 </template>
 
 <style scoped>

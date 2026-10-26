@@ -175,11 +175,24 @@ export interface KeyframePick {
   file?: FileInfo | null
 }
 
+export interface KeyframeRef {
+  asset: string
+  role: 'subject_ref' | 'detail_ref'
+  note: string
+  label: string
+  url: string | null
+  exists: boolean
+  file: FileInfo | null
+}
+
 export interface KeyframeState {
   enabled: boolean
   error: string | null
-  sheet: string | null
-  sheet_candidates: {
+  refs: KeyframeRef[]
+  refs_default: boolean
+  role_help: Record<string, string>
+  sheet?: string | null
+  sheet_candidates?: {
     id: string
     label: string
     path: string
@@ -238,6 +251,9 @@ export interface CaseInfo {
   raw_frames: RawFrame[]
   keyframe: KeyframeState
   submit_selected: string[]
+  submit_roles: Record<string, string> | null
+  submit_entries: { asset: string; role: string }[]
+  role_help: Record<string, string>
   derived: FileInfo[]
   extracts: ExtractVersion[]
   outputs: OutputFile[]

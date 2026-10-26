@@ -20,8 +20,12 @@ export async function fetchCase(name: string): Promise<CaseInfo> {
   }
 }
 
-export function saveSubmitSelection(name: string, selected: string[]): Promise<CaseInfo> {
-  return putJson<CaseInfo>(`${casePath(name)}/submit`, { selected })
+export function saveSubmitSelection(
+  name: string,
+  selected: string[],
+  roles?: Record<string, string>,
+): Promise<CaseInfo> {
+  return putJson<CaseInfo>(`${casePath(name)}/submit`, { selected, roles })
 }
 
 export function changeAssetRole(name: string, id: string, role: string): Promise<CaseInfo> {

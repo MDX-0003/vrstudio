@@ -8,7 +8,7 @@ vi.mock('@/api/case', () => ({ fetchCase: vi.fn() }))
 const keyframeApi = vi.hoisted(() => ({
   rounds: [] as unknown[],
   pick: vi.fn(),
-  setSheet: vi.fn(),
+  setRefs: vi.fn(),
 }))
 
 vi.mock('@/api/keyframe', () => ({
@@ -30,7 +30,7 @@ vi.mock('@/api/keyframe', () => ({
   pickKeyframe: keyframeApi.pick,
   runKeyframe: vi.fn(),
   saveKeyframePrompt: vi.fn(),
-  setKeyframeSheet: keyframeApi.setSheet,
+  setKeyframeRefs: keyframeApi.setRefs,
 }))
 
 vi.mock('@/composables/useCaseTasks', async () => {
@@ -55,14 +55,8 @@ const LinkStub = defineComponent({
   template: '<a :href="href" :target="target"><slot /></a>',
 })
 
-const DrawerStub = defineComponent({
-  props: { modelValue: Boolean, title: String },
-  template: '<div v-if="modelValue"><slot /><slot name="footer" /></div>',
-})
-
 const stubs = {
   'el-link': LinkStub,
-  'el-drawer': DrawerStub,
 }
 
 function rawFrame(role: string, label: string): RawFrame {
@@ -108,14 +102,29 @@ function info(overrides: Partial<CaseInfo['keyframe']> = {}): CaseInfo {
     keyframe: {
       enabled: true,
       error: null,
-      sheet: 'i1',
-      sheet_candidates: [
+      refs_default: false,
+      role_help: {
+        subject_ref: '人物三视图：唯一外观依据。',
+        detail_ref: '细节参考：只继承所指细节的外观。',
+      },
+      refs: [
         {
-          id: 'i1',
+          asset: 'i1',
+          role: 'subject_ref',
+          note: '',
           label: 'i1_大臣_三视图.png',
-          path: 'E:/repo/cases/p1/assets/i1_大臣_三视图.png',
-          rel: 'cases/p1/assets/i1_大臣_三视图.png',
-          open_url: '/file?root=cases&p=cases%2Fp1%2Fassets%2Fi1.png',
+          url: '/img/asset/p1/i1',
+          exists: true,
+          file: frameFile('i1_大臣_三视图.png'),
+        },
+        {
+          asset: 'i3',
+          role: 'detail_ref',
+          note: '头冠纹样',
+          label: 'i3_detail.png',
+          url: '/img/asset/p1/i3',
+          exists: true,
+          file: frameFile('i3_detail.png'),
         },
       ],
       first: pick(1, 'i2', 'i2_keyframe-1.png'),
@@ -127,6 +136,9 @@ function info(overrides: Partial<CaseInfo['keyframe']> = {}): CaseInfo {
     },
     raw_frames: [rawFrame('first_frame_raw', '首帧原始图'), rawFrame('last_frame_raw', '尾帧原始图')],
     assets: [],
+    submit_entries: [],
+    submit_roles: null,
+    role_help: {},
   } as unknown as CaseInfo
 }
 
@@ -187,14 +199,15 @@ describe('KeyframeStep 四格输入', () => {
     wrapper.unmount()
   })
 
-  it('opens the sheet candidates in a drawer', async () => {
+  it('renders the reference list with a locked primary and an editable detail row', async () => {
     const wrapper = await mountStep()
-    expect(wrapper.find('.kf-sheet-card').exists()).toBe(false)
-    await wrapper.findAll('.kf-slot')[1].find('button').trigger('click')
-    await flushPromises()
-    const card = wrapper.find('.kf-sheet-card')
-    expect(card.exists()).toBe(true)
-    expect(card.find('img').attributes('src')).toBe('/img/asset/p1/i1')
+    const rows = wrapper.findAll('.ref-row')
+    expect(rows).toHaveLength(2)
+    expect(rows.map((row) => row.find('.ref-no').text())).toEqual(['2', '3'])
+    expect(rows[0].text()).toContain('人物三视图（主图）')
+    expect(rows[0].find('.role-select').exists()).toBe(false)
+    expect(rows[1].find('.role-select').exists()).toBe(true)
+    expect((rows[1].find('.ref-note input').element as HTMLInputElement).value).toBe('头冠纹样')
     wrapper.unmount()
   })
 
@@ -217,6 +230,11 @@ describe('KeyframeStep 四格输入', () => {
     expect(slots[0].find('img').attributes('src')).toBe('/img/asset/p1/last_frame_raw')
     expect(slots[2].find('img').attributes('src')).toBe('/img/asset/p1/i2')
     expect(slots[3].text()).toContain('从下方候选里挑一张')
+    expect(wrapper.findAll('.ref-row').map((row) => row.find('.ref-no').text())).toEqual([
+      '2',
+      '3',
+      '4',
+    ])
     wrapper.unmount()
   })
 

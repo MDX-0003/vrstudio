@@ -10,19 +10,22 @@ import {
   pickKeyframe,
   runKeyframe,
   saveKeyframePrompt,
-  setKeyframeSheet,
+  setKeyframeRefs,
 } from '@/api/keyframe'
-import type { KeyframeRound } from '@/api/keyframe'
+import type { KeyframeRefInput, KeyframeRound } from '@/api/keyframe'
 import { useCaseTasks } from '@/composables/useCaseTasks'
+import AssetPickerDialog from '@/components/assets/AssetPickerDialog.vue'
+import AssetReferenceList from '@/components/assets/AssetReferenceList.vue'
 import VariableCard from '@/components/prompt/VariableCard.vue'
 import FileOpenLink from '@/components/common/FileOpenLink.vue'
 import KeyframeRoundBlock from '@/components/keyframe/KeyframeRoundBlock.vue'
-import AssetUploadDialog from '@/components/upload/AssetUploadDialog.vue'
+import { KEYFRAME_ROLE_OPTIONS } from '@/constants/assetRoles'
 import { KEYFRAME_MAX_CANDIDATES, KEYFRAME_RESOLUTIONS } from '@/constants/keyframe'
 import { taskStatusMeta } from '@/constants/taskStatus'
 import { buildPromptVariables, promptVariablesToRecord } from '@/utils/prompt'
 import type { CaseInfo, PromptPayload } from '@/types/case-info'
 import type { PromptVariable } from '@/types/case'
+import type { ReferenceRow } from '@/types/reference'
 
 const props = defineProps<{ caseName: string; info: CaseInfo }>()
 const emit = defineEmits<{
@@ -41,17 +44,20 @@ const roundsLoading = ref(false)
 const running = ref(false)
 const picking = ref<string | null>(null)
 const handoffBusy = ref(false)
-const sheetSaving = ref(false)
-const sheetOpen = ref(false)
-const uploadOpen = ref(false)
+const refsSaving = ref(false)
+const refsPanel = ref<HTMLElement | null>(null)
+const pickerOpen = ref(false)
 const taskOpen = ref(false)
 const olderOpen = ref(false)
 const modelId = ref<number | null>(null)
 const resolution = ref('2K')
 const num = ref(4)
+const noteDraft = ref<Record<string, string>>({})
 let startedAt = 0
 let promptTimer: ReturnType<typeof setTimeout> | null = null
+let noteTimer: ReturnType<typeof setTimeout> | null = null
 let roundsTimer: ReturnType<typeof setInterval> | null = null
+let pendingRefs: KeyframeRefInput[] | null = null
 
 const { latest, start: startTasks } = useCaseTasks(
   computed(() => props.caseName),
@@ -88,11 +94,13 @@ const olderRounds = computed(() => {
 })
 const canRun = computed(() => {
   if (!ready.value?.ready) return false
+  if (!primary.value) return false
   if (step.value === 'last' && !firstPick.value) return false
   return true
 })
 const runReason = computed(() => {
   if (!ready.value?.ready) return ready.value?.reason || '先完成抽取并准备两张原始帧'
+  if (!primary.value) return '先添加一张人物三视图并设为主三视图'
   if (step.value === 'last' && !firstPick.value) return '先生成并挑选首帧定稿'
   return ''
 })
@@ -106,23 +114,59 @@ const handoffReason = computed(() => {
 const rawFrame = computed(() => (step.value === 'first' ? rawFirst.value : rawLast.value))
 const rawLabel = computed(() => (step.value === 'first' ? '原始首帧' : '原始尾帧'))
 const targetLabel = computed(() => (step.value === 'first' ? '首帧定稿' : '尾帧定稿'))
-const sheetCandidate = computed(
-  () => keyframe.value.sheet_candidates.find((item) => item.id === keyframe.value.sheet) ?? null,
+const refs = computed(() => keyframe.value.refs ?? [])
+const primary = computed(() => refs.value.find((ref) => ref.role === 'subject_ref') ?? null)
+const details = computed(() => refs.value.filter((ref) => ref.role === 'detail_ref'))
+const anchorNumber = computed(() =>
+  step.value === 'last' && firstPick.value && primary.value ? 3 : null,
 )
-// sheet_candidates 只带 label/path/rel/open_url，FileOpenLink 需要 name 与 exists。
-const sheetFile = computed(() => {
-  const item = sheetCandidate.value
-  if (!item) return null
-  return {
-    name: item.label,
-    rel: item.rel ?? null,
-    path: item.path,
-    exists: true,
-    mtime: null,
-    size: null,
-    open_url: item.open_url ?? null,
+const refRows = computed<ReferenceRow[]>(() => {
+  const rows: ReferenceRow[] = []
+  if (primary.value) {
+    rows.push({
+      asset: primary.value.asset,
+      role: 'subject_ref',
+      note: primary.value.note,
+      number: 2,
+      file: primary.value.file,
+      url: primary.value.url,
+      exists: primary.value.exists,
+      locked: true,
+      roleLabel: '人物三视图（主图）',
+      noteLabel: '主三视图',
+    })
   }
+  if (step.value === 'last' && firstPick.value && primary.value) {
+    rows.push({
+      asset: firstPick.value.asset,
+      role: 'first_frame',
+      number: 3,
+      file: firstPick.value.file ?? null,
+      url: pickedUrl(firstPick.value),
+      exists: true,
+      locked: true,
+      roleLabel: '首帧定稿',
+      noteLabel: '尾帧批次自动追加',
+    })
+  }
+  const start = rows.length && anchorNumber.value ? 4 : 3
+  details.value.forEach((ref, index) => {
+    rows.push({
+      asset: ref.asset,
+      role: ref.role,
+      note: noteDraft.value[ref.asset] ?? ref.note,
+      number: start + index,
+      file: ref.file,
+      url: ref.url,
+      exists: ref.exists,
+    })
+  })
+  return rows
 })
+
+function focusRefs(): void {
+  refsPanel.value?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
 
 function assetUrl(assetId: string | null | undefined): string {
   if (!assetId) return ''
@@ -136,10 +180,6 @@ function pickedUrl(pick: { asset: string } | null): string {
 function pickedIndexFor(round: KeyframeRound): number | null {
   const pick = stepPick.value
   return pick && pick.round === round.round ? pick.index : null
-}
-
-function fileName(path: string): string {
-  return path.split(/[\\/]/).pop() || path
 }
 
 function applyPrompt(data: PromptPayload): void {
@@ -255,25 +295,102 @@ async function pick(round: KeyframeRound, index: number): Promise<void> {
   }
 }
 
-async function changeSheet(asset: string): Promise<void> {
-  if (sheetSaving.value) return
-  sheetSaving.value = true
+function currentRefs(): KeyframeRefInput[] {
+  return refs.value.map((ref) => ({
+    asset: ref.asset,
+    role: ref.role,
+    note: noteDraft.value[ref.asset] ?? ref.note,
+  }))
+}
+
+async function saveRefs(next: KeyframeRefInput[]): Promise<void> {
+  if (refsSaving.value) {
+    pendingRefs = next
+    return
+  }
+  refsSaving.value = true
   try {
-    const data = await setKeyframeSheet(props.caseName, asset)
+    const data = await setKeyframeRefs(props.caseName, next)
+    noteDraft.value = {}
     emit('updated', data)
-    ElMessage.success('已绑定人物三视图')
-    sheetOpen.value = false
   } catch (err) {
-    ElMessage.error(err instanceof Error ? err.message : '绑定三视图失败')
+    ElMessage.error(err instanceof Error ? err.message : '保存参考图清单失败')
   } finally {
-    sheetSaving.value = false
+    refsSaving.value = false
+    if (pendingRefs) {
+      const queued = pendingRefs
+      pendingRefs = null
+      void saveRefs(queued)
+    }
   }
 }
 
-function onAssetsAdded(data: CaseInfo): void {
+async function addRefs(ids: string[]): Promise<void> {
+  const current = currentRefs()
+  let hasPrimary = current.some((ref) => ref.role === 'subject_ref')
+  const next = [...current]
+  for (const id of ids) {
+    if (next.some((ref) => ref.asset === id)) continue
+    if (!hasPrimary) {
+      next.unshift({ asset: id, role: 'subject_ref', note: '' })
+      hasPrimary = true
+    } else {
+      next.push({ asset: id, role: 'detail_ref', note: '' })
+    }
+  }
+  pickerOpen.value = false
+  await saveRefs(next)
+}
+
+async function changeRefRole(asset: string, role: string): Promise<void> {
+  if (role !== 'subject_ref' && role !== 'detail_ref') return
+  const current = currentRefs()
+  const target = current.find((ref) => ref.asset === asset)
+  if (!target) return
+  if (role === 'subject_ref') {
+    if (target.role === 'subject_ref') return
+    const oldPrimary = current.find((ref) => ref.role === 'subject_ref')
+    if (oldPrimary) oldPrimary.role = 'detail_ref'
+    target.role = 'subject_ref'
+    await saveRefs([target, ...current.filter((ref) => ref.asset !== asset)])
+    return
+  }
+  if (target.role === 'subject_ref') {
+    ElMessage.warning('先指定另一张人物三视图，再改这张的角色')
+    return
+  }
+  target.role = role
+  await saveRefs(current)
+}
+
+async function moveRef(asset: string, delta: number): Promise<void> {
+  const current = currentRefs()
+  const editable = current.filter((ref) => ref.role === 'detail_ref')
+  const index = editable.findIndex((ref) => ref.asset === asset)
+  const target = index + delta
+  if (index < 0 || target < 0 || target >= editable.length) return
+  const nextDetails = [...editable]
+  const [moved] = nextDetails.splice(index, 1)
+  nextDetails.splice(target, 0, moved)
+  const primaryRef = current.find((ref) => ref.role === 'subject_ref')
+  await saveRefs(primaryRef ? [primaryRef, ...nextDetails] : nextDetails)
+}
+
+async function removeRef(asset: string): Promise<void> {
+  const current = currentRefs()
+  const target = current.find((ref) => ref.asset === asset)
+  if (!target || target.role === 'subject_ref') return
+  await saveRefs(current.filter((ref) => ref.asset !== asset))
+}
+
+function changeRefNote(asset: string, note: string): void {
+  noteDraft.value = { ...noteDraft.value, [asset]: note }
+  if (noteTimer) clearTimeout(noteTimer)
+  noteTimer = setTimeout(() => void saveRefs(currentRefs()), 400)
+}
+
+function onPickerUpdated(data: CaseInfo): void {
   emit('updated', data)
-  uploadOpen.value = false
-  ElMessage.success('已加入素材库；在抽屉里点选要用的三视图')
 }
 
 async function handoff(): Promise<void> {
@@ -320,6 +437,7 @@ onMounted(() => {
 onUnmounted(() => {
   if (roundsTimer) clearInterval(roundsTimer)
   if (promptTimer) clearTimeout(promptTimer)
+  if (noteTimer) clearTimeout(noteTimer)
 })
 </script>
 
@@ -346,11 +464,8 @@ onUnmounted(() => {
       <div class="panel-head">
         <h2 class="panel-title">图片步输入</h2>
         <span class="muted">
-          {{
-            step === 'first'
-              ? '图1 / 图2 / 图3 与提示词里的参考图一一对应；首帧步骤只用图1与图2'
-              : '图1 / 图2 / 图3 与提示词里的参考图一一对应；尾帧步骤再加图3（首帧定稿）'
-          }}
+          编号由下方参考图清单生成；图1 是当前步骤的原始帧，图2 起是参考图；
+          尾帧步骤在人物三视图后插入首帧定稿。
         </span>
       </div>
       <div class="panel-body">
@@ -373,37 +488,45 @@ onUnmounted(() => {
 
           <figure class="kf-slot">
             <figcaption class="kf-slot-cap">
-              <span class="kf-slot-no">图2</span>
-              <span>人物三视图</span>
+              <span class="kf-slot-no">{{ primary ? '图2' : '—' }}</span>
+              <span>参考图组</span>
               <el-button
                 link
                 type="primary"
                 size="small"
                 class="kf-slot-action"
-                @click="sheetOpen = true"
+                @click="focusRefs"
               >
-                查看 / 更换
+                编辑参考图
               </el-button>
             </figcaption>
             <div class="kf-shot contain">
-              <img v-if="keyframe.sheet" :src="assetUrl(keyframe.sheet)" alt="人物三视图" />
-              <div v-else class="kf-shot-empty"><span>还没有绑定三视图</span></div>
-              <FileOpenLink :file="sheetFile" label="打开三视图" class="card-open" />
+              <img
+                v-if="primary"
+                :src="primary.url || assetUrl(primary.asset)"
+                alt="人物三视图"
+              />
+              <div v-else class="kf-shot-empty"><span>还没有人物三视图</span></div>
+              <span v-if="refs.length > 1" class="kf-stack">共 {{ refs.length }} 张</span>
+              <FileOpenLink
+                v-if="primary?.file"
+                :file="primary.file"
+                label="打开三视图"
+                class="card-open"
+              />
             </div>
-            <div class="kf-slot-file mono">{{
-              sheetCandidate ? fileName(sheetCandidate.path) : '—'
-            }}</div>
+            <div class="kf-slot-file mono">{{ primary?.file?.name || '—' }}</div>
           </figure>
 
           <figure class="kf-slot">
             <figcaption class="kf-slot-cap">
-              <span class="kf-slot-no">图3</span>
+              <span class="kf-slot-no">{{ anchorNumber ?? '—' }}</span>
               <span>首帧定稿</span>
               <span class="kf-slot-note">{{
-                step === 'last' ? '来自首帧定稿' : '尾帧步骤才用'
+                anchorNumber ? '自动追加' : '尾帧步骤插入'
               }}</span>
             </figcaption>
-            <div v-if="step === 'last' && firstPick" class="kf-shot">
+            <div v-if="step === 'last' && firstPick && primary" class="kf-shot">
               <img :src="pickedUrl(firstPick)" alt="首帧定稿" />
               <FileOpenLink :file="firstPick.file" label="打开首帧定稿" class="card-open" />
             </div>
@@ -429,6 +552,39 @@ onUnmounted(() => {
             <div class="kf-slot-file mono">{{ stepPick?.file?.name || '待定稿' }}</div>
           </figure>
         </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2 class="panel-title">参考图清单</h2>
+        <span class="spacer" />
+        <span class="muted">{{ refs.length }} 张参考图</span>
+      </div>
+      <div ref="refsPanel" class="panel-body">
+        <el-alert
+          v-if="!primary"
+          type="warning"
+          :closable="false"
+          title="缺少人物三视图；先添加一张并设为主三视图"
+        />
+        <AssetReferenceList
+          :rows="refRows"
+          :role-options="KEYFRAME_ROLE_OPTIONS"
+          :role-help="keyframe.role_help || {}"
+          :disabled="refsSaving"
+          show-note
+          add-label="添加参考图"
+          empty-text="还没有参考图"
+          @add="pickerOpen = true"
+          @remove="removeRef"
+          @move="moveRef"
+          @role="changeRefRole"
+          @note="changeRefNote"
+        />
+        <p class="kf-refs-note muted">
+          编号与提示词里的图N 一致；第一张人物三视图固定在图2，尾帧步骤的首帧定稿自动插在它后面。
+        </p>
       </div>
     </section>
 
@@ -536,10 +692,20 @@ onUnmounted(() => {
         <h2 class="panel-title">图片步提示词</h2>
         <el-tag v-if="promptSaving" size="small" type="warning" effect="light">保存中</el-tag>
         <span class="spacer" />
-        <span class="muted">{{ step === 'first' ? '只生成首帧' : '用首帧定稿作 图3' }}</span>
+        <span class="muted">{{ step === 'first' ? '只生成首帧' : '用首帧定稿作身份锚点' }}</span>
       </div>
       <div class="panel-body kf-vars">
         <el-alert v-if="promptError" type="warning" :closable="false" :title="promptError" />
+        <details class="kf-prompt-full">
+          <summary>完整提示词（含参考图分工）</summary>
+          <pre v-if="prompt?.rendered" class="kf-prompt-text">{{ prompt.rendered }}</pre>
+          <el-alert
+            v-else-if="prompt?.render_error"
+            type="error"
+            :closable="false"
+            :title="prompt.render_error"
+          />
+        </details>
         <VariableCard
           v-for="item in promptVars"
           :key="item.key"
@@ -549,47 +715,14 @@ onUnmounted(() => {
       </div>
     </section>
 
-    <el-drawer
-      v-model="sheetOpen"
-      title="人物三视图"
-      direction="rtl"
-      size="min(380px, 92vw)"
-      :close-on-click-modal="true"
-    >
-      <p class="muted kf-drawer-note">
-        图片步固定用 图1 原始帧 + 这张三视图（尾帧步骤再加 图3 首帧定稿）。
-      </p>
-      <div v-if="keyframe.sheet_candidates.length" class="kf-sheet-grid">
-        <button
-          v-for="item in keyframe.sheet_candidates"
-          :key="item.id"
-          type="button"
-          class="kf-sheet-card"
-          :class="{ picked: item.id === keyframe.sheet }"
-          :disabled="sheetSaving"
-          @click="changeSheet(item.id)"
-        >
-          <img :src="assetUrl(item.id)" :alt="item.label" />
-          <span class="kf-sheet-cap">
-            <el-tag v-if="item.id === keyframe.sheet" size="small" type="success" effect="light"
-              >已绑定</el-tag
-            >
-            <span class="mono">{{ fileName(item.path) }}</span>
-          </span>
-        </button>
-      </div>
-      <el-empty v-else description="素材库里还没有 subject_ref 图片" :image-size="64" />
-      <template #footer>
-        <div class="kf-sheet-foot">
-          <el-button size="small" @click="uploadOpen = true">上传三视图</el-button>
-          <span class="muted kf-drawer-note">
-            上传按 subject_ref 入库；已绑定的三视图要换一张后才能在素材页删除。
-          </span>
-        </div>
-      </template>
-    </el-drawer>
-
-    <AssetUploadDialog v-model="uploadOpen" :case-name="caseName" @added="onAssetsAdded" />
+    <AssetPickerDialog
+      v-model="pickerOpen"
+      :case-name="caseName"
+      :info="info"
+      mode="keyframe"
+      @confirm="addRefs"
+      @updated="onPickerUpdated"
+    />
   </div>
 </template>
 
@@ -722,6 +855,50 @@ onUnmounted(() => {
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.kf-stack {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.78);
+  color: #fff;
+  font-size: 11px;
+}
+
+.kf-refs-note {
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-xs);
+  line-height: 1.6;
+}
+
+.kf-prompt-full {
+  grid-column: 1 / -1;
+  font-size: var(--text-sm);
+}
+
+.kf-prompt-full summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.kf-prompt-text {
+  max-height: 320px;
+  margin: var(--space-2) 0 0;
+  padding: var(--space-3);
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  background: var(--color-video-bg);
+  color: var(--color-video-text);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.65;
+  white-space: pre-wrap;
 }
 
 .card-open {

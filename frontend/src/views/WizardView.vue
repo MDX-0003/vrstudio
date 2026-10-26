@@ -13,6 +13,7 @@ import GenerateStep from '@/views/wizard/GenerateStep.vue'
 import KeyframeStep from '@/views/wizard/KeyframeStep.vue'
 import MergeStep from '@/views/wizard/MergeStep.vue'
 import PickStep from '@/views/wizard/PickStep.vue'
+import CaseLibraryView from '@/views/case/CaseLibraryView.vue'
 import { flowMeta } from '@/constants/flow'
 import { stepsForFlow } from '@/constants/steps'
 import { useCaseLoader } from '@/composables/useCaseLoader'
@@ -30,6 +31,11 @@ const activeStep = computed(() => {
   const raw = String(route.params.step ?? '')
   return raw || steps.value[0]?.key || 'generate'
 })
+const isLibrary = computed(() => activeStep.value === 'library')
+const libraryCount = computed(
+  () => (caseInfo.value?.assets ?? []).filter((asset) => asset.source !== 'flow').length,
+)
+const lastFlowStep = ref(steps.value[0]?.key || 'generate')
 const activeIndex = computed(() => {
   const index = steps.value.findIndex((step) => step.key === activeStep.value)
   return index < 0 ? 0 : index
@@ -68,7 +74,21 @@ async function loadCase(): Promise<void> {
 }
 
 function selectStep(key: string): void {
+  lastFlowStep.value = key
   router.push({ name: 'case', params: { name: caseName.value, step: key } })
+}
+
+function goLibrary(): void {
+  router.push({ name: 'case', params: { name: caseName.value, step: 'library' } })
+}
+
+function goFlow(): void {
+  selectStep(lastFlowStep.value || steps.value[0]?.key || 'generate')
+}
+
+function onCaseView(value: string | number | boolean | undefined): void {
+  if (String(value) === 'library') goLibrary()
+  else goFlow()
 }
 
 function onStepUpdated(data: CaseInfo): void {
@@ -98,13 +118,16 @@ function onHandoff(data: CaseInfo): void {
 watch(
   () => [activeStep.value, steps.value, caseInfo.value?.name],
   () => {
+    if (activeStep.value === 'library') return
     if (!caseInfo.value) return
     if (!steps.value.some((step) => step.key === activeStep.value)) {
       void router.replace({
         name: 'case',
         params: { name: caseName.value, step: steps.value[0]?.key ?? 'generate' },
       })
+      return
     }
+    lastFlowStep.value = activeStep.value
   },
   { immediate: true },
 )
@@ -176,7 +199,7 @@ watch(caseName, (_next, previous) => {
 </script>
 
 <template>
-  <div class="page wizard-page" :class="{ 'gen-step': activeStep === 'generate' }">
+  <div class="page wizard-page" :class="{ 'gen-step': activeStep === 'generate' && !isLibrary }">
     <div class="wizard-head">
       <div>
         <div class="crumbs muted">Case / {{ caseName }}</div>
@@ -201,7 +224,24 @@ watch(caseName, (_next, previous) => {
       :title="`case 正被 ${lockHolder} 使用；保存仍会写入，请先沟通`"
     />
 
-    <nav class="step-nav" aria-label="流程步骤">
+    <div class="case-switch">
+      <el-radio-group
+        :model-value="isLibrary ? 'library' : 'flow'"
+        size="small"
+        @change="onCaseView"
+      >
+        <el-radio-button value="flow">流程</el-radio-button>
+        <el-radio-button value="library">
+          素材库
+          <span class="case-switch-count">{{ libraryCount }}</span>
+        </el-radio-button>
+      </el-radio-group>
+      <span class="muted case-switch-note">
+        素材库是 case 级页面；账号锁与保存状态仍作用在当前 case 上。
+      </span>
+    </div>
+
+    <nav v-if="!isLibrary" class="step-nav" aria-label="流程步骤">
       <button
         v-for="(step, index) in steps"
         :key="step.key"
@@ -225,8 +265,14 @@ watch(caseName, (_next, previous) => {
     </div>
 
     <template v-else-if="caseInfo && caseInfo.name === caseName">
+      <CaseLibraryView
+        v-if="isLibrary"
+        :case-name="caseName"
+        :info="caseInfo"
+        @updated="onStepUpdated"
+      />
       <PickStep
-        v-if="activeStep === 'pick'"
+        v-else-if="activeStep === 'pick'"
         :key="caseName"
         :case-name="caseName"
         :info="caseInfo"
@@ -313,6 +359,29 @@ watch(caseName, (_next, previous) => {
   align-items: center;
   color: var(--color-text-muted);
   font-size: var(--text-sm);
+}
+
+.case-switch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.case-switch-count {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  margin-left: var(--space-1);
+  border-radius: 999px;
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.case-switch-note {
+  font-size: var(--text-xs);
 }
 
 .step-nav {

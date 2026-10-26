@@ -20,12 +20,15 @@ export const FLOW_STEPS: Record<Flow, StepDef[]> = {
   gen: [GENERATE],
 }
 
-export const STEP_LABELS: Record<string, string> = Object.fromEntries(
-  [PICK, EXTRACT, KEYFRAME, GENERATE, MERGE, COMPARE, PAD, RECOMPOSE].map((step) => [
-    step.key,
-    step.label,
-  ]),
-)
+export const STEP_LABELS: Record<string, string> = {
+  ...Object.fromEntries(
+    [PICK, EXTRACT, KEYFRAME, GENERATE, MERGE, COMPARE, PAD, RECOMPOSE].map((step) => [
+      step.key,
+      step.label,
+    ]),
+  ),
+  library: '素材库',
+}
 
 export function stepsForFlow(flow: Flow): StepDef[] {
   return FLOW_STEPS[flow] ?? FLOW_STEPS.patch
