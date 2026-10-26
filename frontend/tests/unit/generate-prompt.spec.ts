@@ -13,7 +13,8 @@ const DrawerStub = defineComponent({
 const InputStub = defineComponent({
   props: { modelValue: { type: null, default: '' } },
   emits: ['update:modelValue'],
-  template: '<input :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" />',
+  template:
+    '<input :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" />',
 })
 
 const ButtonStub = defineComponent({

@@ -54,9 +54,7 @@ function proxySuffix(state: string, width: number | null): string {
 
 const sourceLabel = computed(() => `源片${proxySuffix(sourceProxy.value, sourceProxyWidth.value)}`)
 const outputLabel = computed(() =>
-  outputProxy.value === 'ready'
-    ? `${outputProxyWidth.value ?? ''} 代理`.trim()
-    : outputProxy.value,
+  outputProxy.value === 'ready' ? `${outputProxyWidth.value ?? ''} 代理`.trim() : outputProxy.value,
 )
 
 function selectOutput(file: string): void {

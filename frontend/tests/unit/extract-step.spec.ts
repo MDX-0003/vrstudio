@@ -119,8 +119,7 @@ describe('ExtractStep 完成刷新（2026-10-26 陈旧文件列表修复）', ()
 
   it('shows the running state from the task list, not from a local click flag', async () => {
     const wrapper = await mountStep()
-    const runBtn = () =>
-      wrapper.findAll('button').find((item) => item.text().includes('抽取'))!
+    const runBtn = () => wrapper.findAll('button').find((item) => item.text().includes('抽取'))!
 
     expect(runBtn().attributes('disabled')).toBeUndefined()
 

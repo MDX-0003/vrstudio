@@ -72,10 +72,7 @@ describe('MergeStep gate buttons', () => {
   })
 
   it('disables 扩充画面 only when the pad gate is not ready', async () => {
-    const wrapper = await mountWith(
-      { ok: true, ready: false },
-      { ok: false, ready: false },
-    )
+    const wrapper = await mountWith({ ok: true, ready: false }, { ok: false, ready: false })
     expect(button(wrapper, '扩充画面').attributes('disabled')).toBeDefined()
     wrapper.unmount()
   })
@@ -87,7 +84,10 @@ describe('MergeStep gate buttons', () => {
   })
 
   it('disables 裁回原尺寸 until the recompose gate is ready', async () => {
-    const wrapper = await mountWith({ ok: true, ready: true }, { ok: false, ready: false, reason: '先采用' })
+    const wrapper = await mountWith(
+      { ok: true, ready: true },
+      { ok: false, ready: false, reason: '先采用' },
+    )
     expect(button(wrapper, '裁回原尺寸').attributes('disabled')).toBeDefined()
     wrapper.unmount()
   })

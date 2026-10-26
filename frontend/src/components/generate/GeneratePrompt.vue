@@ -23,8 +23,7 @@ const newValue = ref('')
 
 const newKeyUsable = computed(() => {
   const key = newKey.value.trim()
-  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)
-    && !props.variables.some((item) => item.key === key)
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && !props.variables.some((item) => item.key === key)
 })
 
 function submitNewVar(): void {
@@ -96,11 +95,7 @@ function submitNewVar(): void {
             模板没覆盖的补充约定可以做成变量再写进正文；素材清单等自动变量由系统生成，不能手工添加。
           </p>
           <div class="add-var-row">
-            <el-input
-              v-model="newKey"
-              placeholder="变量名（英文）"
-              class="add-var-key"
-            />
+            <el-input v-model="newKey" placeholder="变量名（英文）" class="add-var-key" />
             <el-input
               v-model="newValue"
               type="textarea"

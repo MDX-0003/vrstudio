@@ -187,8 +187,7 @@ function startJoystick(dirYaw: number, dirPitch: number): void {
     joystickInFlight = true
     try {
       const step = (nudgeSpeed.value * NUDGE_INTERVAL_MS) / 1000
-      applyGeometry(await nudgeViewport(
-        props.caseName, dirYaw * step, dirPitch * step))
+      applyGeometry(await nudgeViewport(props.caseName, dirYaw * step, dirPitch * step))
     } catch {
       stopJoystick()
     } finally {

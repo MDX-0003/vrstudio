@@ -20,9 +20,11 @@ const { latest, start } = useCaseTasks(
 const submitting = ref(false)
 const running = computed(() => {
   const task = latest.value
-  return submitting.value || Boolean(
-    task && task.kind === 'extract'
-      && (task.status === 'queued' || task.status === 'running'),
+  return (
+    submitting.value ||
+    Boolean(
+      task && task.kind === 'extract' && (task.status === 'queued' || task.status === 'running'),
+    )
   )
 })
 const mountedAt = Date.now()
