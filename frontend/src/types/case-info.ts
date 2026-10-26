@@ -86,6 +86,7 @@ export interface OutputFile {
   url: string
   proxy_url: string
   proxy_state: string
+  proxy_width?: number | null
   version?: string
   partial?: boolean
 }
@@ -211,7 +212,7 @@ export interface CaseInfo {
   frame_count: number | null
   fps: number | null
   duration_s: number | null
-  proxy: { state: string; url: string } | null
+  proxy: { state: string; url: string; width?: number | null } | null
   extract_current: string | null
   adopt_round: string | null
   assets: AssetDetail[]

@@ -54,6 +54,8 @@ export function resetDraft(name: string, version?: string): Promise<GeometryPayl
 export interface ProxyPayload {
   state: string
   url: string
+  /** 就绪/直连时代理（或直连源）的宽度；对比页标签显示“2048 代理”用。 */
+  width?: number | null
 }
 
 export function fetchProxy(name: string, file?: string): Promise<ProxyPayload> {

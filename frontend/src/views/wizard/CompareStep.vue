@@ -9,7 +9,9 @@ const props = defineProps<{ caseName: string; info: CaseInfo }>()
 
 const selectedFile = ref<string>('')
 const sourceProxy = ref(props.info.proxy?.state ?? 'missing')
+const sourceProxyWidth = ref<number | null>(props.info.proxy?.width ?? null)
 const outputProxy = ref('missing')
+const outputProxyWidth = ref<number | null>(null)
 const currentTime = ref(0)
 const duration = ref(0)
 const playing = ref(false)
@@ -44,6 +46,18 @@ const timeText = computed(() => {
     `${Math.floor(value / 60)}:${String(Math.floor(value % 60)).padStart(2, '0')}`
   return `${format(currentTime.value)} / ${format(duration.value)}`
 })
+
+function proxySuffix(state: string, width: number | null): string {
+  if (state !== 'ready') return ''
+  return width ? `（${width} 代理）` : '（代理）'
+}
+
+const sourceLabel = computed(() => `源片${proxySuffix(sourceProxy.value, sourceProxyWidth.value)}`)
+const outputLabel = computed(() =>
+  outputProxy.value === 'ready'
+    ? `${outputProxyWidth.value ?? ''} 代理`.trim()
+    : outputProxy.value,
+)
 
 function selectOutput(file: string): void {
   selectedFile.value = file
@@ -115,6 +129,7 @@ async function ensureSourceProxy(): Promise<void> {
   try {
     const payload = await ensureProxy(props.caseName)
     sourceProxy.value = payload.state
+    sourceProxyWidth.value = payload.width ?? null
     if (payload.state === 'ready') sourceWasReady = true
   } catch {
     sourceProxy.value = 'missing'
@@ -134,6 +149,7 @@ async function ensureOutputProxy(): Promise<void> {
   try {
     const payload = await ensureProxy(props.caseName, item.file)
     outputProxy.value = payload.state
+    outputProxyWidth.value = payload.width ?? null
     if (payload.state === 'ready') outputWasReady = true
   } catch {
     outputProxy.value = 'missing'
@@ -145,6 +161,7 @@ async function pollProxies(): Promise<void> {
   try {
     const source = await fetchProxy(props.caseName)
     sourceProxy.value = source.state
+    sourceProxyWidth.value = source.width ?? null
     if (source.state === 'ready') sourceWasReady = true
   } catch {
     // 源片代理状态是辅助信息，失败不打断对比。
@@ -154,6 +171,7 @@ async function pollProxies(): Promise<void> {
     try {
       const output = await fetchProxy(props.caseName, item.file)
       outputProxy.value = output.state
+      outputProxyWidth.value = output.width ?? null
       if (output.state === 'ready') outputWasReady = true
     } catch {
       outputProxy.value = 'missing'
@@ -258,8 +276,8 @@ function onKeydown(event: KeyboardEvent): void {
             />
           </el-select>
         </label>
-        <span class="muted">左路：源片{{ sourceProxy === 'ready' ? '（4K 代理）' : '' }}</span>
-        <span class="muted">右路：{{ outputProxy === 'ready' ? '4K 代理' : outputProxy }}</span>
+        <span class="muted">左路：{{ sourceLabel }}</span>
+        <span class="muted">右路：{{ outputLabel }}</span>
         <el-button
           size="small"
           :icon="Refresh"
