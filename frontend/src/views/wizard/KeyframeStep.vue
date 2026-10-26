@@ -15,6 +15,7 @@ import {
 import type { KeyframeRound } from '@/api/keyframe'
 import { useCaseTasks } from '@/composables/useCaseTasks'
 import VariableCard from '@/components/prompt/VariableCard.vue'
+import FileOpenLink from '@/components/common/FileOpenLink.vue'
 import { KEYFRAME_MAX_CANDIDATES, KEYFRAME_RESOLUTIONS } from '@/constants/keyframe'
 import { buildPromptVariables, promptVariablesToRecord } from '@/utils/prompt'
 import type { CaseInfo, PromptPayload } from '@/types/case-info'
@@ -277,12 +278,14 @@ onUnmounted(() => {
             <div class="frame-media">
               <img v-if="rawFirst?.exists" :src="rawFirst.url" alt="首帧原始图" />
               <el-empty v-else description="缺首帧原始图" :image-size="60" />
+              <FileOpenLink :file="rawFirst" label="打开首帧原始图" class="card-open" />
               <span v-if="firstPick" class="pick-badge"
                 ><el-icon><Check /></el-icon>已定稿</span
               >
             </div>
             <div v-if="firstPick" class="picked-preview">
               <img :src="pickedUrl(firstPick)" alt="首帧定稿" />
+              <FileOpenLink :file="firstPick.file" label="打开首帧定稿" class="card-open" />
             </div>
           </div>
           <el-icon class="chain-arrow" :size="22"><ArrowRight /></el-icon>
@@ -291,12 +294,14 @@ onUnmounted(() => {
             <div class="frame-media">
               <img v-if="rawLast?.exists" :src="rawLast.url" alt="尾帧原始图" />
               <el-empty v-else description="缺尾帧原始图" :image-size="60" />
+              <FileOpenLink :file="rawLast" label="打开尾帧原始图" class="card-open" />
               <span v-if="lastPick" class="pick-badge"
                 ><el-icon><Check /></el-icon>已定稿</span
               >
             </div>
             <div v-if="lastPick" class="picked-preview">
               <img :src="pickedUrl(lastPick)" alt="尾帧定稿" />
+              <FileOpenLink :file="lastPick.file" label="打开尾帧定稿" class="card-open" />
             </div>
           </div>
           <el-icon class="chain-arrow" :size="22"><ArrowRight /></el-icon>
@@ -397,18 +402,19 @@ onUnmounted(() => {
             <el-tag size="small" effect="light">{{ round.stage || '未知阶段' }}</el-tag>
           </div>
           <div class="candidate-grid">
-            <button
-              v-for="item in round.results"
-              :key="item.index"
-              type="button"
-              class="candidate-card"
-              :class="{ picked: isPicked(round, item.index) }"
-              :disabled="Boolean(picking)"
-              @click="pick(round, item.index)"
-            >
-              <img :src="item.url" :alt="`候选 ${item.index}`" />
-              <span v-if="isPicked(round, item.index)" class="picked-mark">已定稿</span>
-            </button>
+            <div v-for="item in round.results" :key="item.index" class="candidate-wrap">
+              <button
+                type="button"
+                class="candidate-card"
+                :class="{ picked: isPicked(round, item.index) }"
+                :disabled="Boolean(picking)"
+                @click="pick(round, item.index)"
+              >
+                <img :src="item.url" :alt="`候选 ${item.index}`" />
+                <span v-if="isPicked(round, item.index)" class="picked-mark">已定稿</span>
+              </button>
+              <FileOpenLink :file="item" label="打开候选原图" class="card-open" />
+            </div>
           </div>
         </div>
       </div>
@@ -528,10 +534,22 @@ onUnmounted(() => {
 }
 
 .picked-preview {
+  position: relative;
   margin-top: var(--space-2);
   overflow: hidden;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
+}
+
+.card-open {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 1;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.7);
+  color: #fff;
 }
 
 .picked-preview img {
@@ -601,8 +619,13 @@ onUnmounted(() => {
   gap: var(--space-2);
 }
 
+.candidate-wrap {
+  position: relative;
+}
+
 .candidate-card {
   position: relative;
+  width: 100%;
   padding: 0;
   overflow: hidden;
   border: 2px solid transparent;

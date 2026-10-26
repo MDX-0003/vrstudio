@@ -68,6 +68,7 @@ export interface AssetRow {
   url?: string
   exists?: boolean
   rel?: string | null
+  path?: string
   open_url?: string | null
 }
 

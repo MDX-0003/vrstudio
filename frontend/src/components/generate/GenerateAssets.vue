@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { Bottom, Delete, Picture, Plus, Top, VideoCamera } from '@element-plus/icons-vue'
+import FileOpenLink from '@/components/common/FileOpenLink.vue'
 import { ASSET_ROLE_OPTIONS } from '@/constants/assetRoles'
 import type { AssetRow } from '@/types/case'
 
@@ -70,6 +71,7 @@ const emit = defineEmits<{
         </el-select>
         <span v-else class="role-fixed">{{ asset.role }}</span>
         <div class="asset-actions">
+          <FileOpenLink :file="asset" label="打开素材原文件" />
           <el-button
             link
             :icon="Top"

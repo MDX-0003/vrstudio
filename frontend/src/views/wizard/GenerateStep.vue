@@ -176,6 +176,7 @@ function toAssetRow(asset: AssetDetail, selected: Set<string>): AssetRow {
     url: asset.url,
     exists: asset.exists,
     rel: asset.rel,
+    path: asset.path,
     open_url: asset.open_url,
   }
 }
