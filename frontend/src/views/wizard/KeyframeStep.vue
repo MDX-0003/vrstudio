@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { ArrowRight, Check, Refresh, VideoPlay } from '@element-plus/icons-vue'
+import { Refresh } from '@element-plus/icons-vue'
 import { fetchCase } from '@/api/case'
 import {
   fetchKeyframePrompt,
@@ -16,7 +16,9 @@ import type { KeyframeRound } from '@/api/keyframe'
 import { useCaseTasks } from '@/composables/useCaseTasks'
 import VariableCard from '@/components/prompt/VariableCard.vue'
 import FileOpenLink from '@/components/common/FileOpenLink.vue'
+import AssetUploadDialog from '@/components/upload/AssetUploadDialog.vue'
 import { KEYFRAME_MAX_CANDIDATES, KEYFRAME_RESOLUTIONS } from '@/constants/keyframe'
+import { taskStatusMeta } from '@/constants/taskStatus'
 import { buildPromptVariables, promptVariablesToRecord } from '@/utils/prompt'
 import type { CaseInfo, PromptPayload } from '@/types/case-info'
 import type { PromptVariable } from '@/types/case'
@@ -39,6 +41,9 @@ const running = ref(false)
 const picking = ref<string | null>(null)
 const handoffBusy = ref(false)
 const sheetSaving = ref(false)
+const sheetOpen = ref(false)
+const uploadOpen = ref(false)
+const taskOpen = ref(false)
 const modelId = ref<number | null>(null)
 const resolution = ref('2K')
 const num = ref(4)
@@ -73,6 +78,33 @@ const runReason = computed(() => {
   if (step.value === 'last' && !firstPick.value) return '先生成并挑选首帧定稿'
   return ''
 })
+const handoffReason = computed(() => {
+  if (keyframe.value.stale) return '抽取版本已更新，需要重新定稿'
+  if (!firstPick.value) return '首帧未定稿'
+  if (!lastPick.value) return '尾帧未定稿'
+  return ''
+})
+
+const rawFrame = computed(() => (step.value === 'first' ? rawFirst.value : rawLast.value))
+const rawLabel = computed(() => (step.value === 'first' ? '原始首帧' : '原始尾帧'))
+const targetLabel = computed(() => (step.value === 'first' ? '首帧定稿' : '尾帧定稿'))
+const sheetCandidate = computed(
+  () => keyframe.value.sheet_candidates.find((item) => item.id === keyframe.value.sheet) ?? null,
+)
+// sheet_candidates 只带 label/path/rel/open_url，FileOpenLink 需要 name 与 exists。
+const sheetFile = computed(() => {
+  const item = sheetCandidate.value
+  if (!item) return null
+  return {
+    name: item.label,
+    rel: item.rel ?? null,
+    path: item.path,
+    exists: true,
+    mtime: null,
+    size: null,
+    open_url: item.open_url ?? null,
+  }
+})
 
 function assetUrl(assetId: string | null | undefined): string {
   if (!assetId) return ''
@@ -86,6 +118,10 @@ function pickedUrl(pick: { asset: string } | null): string {
 function isPicked(round: KeyframeRound, index: number): boolean {
   const pick = stepPick.value
   return Boolean(pick && pick.round === round.round && pick.index === index)
+}
+
+function fileName(path: string): string {
+  return path.split(/[\\/]/).pop() || path
 }
 
 function applyPrompt(data: PromptPayload): void {
@@ -203,18 +239,25 @@ async function pick(round: KeyframeRound, index: number): Promise<void> {
   }
 }
 
-async function changeSheet(asset: unknown): Promise<void> {
+async function changeSheet(asset: string): Promise<void> {
   if (sheetSaving.value) return
   sheetSaving.value = true
   try {
-    const data = await setKeyframeSheet(props.caseName, String(asset))
+    const data = await setKeyframeSheet(props.caseName, asset)
     emit('updated', data)
     ElMessage.success('已绑定人物三视图')
+    sheetOpen.value = false
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : '绑定三视图失败')
   } finally {
     sheetSaving.value = false
   }
+}
+
+function onAssetsAdded(data: CaseInfo): void {
+  emit('updated', data)
+  uploadOpen.value = false
+  ElMessage.success('已加入素材库；在抽屉里点选要用的三视图')
 }
 
 async function handoff(): Promise<void> {
@@ -247,6 +290,7 @@ watch(latest, async (task) => {
     ElMessage.success('首尾帧批次完成')
   } else if (task.status === 'failed') {
     running.value = false
+    taskOpen.value = true
     ElMessage.error(task.error || '首尾帧生成失败')
   }
 })
@@ -263,103 +307,120 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="keyframe-layout">
-    <section class="panel frame-panel">
+  <div class="kf-page">
+    <div class="kf-topbar">
+      <el-radio-group v-model="step" size="small">
+        <el-radio-button value="first">首帧</el-radio-button>
+        <el-radio-button value="last">尾帧</el-radio-button>
+      </el-radio-group>
+      <span class="spacer" />
+      <el-button
+        type="primary"
+        :disabled="!keyframe.complete || handoffBusy"
+        :loading="handoffBusy"
+        @click="handoff"
+      >
+        交接给视频步
+      </el-button>
+      <span v-if="handoffReason" class="kf-reason">{{ handoffReason }}</span>
+    </div>
+
+    <section class="panel">
       <div class="panel-head">
-        <h2 class="panel-title">首尾帧</h2>
-        <span class="muted">{{
-          keyframe.stale ? '抽取版本已更新，需要重新定稿' : '两张原始帧来自当前抽取版本'
-        }}</span>
+        <h2 class="panel-title">图片步输入</h2>
+        <span class="muted">
+          {{
+            step === 'first'
+              ? '图1 / 图2 / 图3 与提示词里的参考图一一对应；首帧步骤只用图1与图2'
+              : '图1 / 图2 / 图3 与提示词里的参考图一一对应；尾帧步骤再加图3（首帧定稿）'
+          }}
+        </span>
       </div>
       <div class="panel-body">
-        <div class="frame-chain">
-          <div class="frame-card">
-            <div class="frame-label">首帧原始图</div>
-            <div class="frame-media">
-              <img v-if="rawFirst?.exists" :src="rawFirst.url" alt="首帧原始图" />
-              <el-empty v-else description="缺首帧原始图" :image-size="60" />
-              <FileOpenLink :file="rawFirst" label="打开首帧原始图" class="card-open" />
-              <span v-if="firstPick" class="pick-badge"
-                ><el-icon><Check /></el-icon>已定稿</span
-              >
+        <div class="kf-slots">
+          <figure class="kf-slot">
+            <figcaption class="kf-slot-cap">
+              <span class="kf-slot-no">图1</span>
+              <span>{{ rawLabel }}</span>
+              <span class="kf-slot-state" :class="rawFrame?.exists ? 'ok' : 'bad'">
+                {{ rawFrame?.exists ? '已就绪' : '缺图' }}
+              </span>
+            </figcaption>
+            <div class="kf-shot">
+              <img v-if="rawFrame?.exists" :src="rawFrame.url" :alt="rawLabel" />
+              <div v-else class="kf-shot-empty"><span>缺{{ rawLabel }}</span></div>
+              <FileOpenLink :file="rawFrame" :label="`打开${rawLabel}`" class="card-open" />
             </div>
-            <div v-if="firstPick" class="picked-preview">
+            <div class="kf-slot-file mono">{{ rawFrame?.name || '—' }}</div>
+          </figure>
+
+          <figure class="kf-slot">
+            <figcaption class="kf-slot-cap">
+              <span class="kf-slot-no">图2</span>
+              <span>人物三视图</span>
+              <el-button
+                link
+                type="primary"
+                size="small"
+                class="kf-slot-action"
+                @click="sheetOpen = true"
+              >
+                查看 / 更换
+              </el-button>
+            </figcaption>
+            <div class="kf-shot contain">
+              <img v-if="keyframe.sheet" :src="assetUrl(keyframe.sheet)" alt="人物三视图" />
+              <div v-else class="kf-shot-empty"><span>还没有绑定三视图</span></div>
+              <FileOpenLink :file="sheetFile" label="打开三视图" class="card-open" />
+            </div>
+            <div class="kf-slot-file mono">{{
+              sheetCandidate ? fileName(sheetCandidate.path) : '—'
+            }}</div>
+          </figure>
+
+          <figure class="kf-slot">
+            <figcaption class="kf-slot-cap">
+              <span class="kf-slot-no">图3</span>
+              <span>首帧定稿</span>
+              <span class="kf-slot-note">{{
+                step === 'last' ? '来自首帧定稿' : '尾帧步骤才用'
+              }}</span>
+            </figcaption>
+            <div v-if="step === 'last' && firstPick" class="kf-shot">
               <img :src="pickedUrl(firstPick)" alt="首帧定稿" />
               <FileOpenLink :file="firstPick.file" label="打开首帧定稿" class="card-open" />
             </div>
-          </div>
-          <el-icon class="chain-arrow" :size="22"><ArrowRight /></el-icon>
-          <div class="frame-card">
-            <div class="frame-label">尾帧原始图</div>
-            <div class="frame-media">
-              <img v-if="rawLast?.exists" :src="rawLast.url" alt="尾帧原始图" />
-              <el-empty v-else description="缺尾帧原始图" :image-size="60" />
-              <FileOpenLink :file="rawLast" label="打开尾帧原始图" class="card-open" />
-              <span v-if="lastPick" class="pick-badge"
-                ><el-icon><Check /></el-icon>已定稿</span
-              >
+            <div v-else class="kf-shot kf-shot-empty">
+              <span>生成并定稿首帧后填入</span>
             </div>
-            <div v-if="lastPick" class="picked-preview">
-              <img :src="pickedUrl(lastPick)" alt="尾帧定稿" />
-              <FileOpenLink :file="lastPick.file" label="打开尾帧定稿" class="card-open" />
+            <div class="kf-slot-file mono">
+              {{ step === 'last' && firstPick?.file ? firstPick.file.name : '—' }}
             </div>
-          </div>
-          <el-icon class="chain-arrow" :size="22"><ArrowRight /></el-icon>
-          <div class="video-node">
-            <el-icon :size="28"><VideoPlay /></el-icon>
-            <span>视频</span>
-          </div>
+          </figure>
+
+          <figure class="kf-slot">
+            <figcaption class="kf-slot-cap">
+              <span class="kf-slot-no">目标</span>
+              <span>{{ targetLabel }}</span>
+              <span class="kf-slot-note">点候选即定稿</span>
+            </figcaption>
+            <div v-if="stepPick" class="kf-shot">
+              <img :src="pickedUrl(stepPick)" :alt="targetLabel" />
+              <FileOpenLink :file="stepPick.file" :label="`打开${targetLabel}`" class="card-open" />
+            </div>
+            <div v-else class="kf-shot kf-shot-target"><span>从下方候选里挑一张</span></div>
+            <div class="kf-slot-file mono">{{ stepPick?.file?.name || '待定稿' }}</div>
+          </figure>
         </div>
       </div>
     </section>
 
     <section class="panel">
       <div class="panel-head">
-        <h2 class="panel-title">人物三视图</h2>
-        <span class="muted">{{ keyframe.sheet_candidates.length }} 张候选</span>
-      </div>
-      <div class="panel-body">
-        <el-select
-          :model-value="keyframe.sheet ?? ''"
-          size="small"
-          style="width: 100%"
-          :loading="sheetSaving"
-          placeholder="选择一张 subject_ref 图片"
-          @change="changeSheet"
-        >
-          <el-option
-            v-for="item in keyframe.sheet_candidates"
-            :key="item.id"
-            :label="item.label"
-            :value="item.id"
-          />
-        </el-select>
-        <p class="muted note">图片步固定用两张原始帧加这张三视图；视频步的提交集不受影响。</p>
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-head">
-        <h2 class="panel-title">图片步提示词</h2>
-        <el-tag v-if="promptSaving" size="small" type="warning" effect="light">保存中</el-tag>
-      </div>
-      <div class="panel-body prompt-panel">
-        <el-alert v-if="promptError" type="warning" :closable="false" :title="promptError" />
-        <div class="step-tabs">
-          <el-radio-group v-model="step" size="small">
-            <el-radio-button value="first">首帧</el-radio-button>
-            <el-radio-button value="last">尾帧</el-radio-button>
-          </el-radio-group>
-          <span class="muted">{{ step === 'first' ? '只生成首帧' : '用首帧定稿作 图3' }}</span>
-        </div>
-        <VariableCard
-          v-for="item in promptVars"
-          :key="item.key"
-          :variable="item"
-          @update:value="(value) => schedulePromptSave(item.key, value)"
-        />
-        <div class="run-row">
-          <el-select v-model="resolution" size="small" style="width: 110px">
+        <h2 class="panel-title">{{ step === 'first' ? '首帧候选' : '尾帧候选' }}</h2>
+        <span class="spacer" />
+        <div class="kf-head-actions">
+          <el-select v-model="resolution" size="small" style="width: 104px">
             <el-option
               v-for="item in KEYFRAME_RESOLUTIONS"
               :key="item.value"
@@ -368,6 +429,9 @@ onUnmounted(() => {
             />
           </el-select>
           <el-input-number v-model="num" :min="1" :max="KEYFRAME_MAX_CANDIDATES" size="small" />
+          <el-button link type="primary" :icon="Refresh" :loading="roundsLoading" @click="loadRounds">
+            刷新
+          </el-button>
           <el-button
             type="primary"
             size="small"
@@ -377,19 +441,10 @@ onUnmounted(() => {
           >
             {{ step === 'first' ? '生成首帧候选' : '生成尾帧候选' }}
           </el-button>
-          <span v-if="runReason" class="reason">{{ runReason }}</span>
         </div>
       </div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-head">
-        <h2 class="panel-title">{{ step === 'first' ? '首帧候选' : '尾帧候选' }}</h2>
-        <el-button link type="primary" :icon="Refresh" :loading="roundsLoading" @click="loadRounds">
-          刷新
-        </el-button>
-      </div>
       <div class="panel-body">
+        <p v-if="runReason" class="kf-reason">{{ runReason }}</p>
         <div v-if="!stepRounds.length" class="empty">
           <el-empty
             :description="step === 'first' ? '还没有首帧批次' : '还没有尾帧批次'"
@@ -417,95 +472,184 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
+
+        <template v-if="latest">
+          <div class="kf-task">
+            <div class="kf-task-head">
+              <el-tag size="small" effect="light" :type="taskStatusMeta(latest.status).type">
+                {{ taskStatusMeta(latest.status).text }}
+              </el-tag>
+              <span class="mono">{{ latest.id }}</span>
+              <span v-if="latest.queue_position" class="muted"
+                >排队第 {{ latest.queue_position }} 位</span
+              >
+              <span class="spacer" />
+              <el-button
+                v-if="latest.tail.length"
+                link
+                type="primary"
+                @click="taskOpen = !taskOpen"
+              >
+                {{ taskOpen ? '收起日志' : '技术详情' }}
+              </el-button>
+            </div>
+            <el-alert
+              v-if="latest.error"
+              type="error"
+              :closable="false"
+              :title="latest.error"
+              class="kf-task-error"
+            />
+            <pre v-if="taskOpen && latest.tail.length" class="task-tail">{{
+              latest.tail.join('\n')
+            }}</pre>
+          </div>
+        </template>
+        <p v-else class="muted kf-task-empty">还没有生成任务。</p>
       </div>
     </section>
 
     <section class="panel">
       <div class="panel-head">
-        <h2 class="panel-title">交接</h2>
+        <h2 class="panel-title">图片步提示词</h2>
+        <el-tag v-if="promptSaving" size="small" type="warning" effect="light">保存中</el-tag>
+        <span class="spacer" />
+        <span class="muted">{{ step === 'first' ? '只生成首帧' : '用首帧定稿作 图3' }}</span>
       </div>
-      <div class="panel-body">
-        <div class="handoff-row">
-          <el-button
-            type="primary"
-            :disabled="!keyframe.complete || handoffBusy"
-            :loading="handoffBusy"
-            @click="handoff"
-          >
-            用这两帧生成视频
-          </el-button>
-          <span class="muted">
-            {{
-              keyframe.complete
-                ? '会写入 firstLastFrame 模式与一对提交集，并跳到生成步骤'
-                : '首帧与尾帧都定稿后才能交接'
-            }}
-          </span>
-        </div>
-        <div v-if="latest" class="task-summary">
-          <el-tag
-            size="small"
-            effect="light"
-            :type="
-              latest.status === 'failed'
-                ? 'danger'
-                : latest.status === 'done'
-                  ? 'success'
-                  : 'primary'
-            "
-          >
-            {{ latest.status }}
-          </el-tag>
-          <span class="mono">{{ latest.id }}</span>
-          <span v-if="latest.queue_position" class="muted"
-            >排队第 {{ latest.queue_position }} 位</span
-          >
-        </div>
-        <el-alert
-          v-if="latest?.error"
-          type="error"
-          :closable="false"
-          :title="latest.error"
-          class="task-error"
+      <div class="panel-body kf-vars">
+        <el-alert v-if="promptError" type="warning" :closable="false" :title="promptError" />
+        <VariableCard
+          v-for="item in promptVars"
+          :key="item.key"
+          :variable="item"
+          @update:value="(value) => schedulePromptSave(item.key, value)"
         />
-        <pre v-if="latest?.tail.length" class="task-tail">{{ latest.tail.join('\n') }}</pre>
       </div>
     </section>
+
+    <el-drawer
+      v-model="sheetOpen"
+      title="人物三视图"
+      direction="rtl"
+      size="min(380px, 92vw)"
+      :close-on-click-modal="true"
+    >
+      <p class="muted kf-drawer-note">
+        图片步固定用 图1 原始帧 + 这张三视图（尾帧步骤再加 图3 首帧定稿）。
+      </p>
+      <div v-if="keyframe.sheet_candidates.length" class="kf-sheet-grid">
+        <button
+          v-for="item in keyframe.sheet_candidates"
+          :key="item.id"
+          type="button"
+          class="kf-sheet-card"
+          :class="{ picked: item.id === keyframe.sheet }"
+          :disabled="sheetSaving"
+          @click="changeSheet(item.id)"
+        >
+          <img :src="assetUrl(item.id)" :alt="item.label" />
+          <span class="kf-sheet-cap">
+            <el-tag v-if="item.id === keyframe.sheet" size="small" type="success" effect="light"
+              >已绑定</el-tag
+            >
+            <span class="mono">{{ fileName(item.path) }}</span>
+          </span>
+        </button>
+      </div>
+      <el-empty v-else description="素材库里还没有 subject_ref 图片" :image-size="64" />
+      <template #footer>
+        <div class="kf-sheet-foot">
+          <el-button size="small" @click="uploadOpen = true">上传三视图</el-button>
+          <span class="muted kf-drawer-note">
+            上传按 subject_ref 入库；已绑定的三视图要换一张后才能在素材页删除。
+          </span>
+        </div>
+      </template>
+    </el-drawer>
+
+    <AssetUploadDialog v-model="uploadOpen" :case-name="caseName" @added="onAssetsAdded" />
   </div>
 </template>
 
 <style scoped>
-.keyframe-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: var(--space-4);
-  align-items: start;
-}
-
-.frame-panel {
-  grid-column: 1 / -1;
-}
-
-.frame-chain {
+.kf-page {
   display: flex;
-  align-items: center;
-  gap: var(--space-3);
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.kf-topbar {
+  display: flex;
   flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
 }
 
-.frame-card {
-  flex: 1;
-  min-width: 220px;
-  max-width: 360px;
-}
-
-.frame-label {
-  margin-bottom: var(--space-1);
-  color: var(--color-text-muted);
+.kf-reason {
+  color: var(--color-warning);
   font-size: var(--text-xs);
 }
 
-.frame-media {
+.kf-slots {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.kf-slot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  margin: 0;
+}
+
+.kf-slot-cap {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--text-xs);
+}
+
+.kf-slot-no {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.kf-slot-state {
+  margin-left: auto;
+  font-size: 11px;
+}
+
+.kf-slot-state.ok {
+  color: var(--color-success);
+}
+
+.kf-slot-state.bad {
+  color: var(--color-danger);
+}
+
+.kf-slot-note {
+  margin-left: auto;
+  color: var(--color-text-faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.kf-slot-action {
+  margin-left: auto;
+}
+
+.kf-shot {
   position: relative;
   overflow: hidden;
   border-radius: var(--radius-md);
@@ -513,32 +657,49 @@ onUnmounted(() => {
   aspect-ratio: 16 / 9;
 }
 
-.frame-media img {
+.kf-shot img {
+  display: block;
   width: 100%;
   height: 100%;
+  object-fit: cover;
+}
+
+.kf-shot.contain {
+  background: var(--color-surface-muted);
+}
+
+.kf-shot.contain img {
   object-fit: contain;
 }
 
-.pick-badge {
-  position: absolute;
-  top: var(--space-2);
-  left: var(--space-2);
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--color-success);
-  color: #fff;
-  font-size: var(--text-xs);
+.kf-shot-empty,
+.kf-shot-target {
+  display: grid;
+  place-items: center;
+  padding: var(--space-2);
+  text-align: center;
+  font-size: 11px;
+  line-height: 1.5;
 }
 
-.picked-preview {
-  position: relative;
-  margin-top: var(--space-2);
+.kf-shot-empty {
+  background: var(--color-surface-muted);
+  border: 1px dashed var(--color-border-strong);
+  color: var(--color-text-faint);
+}
+
+.kf-shot-target {
+  background: var(--color-primary-soft);
+  border: 1px dashed var(--color-primary);
+  color: var(--color-primary);
+}
+
+.kf-slot-file {
   overflow: hidden;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .card-open {
@@ -552,56 +713,15 @@ onUnmounted(() => {
   color: #fff;
 }
 
-.picked-preview img {
-  display: block;
-  width: 100%;
-}
-
-.chain-arrow {
-  color: var(--color-text-faint);
-}
-
-.video-node {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-1);
-  color: var(--color-text-muted);
-  font-size: var(--text-xs);
-}
-
-.note {
-  margin: var(--space-2) 0 0;
-  font-size: var(--text-xs);
-}
-
-.prompt-panel {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-
-.step-tabs {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-}
-
-.run-row {
-  display: flex;
+.kf-head-actions {
+  display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
 }
 
-.reason {
-  color: var(--color-warning);
-  font-size: var(--text-xs);
-}
-
-.round-block {
-  margin-bottom: var(--space-3);
+.round-block + .round-block {
+  margin-top: var(--space-3);
 }
 
 .round-head {
@@ -615,7 +735,7 @@ onUnmounted(() => {
 
 .candidate-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-2);
 }
 
@@ -660,42 +780,117 @@ onUnmounted(() => {
   font-size: 11px;
 }
 
-.handoff-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
+.kf-task {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
 }
 
-.task-summary {
+.kf-task-head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
-  margin-top: var(--space-3);
   font-size: var(--text-sm);
 }
 
-.task-error {
+.kf-task-error {
   margin-top: var(--space-2);
 }
 
-.task-tail {
-  max-height: 200px;
-  margin: var(--space-2) 0 0;
-  padding: var(--space-2);
-  overflow: auto;
-  border-radius: var(--radius-sm);
-  background: var(--color-video-bg);
-  color: var(--color-video-text);
-  font-family: var(--font-mono);
+.kf-task-empty {
+  margin: var(--space-3) 0 0;
   font-size: var(--text-xs);
-  line-height: 1.55;
-  white-space: pre-wrap;
+}
+
+.kf-vars {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.kf-vars > .el-alert {
+  grid-column: 1 / -1;
+}
+
+.kf-drawer-note {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-xs);
+}
+
+.kf-sheet-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--space-2);
+}
+
+.kf-sheet-card {
+  padding: 0;
+  overflow: hidden;
+  border: 2px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  text-align: left;
+  cursor: pointer;
+}
+
+.kf-sheet-card.picked {
+  border-color: var(--color-success);
+}
+
+.kf-sheet-card img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: contain;
+  background: var(--color-surface-muted);
+}
+
+.kf-sheet-cap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-1) var(--space-2);
+  font-size: 11px;
+}
+
+.kf-sheet-cap .mono {
+  flex: 1 0 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kf-sheet-foot {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+}
+
+.kf-sheet-foot .kf-drawer-note {
+  margin: 0;
+  text-align: left;
 }
 
 @media (max-width: 1280px) {
-  .keyframe-layout {
+  .kf-slots {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .candidate-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .kf-vars {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 900px) {
+  .kf-slots {
     grid-template-columns: minmax(0, 1fr);
   }
 }
