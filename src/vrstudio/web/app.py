@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+from dataclasses import replace
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -906,14 +907,21 @@ def _pick_row(pick: keyframe_mod.Pick | None,
 
 
 def _keyframe_state(case: case_mod.Case, details: list[dict] | None = None) -> dict:
-    """首尾帧工作台的只读状态：绑定关系、两帧指针、是否过期。
+    """首尾帧工作台的只读状态：参考图清单、两帧指针、是否过期。
 
-    图片步的输入全部从这里与原始帧解析，不读 ``[submit] selected``；视频提交集
-    仍只由素材侧边栏的勾选决定。``details`` 允许调用方传入已算好的素材明细，
-    一次请求里不重复解码整批素材。"""
+    图片步的输入全部从这里与原始帧解析，不读 ``[submit]``；视频提交清单
+    仍只由生成页的引用条目决定。``details`` 允许调用方传入已算好的素材明细，
+    一次请求里不重复解码整批素材。``sheet`` / ``sheet_candidates`` 是旧版
+    控制台的派生字段，新前端只读 ``refs``。"""
+    role_help = {
+        "subject_ref": "人物三视图：唯一外观依据。",
+        "detail_ref": "细节参考：只继承所指细节的外观，不取构图、背景与姿态。",
+    }
     base = {"enabled": case.flow in ("patch", "gen"), "error": None,
+            "refs": [], "refs_default": False,
             "sheet": None, "sheet_candidates": [], "first": None, "last": None,
-            "extract": None, "stale": False, "complete": False}
+            "extract": None, "stale": False, "complete": False,
+            "role_help": role_help}
     if case.flow not in ("patch", "gen"):
         return base
     try:
@@ -922,12 +930,31 @@ def _keyframe_state(case: case_mod.Case, details: list[dict] | None = None) -> d
         base["error"] = str(exc)
         return base
     details = details if details is not None else _asset_details(case)
+    by_id = {d["id"]: d for d in details}
+    raw_refs = list(state.refs)
+    default = False
+    if not raw_refs:
+        sheets = [d for d in details
+                  if d["kind"] == "image" and d["role"] == "subject_ref" and d.get("exists")]
+        if len(sheets) == 1:
+            raw_refs = [keyframe_mod.Ref(asset=sheets[0]["id"], role="subject_ref")]
+            default = True
+    refs = []
+    for ref in raw_refs:
+        row = by_id.get(ref.asset)
+        exists = bool(row and row.get("exists") and row.get("kind") == "image")
+        refs.append({
+            "asset": ref.asset, "role": ref.role, "note": ref.note,
+            "label": row.get("label") if row else ref.asset,
+            "url": f"/img/asset/{case.name}/{ref.asset}" if row else None,
+            "exists": exists,
+            "file": ({key: row.get(key) for key in
+                      ("name", "rel", "path", "exists", "mtime", "size", "open_url")}
+                     if row else None),
+        })
     sheets = [d for d in details
               if d["kind"] == "image" and d["role"] == "subject_ref" and d.get("exists")]
-    sheet_ids = {d["id"] for d in sheets}
-    sheet = state.sheet if state.sheet in sheet_ids else None
-    if state.sheet is None and len(sheets) == 1:
-        sheet = sheets[0]["id"]           # 唯一一张三视图：默认绑定，不写文件
+    primary = next((r for r in refs if r["role"] == "subject_ref"), None)
     first = _pick_row(state.first, {d["id"]: d for d in details
                                     if d["role"] == "first_frame"})
     last = _pick_row(state.last, {d["id"]: d for d in details
@@ -935,7 +962,9 @@ def _keyframe_state(case: case_mod.Case, details: list[dict] | None = None) -> d
     stale = bool(state.extract and case.extract_current
                  and state.extract != case.extract_current)
     base.update({
-        "sheet": sheet,
+        "refs": refs,
+        "refs_default": default,
+        "sheet": primary["asset"] if primary and primary["exists"] else None,
         "sheet_candidates": [{"id": d["id"], "label": d["label"], "path": d["path"],
                               "rel": d.get("rel"), "open_url": d.get("open_url")}
                              for d in sheets],
@@ -1136,25 +1165,29 @@ def _gates(case: case_mod.Case, extracts: list[dict],
         kf = _keyframe_state(case, details)
         raw_ok = all((cur / name).is_file()
                      for name in ("first_frame_raw.png", "last_frame_raw.png"))
+        primary = next((row for row in kf["refs"]
+                        if row["role"] == "subject_ref" and row["exists"]), None)
+        missing_refs = [row["asset"] for row in kf["refs"] if not row["exists"]]
         if not extracted:
             kf_reason = "先完成选区并运行抽取；首尾帧来自 clip 的首末帧"
         elif not raw_ok:
             kf_reason = "当前抽取版本没有两张原始帧；重新抽取一次"
         elif kf["error"]:
             kf_reason = kf["error"]
-        elif not kf["sheet"]:
-            kf_reason = ("素材库有多张人物三视图，先在首尾帧步骤选定一张"
-                         if len(kf["sheet_candidates"]) > 1
-                         else "素材库缺少人物三视图；先在素材区添加一张 subject_ref 图片")
         elif kf["stale"]:
             kf_reason = "抽取版本已更新，需要重新定稿两帧"
+        elif missing_refs:
+            kf_reason = f"参考图文件不存在：{'、'.join(missing_refs)}；重新加入或删除"
+        elif primary is None:
+            kf_reason = "参考图清单缺少人物三视图；在首尾帧页加入一张并设为主三视图"
         elif not kf["first"]:
             kf_reason = "首帧还没定稿；在首尾帧步骤生成并挑选一张"
         elif not kf["last"]:
             kf_reason = "首帧已定，接着生成并挑选尾帧"
         else:
             kf_reason = ""
-        kf_ok = bool(extracted and raw_ok and kf["complete"])
+        kf_ok = bool(extracted and raw_ok and primary is not None
+                     and not missing_refs and kf["complete"])
         steps = {            "pick": {"ok": missing is None,
                      "reason": f"case.toml 里缺 [{missing}] 段，补齐后才能抽取" if missing else "",
                      "evidence": f"草稿三段（viewport/inner/frames）都在 {case_mod.case_toml(case.name, _ctx['cases_root'])} 里"},
@@ -1264,6 +1297,19 @@ def _derived(case: case_mod.Case) -> list[dict]:
     return rows
 
 
+def _submit_entries(case: case_mod.Case, assets: list[dict]) -> list[dict]:
+    """提交清单的逐条角色：``[submit.roles]`` 覆盖候选的默认角色。"""
+    by_id = {row["id"]: row for row in assets}
+    out: list[dict] = []
+    for item in case.submit_selected or []:
+        row = by_id.get(item)
+        if row is None:
+            continue
+        role = (case.submit_roles or {}).get(item) or row["role"]
+        out.append({"asset": item, "role": role})
+    return out
+
+
 def _case_info(name: str) -> dict | None:
     try:
         case = case_mod.load(name, _ctx["cases_root"])
@@ -1295,6 +1341,9 @@ def _case_info(name: str) -> dict | None:
         "raw_frames": _raw_frames(case),
         "keyframe": _keyframe_state(case, assets),
         "submit_selected": case.submit_selected,
+        "submit_roles": case.submit_roles,
+        "submit_entries": _submit_entries(case, assets),
+        "role_help": dict(case_mod.ROLE_LABELS),
         "derived": _derived(case),
         "extracts": extracts,
         "outputs": _outputs(case),
@@ -1403,7 +1452,15 @@ def _is_16_9(width: int, height: int) -> bool:
 def _selected_candidates(case: case_mod.Case) -> list:
     ids = case.submit_selected or []
     by_id = {c.id: c for c in candidates(case, _ctx["cases_root"])}
-    return [by_id[item] for item in ids if item in by_id]
+    out = []
+    for item in ids:
+        candidate = by_id.get(item)
+        if candidate is None:
+            continue
+        role = case.submit_role(item)
+        out.append(replace(candidate, role=role)
+                   if role and role != candidate.role else candidate)
+    return out
 
 
 def _mode_ready(case: case_mod.Case, mode: str | None) -> tuple[bool, str]:
@@ -1731,8 +1788,11 @@ async def api_assets(request):
                 await asyncio.to_thread(case_mod.add_assets, name,
                                         list(zip(paths, roles, strict=True)), _ctx["cases_root"])
         elif op == "remove":
+            asset_id = str(body.get("id") or "")
             await asyncio.to_thread(case_mod.remove_asset, name,
-                                    str(body.get("id") or ""), _ctx["cases_root"])
+                                    asset_id, _ctx["cases_root"])
+            await asyncio.to_thread(keyframe_mod.remove_asset,
+                                    case.dir(_ctx["cases_root"]), asset_id)
         elif op == "role":
             await asyncio.to_thread(case_mod.set_asset_role, name,
                                     str(body.get("id") or ""),
@@ -1784,7 +1844,8 @@ async def api_submit_set(request):
     except CaseError:
         return JSONResponse({"error": "no such case"}, status_code=404)
     if request.method == "GET":
-        return JSONResponse({"selected": case.submit_selected})
+        return JSONResponse({"selected": case.submit_selected,
+                             "roles": case.submit_roles})
     body = await request.json()
     if "selected" not in body:
         return JSONResponse({"error": "缺少 selected"}, status_code=400)
@@ -1793,9 +1854,14 @@ async def api_submit_set(request):
         if not isinstance(selected, list):
             return JSONResponse({"error": "selected 必须是数组"}, status_code=400)
         selected = [str(item) for item in selected]
+    roles = body.get("roles")
+    if roles is not None:
+        if not isinstance(roles, dict):
+            return JSONResponse({"error": "roles 必须是对象"}, status_code=400)
+        roles = {str(key): str(value) for key, value in roles.items()}
     try:
         await asyncio.to_thread(case_mod.set_submit_selected, name, selected,
-                                _ctx["cases_root"])
+                                _ctx["cases_root"], roles=roles)
     except CaseError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     return JSONResponse(await asyncio.to_thread(_info_with_generation, name))
@@ -1840,40 +1906,65 @@ def _current_session(name: str) -> int:
     return int((payload.get("current") or {}).get("session_id") or 0)
 
 
-def _keyframe_inputs(case: case_mod.Case, step: str, *,
-                     require_first: bool = True) -> list[tuple[Path, str]]:
-    """图片步的固定参考图：原始帧 + 绑定的三视图（+ 尾帧的首帧定稿）。
+def _keyframe_refs(case: case_mod.Case) -> tuple[keyframe_mod.State, list[keyframe_mod.Ref]]:
+    """读 refs，并把“素材库恰好一张 subject_ref”当作未写入的默认清单。"""
+    try:
+        state = keyframe_mod.load(case.dir(_ctx["cases_root"]))
+    except keyframe_mod.KeyframeError as exc:
+        raise CaseError(str(exc)) from exc
+    refs = list(state.refs)
+    if not refs:
+        sheets = [a for a in case.assets
+                  if a.kind == "image" and a.role == "subject_ref"]
+        if len(sheets) == 1:
+            refs = [keyframe_mod.Ref(asset=sheets[0].id, role="subject_ref")]
+    return state, refs
 
-    这里不读 ``[submit] selected``：视频提交集与图片步是两份独立的输入声明。"""
-    state = _keyframe_state(case)
-    if state["error"]:
-        raise CaseError(state["error"])
-    if state["stale"]:
+
+def _keyframe_inputs(case: case_mod.Case, step: str, *,
+                     require_first: bool = True) -> list[tuple[Path, str, str]]:
+    """图片步的最终参考图顺序：原始帧、主三视图、（尾帧）首帧定稿、细节图。
+
+    这里不读 ``[submit]``：视频提交清单与图片步是两份独立的输入声明。"""
+    state, refs = _keyframe_refs(case)
+    if state.extract and case.extract_current and state.extract != case.extract_current:
         raise CaseError("抽取版本已更新，需要重新定稿两帧")
-    if not state["sheet"]:
+    primary = [ref for ref in refs if ref.role == "subject_ref"]
+    if len(primary) != 1:
         raise CaseError(
-            "素材库有多张人物三视图，先在首尾帧步骤选定一张"
-            if len(state["sheet_candidates"]) > 1
-            else "素材库缺少人物三视图；先添加一张 subject_ref 图片")
+            "参考图清单只能有一张人物三视图；先加入一张并设为主三视图"
+            if primary else
+            "参考图清单缺少人物三视图；先加入一张并设为主三视图")
     if not case.extract_current:
         raise CaseError("工作台需要 patch 的当前 extract（首尾原始帧随 extract 产出）")
     raw_dir = case.dir(_ctx["cases_root"]) / "extracts" / case.extract_current
-    sheet = case.asset(state["sheet"]).resolved(case, _ctx["cases_root"])
-    if step == "first":
-        pairs = [(raw_dir / RAW_FRAME_FILES["first_raw"], "first_frame_raw"),
-                 (sheet, "subject_ref")]
-    else:
-        first = state["first"]
-        if not first and require_first:
-            raise CaseError("先生成并挑选首帧定稿，再生成尾帧")
-        pairs = [(raw_dir / RAW_FRAME_FILES["last_raw"], "last_frame_raw"),
-                 (sheet, "subject_ref")]
-        if first:
-            first_path = case.asset(first["asset"]).resolved(case, _ctx["cases_root"])
-            pairs.append((first_path, "first_frame"))
-    for path, _role in pairs:
+    raw_key = "first_raw" if step == "first" else "last_raw"
+    raw_role = "first_frame_raw" if step == "first" else "last_frame_raw"
+    pairs: list[tuple[Path, str, str]] = [
+        (raw_dir / RAW_FRAME_FILES[raw_key], raw_role, "")]
+
+    def resolved(ref: keyframe_mod.Ref) -> Path:
+        asset = case.asset(ref.asset)
+        if asset.kind != "image":
+            raise CaseError(f"图片步参考图必须是图片：{ref.asset}")
+        path = asset.resolved(case, _ctx["cases_root"])
         if not path.is_file():
             raise CaseError(f"参考图不存在：{path}")
+        return path
+
+    pairs.append((resolved(primary[0]), "subject_ref", ""))
+    if step == "last":
+        first = state.first
+        if not first and require_first:
+            raise CaseError("先生成并挑选首帧定稿，再生成尾帧")
+        if first:
+            first_path = case.asset(first.asset).resolved(case, _ctx["cases_root"])
+            if not first_path.is_file():
+                raise CaseError(f"首帧定稿不存在：{first_path}")
+            pairs.append((first_path, "first_frame", ""))
+    for ref in refs:
+        if ref.role == "detail_ref":
+            pairs.append((resolved(ref), "detail_ref", ref.note))
     return pairs
 
 
@@ -1893,8 +1984,9 @@ def _keyframe_argv(name: str, body: dict) -> list[str]:
             "--session-id", str(session),
             "--ratio", _keyframe_ratio(case),
             "--workdir", str(_workdir())]
-    for path, role in pairs:
-        argv += ["--image", str(path), "--image-role", role]
+    for path, role, note in pairs:
+        argv += ["--image", str(path), "--image-role", role,
+                 "--image-note", note]
     if body.get("model_id") is not None:
         argv += ["--model-id", str(body["model_id"])]
     if body.get("resolution"):
@@ -1928,8 +2020,8 @@ def _keyframe_prompt(name: str, step: str) -> dict:
             "--template", KEYFRAME_TEMPLATES[step],
             "--vars-file", KEYFRAME_VARS,
             "--workdir", str(_workdir())]
-    for _path, role in pairs:
-        argv += ["--image-role", role]
+    for _path, role, note in pairs:
+        argv += ["--image-role", role, "--image-note", note]
     payload = _vrgen_json(argv)
     if "error" in payload:
         raise CaseError(payload["error"])
@@ -1994,15 +2086,51 @@ def _keyframe_save_prompt(name: str, step: str, sets: dict) -> dict:
             "--workdir", str(_workdir())]
     for key, value in sets.items():
         argv += ["--set", f"{key}={value}"]
-    for _path, role in pairs:
-        argv += ["--image-role", role]
+    for _path, role, note in pairs:
+        argv += ["--image-role", role, "--image-note", note]
     payload = _vrgen_json(argv)
     if "error" in payload:
         raise CaseError(payload["error"])
     return payload
 
 
+async def api_keyframe_refs(request):
+    """图片步参考图清单：GET 只读，PUT 全量替换。"""
+    name = request.path_params["name"]
+    try:
+        case = case_mod.load(name, _ctx["cases_root"])
+    except CaseError:
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    if request.method == "GET":
+        state = _keyframe_state(case)
+        return JSONResponse({"refs": state["refs"],
+                             "role_help": state["role_help"]})
+    body = await request.json()
+    raw = body.get("refs")
+    if not isinstance(raw, list):
+        return JSONResponse({"error": "refs 必须是数组"}, status_code=400)
+    refs: list[keyframe_mod.Ref] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            return JSONResponse({"error": f"refs[{index}] 必须是对象"},
+                                status_code=400)
+        refs.append(keyframe_mod.Ref(
+            asset=str(item.get("asset") or "").strip(),
+            role=str(item.get("role") or "subject_ref").strip(),
+            note=str(item.get("note") or "").strip()))
+    image_ids = {asset.id for asset in case.assets if asset.kind == "image"}
+    try:
+        refs = keyframe_mod.validate_refs(refs, image_ids)
+        state = keyframe_mod.load(case.dir(_ctx["cases_root"]))
+        state.refs = refs
+        keyframe_mod.save(case.dir(_ctx["cases_root"]), state)
+    except (keyframe_mod.KeyframeError, OSError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(await asyncio.to_thread(_info_with_generation, name))
+
+
 async def api_keyframe_sheet(request):
+    """旧版控制台的兼容入口：把一张 subject_ref 图片设为主三视图。"""
     name = request.path_params["name"]
     try:
         case = case_mod.load(name, _ctx["cases_root"])
@@ -2023,8 +2151,12 @@ async def api_keyframe_sheet(request):
             return JSONResponse({"error": "图片步绑定的三视图必须是 subject_ref 图片"},
                                 status_code=400)
     try:
-        state = keyframe_mod.load(case.dir(_ctx["cases_root"]))
-        state.sheet = asset_id or None
+        state, refs = _keyframe_refs(case)
+        refs = [ref for ref in refs
+                if ref.role != "subject_ref" and ref.asset != asset_id]
+        if asset_id:
+            refs.insert(0, keyframe_mod.Ref(asset=asset_id, role="subject_ref"))
+        state.refs = refs
         keyframe_mod.save(case.dir(_ctx["cases_root"]), state)
     except (keyframe_mod.KeyframeError, OSError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -2714,6 +2846,8 @@ routes = [
     Route("/api/case/{name}/keyframe/pick", api_keyframe_pick, methods=["POST"]),
     Route("/api/case/{name}/keyframe/sheet", api_keyframe_sheet,
           methods=["GET", "PUT"]),
+    Route("/api/case/{name}/keyframe/refs", api_keyframe_refs,
+          methods=["GET", "PUT"]),
     Route("/api/case/{name}/keyframe/prompt", api_keyframe_prompt,
           methods=["GET", "PUT"]),
     Route("/api/case/{name}/keyframe/handoff", api_keyframe_handoff,
@@ -2763,7 +2897,7 @@ class NoStoreMiddleware:
 #: 否则每次拖框都会让另一页的提示词保存撞 409。
 _REVISION_WRITES = re.compile(
     r"^/api/case/(?P<name>[^/]+)/"
-    r"(?:draft|prompt|params|assets|submit|reset-draft|keyframe/(?:prompt|sheet|pick|handoff))$"
+    r"(?:draft|prompt|params|assets|submit|reset-draft|keyframe/(?:prompt|sheet|refs|pick|handoff))$"
 )
 
 

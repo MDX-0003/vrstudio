@@ -485,7 +485,8 @@ def test_keyframe_pick_and_sheet_candidates_carry_open_url(
     _add_image("p1", tmp_path, "first", "first_frame")
     cdir = case_mod.case_dir("p1", tmp_path)
     keyframe.save(cdir, keyframe.State(
-        extract="v1", sheet="i1", first=keyframe.Pick("img-a", 1, "i2")))
+        extract="v1", refs=[keyframe.Ref("i1", "subject_ref")],
+        first=keyframe.Pick("img-a", 1, "i2")))
     info = client.get("/api/case/p1").json()
     first = info["keyframe"]["first"]
     assert first["asset"] == "i2"
@@ -1231,6 +1232,27 @@ def test_submit_set_roundtrip(client, gen_case, tmp_path):
     assert client.get("/api/case/g1/submit").json()["selected"] == ["i1", "i2"]
 
 
+def test_submit_roles_endpoint(client, patch_case, tmp_path):
+    _add_image("p1", tmp_path, "a", "subject_ref")
+    _add_image("p1", tmp_path, "b", "last_frame")
+    r = client.put("/api/case/p1/submit", json={
+        "selected": ["i1", "i2"],
+        "roles": {"i1": "subject_ref", "i2": "last_frame"}})
+    assert r.status_code == 200, r.text
+    info = r.json()
+    assert info["submit_roles"] == {"i1": "subject_ref", "i2": "last_frame"}
+    assert info["submit_entries"] == [
+        {"asset": "i1", "role": "subject_ref"},
+        {"asset": "i2", "role": "last_frame"},
+    ]
+    assert info["role_help"]["subject_ref"].startswith("主体参考")
+    # 只给 selected 时保留仍在选中的旧覆盖。
+    r = client.put("/api/case/p1/submit", json={"selected": ["i2"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["submit_roles"] == {"i2": "last_frame"}
+    assert client.get("/api/case/p1/submit").json()["roles"] == {"i2": "last_frame"}
+
+
 def test_generation_params_image_case_omits_input(client, tmp_path, monkeypatch):
     case_mod.create("g2", "gen", root=tmp_path)
     _add_image("g2", tmp_path, "first", "first_frame")
@@ -1344,10 +1366,41 @@ def test_keyframe_run_queues_image_argv(client, patch_case, tmp_path, monkeypatc
     assert argv[argv.index("--session-id") + 1] == "123"
     assert argv.count("--image") == 2
     assert argv.count("--image-role") == 2
+    assert argv.count("--image-note") == 2
     # 图片步只认原始帧 + 绑定的三视图，不读 [submit] selected。
     case_mod.set_submit_selected("p1", [], root=tmp_path)
     r = client.post("/api/case/p1/keyframe/run", json={"step": "first"})
     assert r.status_code == 200, r.text
+
+
+def test_keyframe_run_includes_detail_refs_and_notes(
+        client, patch_case, tmp_path, monkeypatch):
+    d = _mk_extract("p1", tmp_path, "v1")
+    (d / "first_frame_raw.png").write_bytes(b"first")
+    (d / "last_frame_raw.png").write_bytes(b"last")
+    case_mod.set_extract_current("p1", "v1", root=tmp_path)
+    _add_image("p1", tmp_path, "sheet", "subject_ref")
+    _add_image("p1", tmp_path, "detail", "subject_ref")
+    r = client.put("/api/case/p1/keyframe/refs", json={"refs": [
+        {"asset": "i1", "role": "subject_ref", "note": ""},
+        {"asset": "i2", "role": "detail_ref", "note": "头冠纹样"},
+    ]})
+    assert r.status_code == 200, r.text
+    captured = []
+    monkeypatch.setattr(web_app.QUEUE, "submit",
+                        lambda op, name, argv, **kwargs:
+                        captured.append((op, name, argv)))
+    monkeypatch.setattr(web_app, "_current_session", lambda name: 123)
+    r = client.post("/api/case/p1/keyframe/run", json={"step": "first"})
+    assert r.status_code == 200, r.text
+    argv = captured[0][2]
+    roles = [argv[index + 1] for index, item in enumerate(argv)
+             if item == "--image-role"]
+    notes = [argv[index + 1] for index, item in enumerate(argv)
+             if item == "--image-note"]
+    assert roles == ["first_frame_raw", "subject_ref", "detail_ref"]
+    assert notes == ["", "", "头冠纹样"]
+    assert argv.count("--image") == 3
 
 
 def test_keyframe_run_requires_project_session(client, patch_case, tmp_path, monkeypatch):
@@ -1424,6 +1477,29 @@ def _keyframe_ready(tmp_path, monkeypatch) -> str:
     return "p1"
 
 
+def test_keyframe_refs_endpoint(client, patch_case, tmp_path):
+    _add_image("p1", tmp_path, "a", "subject_ref")
+    _add_image("p1", tmp_path, "b", "subject_ref")
+    r = client.put("/api/case/p1/keyframe/refs", json={"refs": [
+        {"asset": "i1", "role": "subject_ref", "note": ""},
+        {"asset": "i2", "role": "detail_ref", "note": "袖口纹样"},
+    ]})
+    assert r.status_code == 200, r.text
+    info = r.json()
+    assert [(ref["asset"], ref["role"], ref["note"])
+            for ref in info["keyframe"]["refs"]] == [
+        ("i1", "subject_ref", ""), ("i2", "detail_ref", "袖口纹样")]
+    assert info["keyframe"]["sheet"] == "i1"
+    assert info["submit_selected"] is None
+    assert client.get("/api/case/p1/keyframe/refs").json()["refs"][1]["note"] == "袖口纹样"
+
+    r = client.put("/api/case/p1/keyframe/refs", json={"refs": [
+        {"asset": "i1", "role": "subject_ref"},
+        {"asset": "i2", "role": "subject_ref"},
+    ]})
+    assert r.status_code == 400
+
+
 def test_keyframe_sheet_switch_does_not_touch_submit(client, patch_case, tmp_path):
     _add_image("p1", tmp_path, "a", "subject_ref")
     _add_image("p1", tmp_path, "b", "subject_ref")
@@ -1457,6 +1533,7 @@ def test_keyframe_prompt_uses_vars_file(client, patch_case, tmp_path, monkeypatc
     assert argv[argv.index("--vars-file") + 1] == "keyframe-vars.toml"
     assert argv[argv.index("--template") + 1] == "keyframe-first"
     assert argv.count("--image-role") == 2
+    assert argv.count("--image-note") == 2
 
     r = client.put("/api/case/p1/keyframe/prompt",
                    json={"step": "first", "vars": {"figure": "新外观"}})
@@ -1505,7 +1582,7 @@ def test_keyframe_handoff_sets_mode_and_selection(client, patch_case, tmp_path, 
     _add_image("p1", tmp_path, "first", "first_frame")
     _add_image("p1", tmp_path, "last", "last_frame")
     keyframe.save(case_mod.case_dir("p1", tmp_path), keyframe.State(
-        extract="v1", sheet="i1",
+        extract="v1", refs=[keyframe.Ref("i1", "subject_ref")],
         first=keyframe.Pick("img-a", 1, "i2"),
         last=keyframe.Pick("img-b", 1, "i3")))
     modes = []
@@ -1522,13 +1599,15 @@ def test_keyframe_pointer_must_match_a_live_role(client, patch_case, tmp_path, m
     _add_image("p1", tmp_path, "second_sheet", "subject_ref")
     cdir = case_mod.case_dir("p1", tmp_path)
     # 指针指向不存在的素材：不自动改绑另一张三视图。
-    keyframe.save(cdir, keyframe.State(sheet="i9"))
+    keyframe.save(cdir, keyframe.State(
+        refs=[keyframe.Ref("i9", "subject_ref")]))
     info = client.get("/api/case/p1").json()
     assert info["keyframe"]["sheet"] is None
     assert len(info["keyframe"]["sheet_candidates"]) == 2
     # 指针指向的素材角色已经变了：按未定稿处理。
     keyframe.save(cdir, keyframe.State(
-        sheet="i1", first=keyframe.Pick("img-a", 1, "i1")))
+        refs=[keyframe.Ref("i1", "subject_ref")],
+        first=keyframe.Pick("img-a", 1, "i1")))
     info = client.get("/api/case/p1").json()
     assert info["keyframe"]["first"] is None
 
@@ -1543,14 +1622,14 @@ def test_keyframe_gate_states(client, patch_case, tmp_path, monkeypatch):
     _add_image("p1", tmp_path, "last", "last_frame")
     cdir = case_mod.case_dir("p1", tmp_path)
     keyframe.save(cdir, keyframe.State(
-        extract="v1", sheet="i1",
+        extract="v1", refs=[keyframe.Ref("i1", "subject_ref")],
         first=keyframe.Pick("img-a", 1, "i2"),
         last=keyframe.Pick("img-b", 1, "i3")))
     info = client.get("/api/case/p1").json()
     assert info["gates"]["keyframe"]["ok"] is True
 
     keyframe.save(cdir, keyframe.State(
-        extract="v0", sheet="i1",
+        extract="v0", refs=[keyframe.Ref("i1", "subject_ref")],
         first=keyframe.Pick("img-a", 1, "i2"),
         last=keyframe.Pick("img-b", 1, "i3")))
     info = client.get("/api/case/p1").json()

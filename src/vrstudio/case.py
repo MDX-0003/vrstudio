@@ -116,6 +116,8 @@ class Case:
     assets: list[Asset] = field(default_factory=list)
     # ── 可选提交集：候选 id 列表；None 或空列表 = 空集（没有默认集）──
     submit_selected: list[str] | None = None
+    # ── 可选：逐 id 的提交角色；缺省回退到 [[assets]] role ──
+    submit_roles: dict[str, str] | None = None
     # ── adopt 指针：vrgen 台账里被采用的轮次 ──
     adopt_round: str | None = None
 
@@ -144,6 +146,15 @@ class Case:
                 return item
         images = [a for a in self.assets if a.kind == "image"]
         return images[0] if images else None
+
+    def submit_role(self, asset_id: str) -> str | None:
+        """提交清单里的角色：先看 ``[submit.roles]``，再回退到素材角色。"""
+        if self.submit_roles and asset_id in self.submit_roles:
+            return self.submit_roles[asset_id]
+        try:
+            return self.asset(asset_id).role
+        except CaseError:
+            return None
 
 
 # ── 创建 ─────────────────────────────────────────────────────────────────
@@ -204,7 +215,7 @@ def load(name: str, root: str | Path | None = None) -> Case:
             isinstance(references, list) and all(isinstance(r, str) for r in references)):
         raise CaseError(f"{path}: [gen] reference_images 必须是字符串数组")
     assets = _parse_assets(raw.get("assets"), path)
-    selected = _parse_submit(raw.get("submit"), assets, flow, path)
+    selected, roles = _parse_submit(raw.get("submit"), assets, flow, path)
     case = Case(
         name=name, flow=flow,
         source_path=str(source.get("path", "")) or None,
@@ -213,6 +224,7 @@ def load(name: str, root: str | Path | None = None) -> Case:
         frames=raw.get("frames"), extract_current=raw.get("extract", {}).get("current"),
         assets=assets,
         submit_selected=selected,
+        submit_roles=roles,
         adopt_round=raw.get("adopt", {}).get("round"),
     )
     if flow != "patch":
@@ -244,6 +256,10 @@ def save(case: Case, root: str | Path | None = None) -> Case:
             lines.append(f"sha256 = {_s(case.sha256)}")
     if case.submit_selected is not None:
         lines += ["", "[submit]", f"selected = {_toml_list(case.submit_selected)}"]
+    if case.submit_roles:
+        lines += ["", "[submit.roles]"]
+        lines += [f"{_s(key)} = {_s(value)}"
+                  for key, value in case.submit_roles.items()]
     if case.flow == "patch":
         for section, value in (("viewport", case.viewport), ("inner", case.inner),
                                ("frames", case.frames)):
@@ -294,15 +310,22 @@ def _flow_asset_ids(flow: str) -> set[str]:
     return set()
 
 
-def _parse_submit(raw, assets: list[Asset], flow: str, path: Path) -> list[str] | None:
-    """``[submit] selected``：候选 id 列表；缺省等于空集（没有默认集）。"""
+def _parse_submit(raw, assets: list[Asset], flow: str,
+                  path: Path) -> tuple[list[str] | None, dict[str, str] | None]:
+    """``[submit] selected`` 与可选的 ``[submit.roles]``。
+
+    roles 用 id 做键，只能引用 selected 里的候选；缺省时由调用方回退到
+    ``[[assets]] role``，旧 case 不需要迁移。
+    """
     if raw is None:
-        return None
+        return None, None
     if not isinstance(raw, dict):
         raise CaseError(f"{path}: [submit] 必须是表")
     selected = raw.get("selected")
     if selected is None:
-        return None
+        if raw.get("roles") is not None:
+            raise CaseError(f"{path}: [submit.roles] 需要同时有 [submit] selected")
+        return None, None
     if not isinstance(selected, list) or not all(isinstance(item, str) for item in selected):
         raise CaseError(f"{path}: [submit] selected 必须是字符串数组")
     if len(set(selected)) != len(selected):
@@ -311,7 +334,25 @@ def _parse_submit(raw, assets: list[Asset], flow: str, path: Path) -> list[str] 
     unknown = sorted(set(selected) - known)
     if unknown:
         raise CaseError(f"{path}: [submit] selected 引用了不存在的候选：{unknown}")
-    return list(selected)
+    selected = list(selected)
+    roles_raw = raw.get("roles")
+    if roles_raw is None:
+        return selected, None
+    if not isinstance(roles_raw, dict):
+        raise CaseError(f"{path}: [submit.roles] 必须是表")
+    roles: dict[str, str] = {}
+    for key, value in roles_raw.items():
+        asset_id, role = str(key), str(value)
+        if asset_id not in selected:
+            raise CaseError(
+                f"{path}: [submit.roles] 的 {asset_id!r} 不在 [submit] selected 里")
+        if role not in ROLES:
+            raise CaseError(f"{path}: [submit.roles] 的 {asset_id!r} 角色 {role!r} 不合约")
+        if role in RESERVED_ROLES:
+            raise CaseError(
+                f"{path}: [submit.roles] 的 {asset_id!r} 使用了保留角色 {role!r}")
+        roles[asset_id] = role
+    return selected, roles or None
 
 
 def _validate_asset(asset: Asset, path: Path) -> None:
@@ -436,6 +477,10 @@ def remove_asset(name: str, asset_id: str, root: str | Path | None = None) -> Ca
     if case.submit_selected is not None:
         case.submit_selected = [item for item in case.submit_selected
                                 if item != asset_id]
+    if case.submit_roles:
+        case.submit_roles.pop(asset_id, None)
+        if not case.submit_roles:
+            case.submit_roles = None
     return save(case, root)
 
 
@@ -447,6 +492,10 @@ def set_asset_role(name: str, asset_id: str, role: str,
     if role in RESERVED_ROLES:
         raise CaseError(f"角色 {role} 由流程产物或关键帧工作台提供，不能给文件素材指定")
     case.asset(asset_id).role = role
+    if case.submit_selected and asset_id in case.submit_selected:
+        roles = dict(case.submit_roles or {})
+        roles[asset_id] = role
+        case.submit_roles = roles
     return save(case, root)
 
 
@@ -493,20 +542,44 @@ def set_adopt(name: str, round_key: str, root: str | Path | None = None) -> Case
 
 
 def set_submit_selected(name: str, selected: list[str] | None,
-                        root: str | Path | None = None) -> Case:
-    """写 ``[submit] selected``；``None`` 清除该段，等同于空集。"""
+                        root: str | Path | None = None, *,
+                        roles: dict[str, str] | None = None) -> Case:
+    """写 ``[submit] selected`` 与可选的 ``[submit.roles]``；``None`` 清除两段。
+
+    只传 ``selected`` 的旧调用方保留仍在选中的旧角色覆盖；新 id 没有覆盖时
+    回退到 ``[[assets]] role``。``roles`` 给定时只接受 selected 里的 id。
+    """
     case = load(name, root)
-    if selected is not None:
-        if not all(isinstance(item, str) for item in selected):
-            raise CaseError("submit selected 必须是字符串数组")
-        if len(set(selected)) != len(selected):
-            raise CaseError("submit selected 有重复 id")
-        known = {asset.id for asset in case.assets} | _flow_asset_ids(case.flow)
-        unknown = sorted(set(selected) - known)
-        if unknown:
-            raise CaseError(f"submit selected 引用了不存在的候选：{unknown}")
-        selected = list(selected)
+    if selected is None:
+        case.submit_selected = None
+        case.submit_roles = None
+        return save(case, root)
+    if not all(isinstance(item, str) for item in selected):
+        raise CaseError("submit selected 必须是字符串数组")
+    if len(set(selected)) != len(selected):
+        raise CaseError("submit selected 有重复 id")
+    known = {asset.id for asset in case.assets} | _flow_asset_ids(case.flow)
+    unknown = sorted(set(selected) - known)
+    if unknown:
+        raise CaseError(f"submit selected 引用了不存在的候选：{unknown}")
+    selected = list(selected)
+    if roles is None:
+        current = case.submit_roles or {}
+        roles = {item: current[item] for item in selected if item in current} or None
+    else:
+        clean: dict[str, str] = {}
+        for key, value in roles.items():
+            asset_id, role = str(key), str(value)
+            if asset_id not in selected:
+                raise CaseError(f"submit roles 的 {asset_id!r} 不在 selected 里")
+            if role not in ROLES:
+                raise CaseError(f"submit roles 的 {asset_id!r} 角色 {role!r} 不合约")
+            if role in RESERVED_ROLES:
+                raise CaseError(f"submit roles 的 {asset_id!r} 使用了保留角色 {role!r}")
+            clean[asset_id] = role
+        roles = clean or None
     case.submit_selected = selected
+    case.submit_roles = roles
     return save(case, root)
 
 

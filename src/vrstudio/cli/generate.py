@@ -22,7 +22,7 @@ import os
 import re
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import typer
@@ -316,7 +316,12 @@ def assemble(case: case_mod.Case, root: str | Path | None = None,
     unknown = [item for item in chosen_ids if item not in by_id]
     if unknown:
         raise GenError(f"提交集引用了不存在的候选：{unknown}；请重新勾选")
-    chosen = [by_id[item] for item in chosen_ids]
+    chosen: list[Candidate] = []
+    for item in chosen_ids:
+        candidate = by_id[item]
+        role = case.submit_role(item)
+        chosen.append(replace(candidate, role=role)
+                      if role and role != candidate.role else candidate)
 
     if mode == "firstLastFrame":
         firsts = [c for c in chosen if c.role == "first_frame"]

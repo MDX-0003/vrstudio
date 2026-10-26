@@ -196,6 +196,20 @@ def test_assemble_gen_image_master_omits_video(tmp_path, monkeypatch):
     assert sub.canvas_size == sub.source_size == (1920, 1080)
 
 
+def test_assemble_uses_submit_role_override(tmp_path, monkeypatch):
+    first, last = _image_assets(tmp_path)
+    case_mod.create("g5", "gen", root=tmp_path)
+    case_mod.add_assets("g5", [(first, "subject_ref"), (last, "last_frame")],
+                        root=tmp_path)
+    case_mod.set_submit_selected(
+        "g5", ["i1", "i2"], root=tmp_path,
+        roles={"i1": "subject_ref", "i2": "last_frame"})
+    monkeypatch.setattr(gen, "_image_size", lambda path: (1920, 1080))
+    sub = gen.assemble(case_mod.load("g5", tmp_path), tmp_path, mode="allMediaRef")
+    assert [c.role for c in sub.refs] == ["subject_ref", "last_frame"]
+    assert [a["role"] for a in sub.payload()["assets"]] == ["subject_ref", "last_frame"]
+
+
 def test_submit_gen_image_master_uses_refs(tmp_path, monkeypatch):
     first, last = _image_assets(tmp_path)
     case_mod.create("g2", "gen", root=tmp_path)

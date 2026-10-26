@@ -271,6 +271,69 @@ def test_submit_selected_roundtrip(tmp_path, src_video):
     assert case.submit_selected == ["i2"]
 
 
+def test_submit_roles_roundtrip_and_fallback(tmp_path):
+    case_mod.create("g", "gen", root=tmp_path)
+    first = tmp_path / "first.png"
+    last = tmp_path / "last.png"
+    first.write_bytes(b"first")
+    last.write_bytes(b"last")
+    case_mod.add_assets("g", [(first, "first_frame"), (last, "last_frame")],
+                        root=tmp_path)
+    case = case_mod.set_submit_selected(
+        "g", ["i1", "i2"], root=tmp_path,
+        roles={"i1": "subject_ref"})
+    assert case.submit_roles == {"i1": "subject_ref"}
+    assert case.submit_role("i1") == "subject_ref"
+    assert case.submit_role("i2") == "last_frame"
+    text = case_mod.case_toml("g", tmp_path).read_text(encoding="utf-8")
+    assert "[submit.roles]" in text and '"i1" = "subject_ref"' in text
+    loaded = case_mod.load("g", tmp_path)
+    assert loaded.submit_roles == {"i1": "subject_ref"}
+    # 只给 selected 时保留仍在选中的旧覆盖；新 id 回退到素材角色。
+    case = case_mod.set_submit_selected("g", ["i1", "i2"], root=tmp_path)
+    assert case.submit_roles == {"i1": "subject_ref"}
+    assert case.submit_role("i2") == "last_frame"
+
+
+def test_submit_roles_reject_unknown_entries(tmp_path):
+    case_mod.create("g", "gen", root=tmp_path)
+    image = tmp_path / "x.png"
+    image.write_bytes(b"x")
+    case_mod.add_assets("g", [(image, "subject_ref")], root=tmp_path)
+    with pytest.raises(CaseError, match="不在 selected"):
+        case_mod.set_submit_selected("g", ["i1"], root=tmp_path,
+                                     roles={"i9": "subject_ref"})
+    with pytest.raises(CaseError, match="不合约"):
+        case_mod.set_submit_selected("g", ["i1"], root=tmp_path,
+                                     roles={"i1": "nope"})
+    with pytest.raises(CaseError, match="保留角色"):
+        case_mod.set_submit_selected("g", ["i1"], root=tmp_path,
+                                     roles={"i1": "mask"})
+
+
+def test_set_asset_role_syncs_selected_role(tmp_path):
+    case_mod.create("g", "gen", root=tmp_path)
+    image = tmp_path / "x.png"
+    image.write_bytes(b"x")
+    case_mod.add_assets("g", [(image, "subject_ref")], root=tmp_path)
+    case_mod.set_submit_selected("g", ["i1"], root=tmp_path)
+    case = case_mod.set_asset_role("g", "i1", "motion_ref", root=tmp_path)
+    assert case.submit_roles == {"i1": "motion_ref"}
+    assert case.submit_role("i1") == "motion_ref"
+
+
+def test_remove_asset_removes_submit_role(tmp_path):
+    case_mod.create("g", "gen", root=tmp_path)
+    image = tmp_path / "x.png"
+    image.write_bytes(b"x")
+    case_mod.add_assets("g", [(image, "subject_ref")], root=tmp_path)
+    case_mod.set_submit_selected("g", ["i1"], root=tmp_path,
+                                 roles={"i1": "subject_ref"})
+    case = case_mod.remove_asset("g", "i1", root=tmp_path)
+    assert case.submit_selected == []
+    assert case.submit_roles is None
+
+
 def test_master_image_fallback(tmp_path):
     case_mod.create("g", "gen", root=tmp_path)
     first = tmp_path / "first.png"
