@@ -10,8 +10,10 @@ pick 页的顶部播放器、服务端预览，以及对比页的左右两路都
 
 第一次访问时前端发现代理不可用就 ``POST /api/case/<case>/proxy``（可选
 ``file`` 指定成片）；本模块在后台线程跑一次 ffmpeg，完成后回调 app 刷新状态。
-文件本身已经是浏览器可直接播放的 H.264 8-bit yuv420p MP4 且不超过 4096 宽时
-写一个 ``skipped`` 侧车，前端继续用原文件，不做无意义转码。
+文件本身已经是浏览器可直接播放的 H.264 8-bit yuv420p MP4 且不超过 ``web.proxy_max_w``
+（默认 4096，可配）时写一个 ``skipped`` 侧车，前端继续用原文件，不做无意义转码。
+代理的宽度上限来自 ``web.proxy_max_w``：选区全景与对比页两路共用，改配置后
+侧车记录的 ``max_w`` 不再匹配，旧代理按新宽度自动重建。
 
 单进程假设：当前 serve 只有一个 uvicorn worker；多 worker 时同一个文件可能
 被两个进程同时构建，需要换成文件锁或队列。
@@ -29,6 +31,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .. import config as config_mod
 from ..case import Case
 from ..config import REPO_ROOT
 from ..media.ffmpeg import ffmpeg_path
@@ -38,11 +41,20 @@ from ..progress import logs_dir
 from .logging import PROXY_LOGGER
 
 PROXY_VERSION = 3
-PROXY_MAX_W = 4096
 PROXY_CRF = 22
 PROXY_PRESET = "veryfast"
 
 log = logging.getLogger(PROXY_LOGGER)
+
+
+def proxy_max_w() -> int:
+    """预览代理的宽度上限（``web.proxy_max_w``）。
+
+    每次调用都读配置：这个值是机器级取舍（远程桌面软解环境要调低），
+    改 vrstudio.toml 后无需重启 serve；侧车记录构建时的 max_w，配置变了
+    旧代理就不再是 ready，按需按新宽度重建。选区全景与对比页两路共用。
+    """
+    return int(config_mod.load().get("web.proxy_max_w", 4096))
 
 
 @dataclass
@@ -92,9 +104,14 @@ def _sha_matches(case: Case, meta: dict) -> bool:
     return not case.sha256 or meta.get("source_sha256") == case.sha256
 
 
+def _sidecar_current(meta: dict) -> bool:
+    """侧车是不是按当前配置建的：max_w 变了（或旧侧车没这个字段）就重建。"""
+    return meta.get("max_w") == proxy_max_w()
+
+
 def proxy_ready(case: Case, root=None) -> bool:
     meta = _read_sidecar(case, root)
-    if not meta or meta.get("version") != PROXY_VERSION:
+    if not meta or meta.get("version") != PROXY_VERSION or not _sidecar_current(meta):
         return False
     if meta.get("skipped") or not _sha_matches(case, meta):
         return False
@@ -108,7 +125,17 @@ def proxy_ready(case: Case, root=None) -> bool:
 def proxy_disabled(case: Case, root=None) -> bool:
     meta = _read_sidecar(case, root)
     return bool(meta and meta.get("version") == PROXY_VERSION
+                and _sidecar_current(meta)
                 and meta.get("skipped") and _sha_matches(case, meta))
+
+
+def proxy_width(case: Case, root=None) -> int | None:
+    """就绪/直连时代理（或直连的源）宽度；页面据此显示“2048 代理”这类标签。"""
+    meta = _read_sidecar(case, root)
+    if not meta or not _sha_matches(case, meta) or not _sidecar_current(meta):
+        return None
+    width = meta.get("width")
+    return int(width) if isinstance(width, int) else None
 
 
 def proxy_identity(case: Case, root=None) -> str | None:
@@ -131,17 +158,17 @@ def proxy_state(case: Case, root=None) -> str:
     return "missing"
 
 
-def _browser_safe(info, source: str) -> bool:
-    """文件本身能被 Chrome/Opera 直接解码时不需要代理。"""
+def _browser_safe(info, source: str, max_w: int) -> bool:
+    """文件本身能被 Chrome/Opera 直接解码、且不超过当前代理上限时不需要代理。"""
     return (info.codec == "h264" and info.pix_fmt == "yuv420p"
-            and info.width <= PROXY_MAX_W
+            and info.width <= max_w
             and Path(source).suffix.lower() == ".mp4")
 
 
-def _target_size(info) -> tuple[int, int]:
+def _target_size(info, max_w: int) -> tuple[int, int]:
     if info.width <= 0 or info.height <= 0:
         raise ValueError("source has no usable width/height")
-    width = min(PROXY_MAX_W, info.width)
+    width = min(max_w, info.width)
     height = round(width * info.height / info.width)
     width -= width % 2
     height -= height % 2
@@ -195,7 +222,7 @@ def _encode_proxy(source: Path, info, target: tuple[int, int], tmp: Path,
 
 def _finish_sidecar(meta: dict, made) -> dict:
     meta.update({
-        "version": PROXY_VERSION, "skipped": False,
+        "version": PROXY_VERSION, "skipped": False, "max_w": proxy_max_w(),
         "width": made.width, "height": made.height,
         "fps": made.fps, "frames": made.frames,
         "duration_s": made.duration_s, "crf": PROXY_CRF,
@@ -238,6 +265,7 @@ def file_proxy_state(case: Case, source: str | Path, root=None) -> str:
     except (OSError, ValueError):
         meta = None
     if (not meta or meta.get("version") != PROXY_VERSION
+            or not _sidecar_current(meta)
             or meta.get("source") != str(fp.source.resolve())
             or (meta.get("size"), meta.get("mtime_ns")) != identity):
         with _lock:
@@ -251,6 +279,19 @@ def file_proxy_state(case: Case, source: str | Path, root=None) -> str:
         return "ready" if fp.video.is_file() and fp.video.stat().st_size > 0 else "missing"
     except OSError:
         return "missing"
+
+
+def file_proxy_width(case: Case, source: str | Path, root=None) -> int | None:
+    """成片代理（或直连的成片）宽度；对比页标签用。"""
+    fp = file_proxy(case, source, root)
+    try:
+        meta = json.loads(fp.sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not meta or not _sidecar_current(meta):
+        return None
+    width = meta.get("width")
+    return int(width) if isinstance(width, int) else None
 
 
 def _build_key(case: Case, fp: FileProxy) -> str:
@@ -276,12 +317,14 @@ def ensure_file_proxy(case: Case, source: str | Path, root=None,
         }})
         return "failed"
 
-    if _browser_safe(info, str(fp.source)):
+    if _browser_safe(info, str(fp.source), proxy_max_w()):
         fp.sidecar.parent.mkdir(parents=True, exist_ok=True)
         fp.sidecar.write_text(json.dumps({
-            "version": PROXY_VERSION, "source": str(fp.source.resolve()),
+            "version": PROXY_VERSION, "max_w": proxy_max_w(),
+            "source": str(fp.source.resolve()),
             "size": identity[0], "mtime_ns": identity[1],
-            "skipped": True, "reason": "source is h264 8-bit yuv420p mp4 <= 4096",
+            "skipped": True,
+            "reason": f"source is h264 8-bit yuv420p mp4 <= {proxy_max_w()}",
             "width": info.width, "height": info.height,
             "fps": info.fps, "frames": info.frames,
         }, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -290,7 +333,7 @@ def ensure_file_proxy(case: Case, source: str | Path, root=None,
         return "disabled"
 
     try:
-        target = _target_size(info)
+        target = _target_size(info, proxy_max_w())
     except ValueError as exc:
         log.error("proxy.target_failed", extra={"data": {
             "event": "proxy.target_failed", "case": case.name,
@@ -386,10 +429,12 @@ def ensure_proxy(case: Case, root=None, on_done=None) -> str:
         }})
         return "failed"
 
-    if _browser_safe(info, case.source_path):
+    if _browser_safe(info, case.source_path, proxy_max_w()):
         _write_sidecar(case, root, {
-            "version": PROXY_VERSION, "source_sha256": case.sha256,
-            "skipped": True, "reason": "source is h264 8-bit yuv420p mp4 <= 4096",
+            "version": PROXY_VERSION, "max_w": proxy_max_w(),
+            "source_sha256": case.sha256,
+            "skipped": True,
+            "reason": f"source is h264 8-bit yuv420p mp4 <= {proxy_max_w()}",
             "width": info.width, "height": info.height,
             "fps": info.fps, "frames": info.frames,
         })
@@ -398,7 +443,7 @@ def ensure_proxy(case: Case, root=None, on_done=None) -> str:
         return "disabled"
 
     try:
-        target = _target_size(info)
+        target = _target_size(info, proxy_max_w())
     except ValueError as exc:
         log.error("proxy.target_failed", extra={"data": {
             "event": "proxy.target_failed", "case": case.name, "error": str(exc),

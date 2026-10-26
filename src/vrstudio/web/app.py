@@ -69,9 +69,11 @@ from .proxy import (
     ensure_proxy,
     file_proxy,
     file_proxy_state,
+    file_proxy_width,
     proxy_path,
     proxy_ready,
     proxy_state,
+    proxy_width,
 )
 from .render import PreviewStore
 from .tasks import QUEUE, vrstudio_argv
@@ -632,7 +634,8 @@ def _outputs(case: case_mod.Case) -> list[dict]:
     if case.flow != "patch":
         return [{"file": p.name, "url": f"/video/out/{case.name}/{p.name}",
                  "proxy_url": f"/video/outproxy/{case.name}/{p.name}",
-                 "proxy_state": file_proxy_state(case, p, _ctx["cases_root"])}
+                 "proxy_state": file_proxy_state(case, p, _ctx["cases_root"]),
+                 "proxy_width": file_proxy_width(case, p, _ctx["cases_root"])}
                 for p in files]
     chosen: dict[str, tuple[str, Path]] = {}
     for p in files:
@@ -650,6 +653,7 @@ def _outputs(case: case_mod.Case) -> list[dict]:
         out.append({"file": path.name, "url": f"/video/out/{case.name}/{path.name}",
                     "proxy_url": f"/video/outproxy/{case.name}/{path.name}",
                     "proxy_state": file_proxy_state(case, path, _ctx["cases_root"]),
+                    "proxy_width": file_proxy_width(case, path, _ctx["cases_root"]),
                     "version": version, "partial": partial})
     return out
 
@@ -1146,7 +1150,8 @@ def _case_info(name: str) -> dict | None:
         "fps": store.fps if store else None,
         "duration_s": store.duration_s if store else None,
         "proxy": ({"state": proxy_state(case, _ctx["cases_root"]),
-                   "url": f"/video/proxy/{case.name}"}
+                   "url": f"/video/proxy/{case.name}",
+                   "width": proxy_width(case, _ctx["cases_root"])}
                   if case.flow in ("patch", "fullredraw") and case.source_path
                   else None),
         "extract_current": case.extract_current,
@@ -2529,14 +2534,19 @@ async def api_proxy(request):
             state = await asyncio.to_thread(
                 file_proxy_state, case, target, _ctx["cases_root"])
         return JSONResponse({"state": state,
-                             "url": f"/video/outproxy/{name}/{file}"})
+                             "url": f"/video/outproxy/{name}/{file}",
+                             "width": await asyncio.to_thread(
+                                 file_proxy_width, case, target,
+                                 _ctx["cases_root"])})
     if request.method == "POST":
         state = await asyncio.to_thread(
             ensure_proxy, case, _ctx["cases_root"], _drop_store)
     else:
         state = await asyncio.to_thread(
             proxy_state, case, _ctx["cases_root"])
-    return JSONResponse({"state": state, "url": f"/video/proxy/{name}"})
+    return JSONResponse({"state": state, "url": f"/video/proxy/{name}",
+                         "width": await asyncio.to_thread(
+                             proxy_width, case, _ctx["cases_root"])})
 
 
 async def api_sources(request):

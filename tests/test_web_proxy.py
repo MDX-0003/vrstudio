@@ -42,11 +42,13 @@ def _mk_case(tmp_path, name="p1"):
     return case_mod.load(name, tmp_path), src
 
 
-def _write_sidecar(tmp_path, case, *, skipped: bool, with_file: bool):
+def _write_sidecar(tmp_path, case, *, skipped: bool, with_file: bool,
+                   max_w: int = 4096):
     directory = tmp_path / case.name / "derived" / "pick"
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "proxy.json").write_text(json.dumps({
-        "version": PROXY_VERSION, "source_sha256": case.sha256,
+        "version": PROXY_VERSION, "max_w": max_w,
+        "source_sha256": case.sha256,
         "skipped": skipped,
     }), encoding="utf-8")
     if with_file:
@@ -109,6 +111,7 @@ def test_proxy_api_and_serving(tmp_path, monkeypatch):
     posted = client.post("/api/case/p1/proxy")
     assert posted.status_code == 200
     assert posted.json()["state"] == "disabled"
+    assert posted.json()["width"] == 1920       # 直连时宽度就是源宽度
     assert client.get("/video/proxy/p1").status_code == 404
 
     _write_sidecar(tmp_path, case, skipped=False, with_file=True)
@@ -128,13 +131,15 @@ def _mk_out(tmp_path, name="v1_space.mp4", data=b"out") -> Path:
     return out
 
 
-def _write_file_proxy_sidecar(tmp_path, case, out, *, skipped=False) -> None:
+def _write_file_proxy_sidecar(tmp_path, case, out, *, skipped=False,
+                              max_w: int = 4096, width: int = 1920) -> None:
     fp = proxy_mod.file_proxy(case, out, tmp_path)
     fp.video.parent.mkdir(parents=True, exist_ok=True)
     fp.video.write_bytes(b"proxy")
     st = out.stat()
     fp.sidecar.write_text(json.dumps({
-        "version": PROXY_VERSION, "source": str(out.resolve()),
+        "version": PROXY_VERSION, "max_w": max_w, "width": width,
+        "source": str(out.resolve()),
         "size": st.st_size, "mtime_ns": st.st_mtime_ns, "skipped": skipped,
     }), encoding="utf-8")
 
@@ -192,3 +197,104 @@ def test_source_proxy_api_is_open_to_fullredraw(tmp_path):
     r = client.get("/api/case/f1/proxy")
     assert r.status_code == 200
     assert r.json()["state"] in ("missing", "building", "failed")
+
+
+# ── web.proxy_max_w：所有 4K+ 源共用的代理宽度上限（2026-10-26）────────
+
+
+def _big_info(src):
+    return VideoInfo(path=str(src), size=(8192, 4096), fps="60/1",
+                     fps_float=60.0, frames=590, pix_fmt="yuv420p",
+                     codec="h264", has_audio=False, duration_s=9.8)
+
+
+def test_proxy_max_w_default_and_validation():
+    from vrstudio import config as config_mod
+    from vrstudio.config import ConfigError
+
+    assert config_mod.load().get("web.proxy_max_w") == 4096
+    with pytest.raises(ConfigError):
+        config_mod.load(overrides=["web.proxy_max_w=100"])
+    with pytest.raises(ConfigError):
+        config_mod.load(overrides=["web.proxy_max_w=99999"])
+    with pytest.raises(ConfigError):
+        config_mod.load(overrides=['web.proxy_max_w="wide"'])
+
+
+def test_proxy_target_and_sidecar_follow_configured_max_w(tmp_path, monkeypatch):
+    """max_w 是目标宽度上限：8K 源在 1024 配置下转出 1024 宽的代理，
+    侧车记录 max_w，配置再变时据此判定重建。"""
+    case, src = _mk_case(tmp_path)
+    monkeypatch.setattr(proxy_mod, "proxy_max_w", lambda: 1024)
+    monkeypatch.setattr(proxy_mod, "probe", lambda path: _big_info(src))
+    targets = []
+
+    def fake_encode(source, info, target, tmp, log_path):
+        targets.append(target)
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_bytes(b"proxy")
+
+    monkeypatch.setattr(proxy_mod, "_encode_proxy", fake_encode)
+
+    assert ensure_proxy(case, tmp_path) == "building"
+    proxy_mod._builds[case.name].thread.join(5)
+
+    assert targets == [(1024, 512)]
+    meta = json.loads((tmp_path / "p1" / "derived" / "pick" / "proxy.json")
+                      .read_text(encoding="utf-8"))
+    assert meta["max_w"] == 1024
+    assert proxy_state(case, tmp_path) == "ready"
+    assert proxy_mod.proxy_width(case, tmp_path) is not None
+
+
+def test_config_change_invalidates_existing_proxy(tmp_path, monkeypatch):
+    """4096 建的代理在 max_w=2048 下不再是 ready（按新宽度重建）。"""
+    case, _ = _mk_case(tmp_path)
+    _write_sidecar(tmp_path, case, skipped=False, with_file=True, max_w=4096)
+    assert proxy_state(case, tmp_path) == "ready"
+
+    monkeypatch.setattr(proxy_mod, "proxy_max_w", lambda: 2048)
+    assert proxy_state(case, tmp_path) == "missing"
+
+    # 配置改回去，同一个代理又算就绪——重建判定只看 max_w 是否匹配。
+    monkeypatch.setattr(proxy_mod, "proxy_max_w", lambda: 4096)
+    assert proxy_state(case, tmp_path) == "ready"
+
+
+def test_browser_safe_follows_configured_max_w(tmp_path, monkeypatch):
+    """3840 宽的浏览器可播源：默认上限直连（disabled）；上限调到 2048 后
+    不再直连，必须转出 2048 的代理。"""
+    case, src = _mk_case(tmp_path)
+    info = VideoInfo(path=str(src), size=(3840, 1920), fps="30/1",
+                     fps_float=30.0, frames=294, pix_fmt="yuv420p",
+                     codec="h264", has_audio=False, duration_s=9.8)
+    monkeypatch.setattr(proxy_mod, "probe", lambda path: info)
+
+    assert ensure_proxy(case, tmp_path) == "disabled"      # 3840 <= 4096
+
+    monkeypatch.setattr(proxy_mod, "proxy_max_w", lambda: 2048)
+    targets = []
+
+    def fake_encode(source, info, target, tmp, log_path):
+        targets.append(target)
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_bytes(b"proxy")
+
+    monkeypatch.setattr(proxy_mod, "_encode_proxy", fake_encode)
+    # 旧的 skipped 侧车 max_w=4096，在新配置下不再有效 → 重新走构建。
+    assert ensure_proxy(case, tmp_path) == "building"
+    proxy_mod._builds[case.name].thread.join(5)
+    assert targets == [(2048, 1024)]
+    assert proxy_state(case, tmp_path) == "ready"
+
+
+def test_file_proxy_state_rejects_stale_max_w(tmp_path, monkeypatch):
+    """对比页右路的成片代理同样按 max_w 判定重建。"""
+    case, _ = _mk_case(tmp_path)
+    out = _mk_out(tmp_path)
+    _write_file_proxy_sidecar(tmp_path, case, out, max_w=4096)
+    assert proxy_mod.file_proxy_state(case, out, tmp_path) == "ready"
+    assert proxy_mod.file_proxy_width(case, out, tmp_path) == 1920
+
+    monkeypatch.setattr(proxy_mod, "proxy_max_w", lambda: 2048)
+    assert proxy_mod.file_proxy_state(case, out, tmp_path) == "missing"

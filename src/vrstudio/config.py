@@ -74,6 +74,10 @@ _FALLBACK: dict = {
         "vrgen": "vrgen",        # vrgen CLI 的可执行文件（跨仓库 CLI 契约，绝对路径最稳）
         "workdir": "vrgen_runs",  # vrgen 台账根，相对仓库根（gitignore）
     },
+    "web": {
+        "default_frontend": "next",  # next | legacy
+        "proxy_max_w": 4096,         # 预览代理宽度上限（选区全景 + 对比页两路）
+    },
     # [aigc] 段不迁 vrstudio：平台参数归 vrgen 仓库（E:\VRAIGC\vrgen），
     # 见 docs/architecture.md §2。
     "bin": {
@@ -296,4 +300,12 @@ def _validate(data: dict) -> None:
         raise ConfigError("generate.vrgen must not be empty")
     if not str(gen["workdir"]).strip():
         raise ConfigError("generate.workdir must not be empty")
+
+    web = data["web"]
+    if web["default_frontend"] not in ("next", "legacy"):
+        raise ConfigError("web.default_frontend must be next | legacy")
+    max_w = web["proxy_max_w"]
+    if not isinstance(max_w, int) or isinstance(max_w, bool) or not 256 <= max_w <= 8192:
+        raise ConfigError(
+            f"web.proxy_max_w must be an int in [256, 8192], got {max_w!r}")
 
