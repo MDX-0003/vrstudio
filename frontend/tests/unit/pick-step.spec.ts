@@ -27,6 +27,11 @@ const ButtonStub = defineComponent({
   template: '<button type="button"><slot /></button>',
 })
 
+const LinkStub = defineComponent({
+  props: { href: String, target: String },
+  template: '<a :href="href" :target="target"><slot /></a>',
+})
+
 const SliderStub = defineComponent({
   name: 'ElSliderStub',
   props: { modelValue: { type: Number, default: 0 }, min: Number, max: Number, step: Number },
@@ -39,6 +44,7 @@ const SliderStub = defineComponent({
 
 const stubs = {
   'el-button': ButtonStub,
+  'el-link': LinkStub,
   'el-select': true,
   'el-option': true,
   'el-input-number': true,
@@ -56,6 +62,15 @@ function info(): CaseInfo {
     fps: 30,
     frame_count: 8,
     source_url: '/video/source/p1',
+    source_file: {
+      name: 'src.mp4',
+      path: 'E:/repo/sources/src.mp4',
+      rel: 'sources/src.mp4',
+      exists: true,
+      mtime: null,
+      size: 4096,
+      open_url: '/file?root=sources&p=src.mp4',
+    },
     previews: {},
     viewport_footprint: [],
     viewport_options: [],
@@ -87,6 +102,19 @@ async function mountStep() {
 afterEach(() => {
   localStorage.removeItem('vr.pickNudgeDegPerSec')
   vi.useRealTimers()
+})
+
+describe('PickStep 源片文件行', () => {
+  it('shows the source file with name, path and an open link', async () => {
+    const wrapper = await mountStep()
+    const row = wrapper.find('.source-file')
+    expect(row.text()).toContain('src.mp4')
+    expect(row.text()).toContain('sources/src.mp4')
+    const link = row.find('a')
+    expect(link.attributes('href')).toBe('/file?root=sources&p=src.mp4')
+    expect(link.text()).toContain('播放')
+    wrapper.unmount()
+  })
 })
 
 describe('PickStep 微调速度滑块（2026-10-26 新增）', () => {

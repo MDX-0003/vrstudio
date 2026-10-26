@@ -316,6 +316,10 @@ def test_media_extract_route_is_retired(client, patch_case):
     assert client.get(f"/media/extract/{patch_case}/v1/clip.mp4").status_code == 404
 
 
+def test_video_out_route_is_retired(client, patch_case):
+    assert client.get(f"/video/out/{patch_case}/x.mp4").status_code == 404
+
+
 def _file_roots(tmp_path, monkeypatch):
     """三个白名单根都落在 tmp_path 下，避免依赖仓库内数据。"""
     sources = tmp_path / "sources"

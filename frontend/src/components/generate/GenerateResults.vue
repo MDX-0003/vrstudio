@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { VideoPlay } from '@element-plus/icons-vue'
+import FileRow from '@/components/common/FileRow.vue'
 import { taskStatusMeta } from '@/constants/taskStatus'
 import { roundResultText, roundResultType } from '@/utils/rounds'
 import type { OutputFile, RoundSummary } from '@/types/case-info'
@@ -109,6 +110,10 @@ function formatRoundTime(value: string): string {
           <el-tag size="small" effect="light" :type="roundResultType(round)">
             {{ roundResultText(round) }}
           </el-tag>
+        </div>
+        <div v-if="round.files" class="round-files">
+          <FileRow :entry="round.files.result" />
+          <FileRow :entry="round.files.run_json" />
         </div>
       </div>
     </div>
@@ -243,6 +248,13 @@ function formatRoundTime(value: string): string {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.round-files {
+  display: flex;
+  flex-direction: column;
   gap: var(--space-2);
   margin-top: var(--space-2);
 }

@@ -224,6 +224,7 @@ export interface CaseInfo {
   flow: Flow
   source_url: string
   source_path: string | null
+  source_file: FileInfo | null
   viewport: Viewport | null
   inner: Inner | null
   frames: FrameRange | null

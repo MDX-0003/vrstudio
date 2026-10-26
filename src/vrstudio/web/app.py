@@ -357,17 +357,6 @@ async def video_source(request):
     return FileResponse(str(p), media_type="video/mp4")
 
 
-async def video_out(request):
-    name = request.path_params["name"]
-    fn = request.path_params["file"]
-    if "/" in fn or "\\" in fn or ".." in fn:
-        return JSONResponse({"error": "bad name"}, status_code=400)
-    p = case_mod.case_dir(name, _ctx["cases_root"]) / "out" / fn
-    if not p.is_file():
-        return JSONResponse({"error": "not found"}, status_code=404)
-    return FileResponse(str(p), media_type="video/mp4")
-
-
 async def video_proxy(request):
     """源片代理：pick 顶部播放器与对比页左路共用（首次访问时后台生成）。"""
     try:
@@ -2712,7 +2701,6 @@ routes = [
     Route("/img/keyframe/{name}/{round}/{index}", keyframe_img),
     Route("/video/source/{name}", video_source),
     Route("/video/proxy/{name}", video_proxy),
-    Route("/video/out/{name}/{file}", video_out),
     Route("/video/outproxy/{name}/{file}", video_out_proxy),
     Route("/api/cases", api_cases, methods=["GET", "POST"]),
     Route("/api/case/{name}", api_case),

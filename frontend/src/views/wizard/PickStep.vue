@@ -13,6 +13,7 @@ import {
   setViewportSize,
 } from '@/api/workflow'
 import type { GeometryPayload } from '@/api/workflow'
+import FileRow from '@/components/common/FileRow.vue'
 import { useInnerDrag } from '@/composables/useInnerDrag'
 import type {
   CaseInfo,
@@ -356,6 +357,8 @@ onUnmounted(() => {
           <span class="mono muted">{{ frame }} / {{ maxFrame }}</span>
         </div>
 
+        <FileRow v-if="info.source_file" :entry="info.source_file" class="source-file" />
+
         <div class="meta-row">
           <span>yaw {{ yawText }}°</span>
           <span>pitch {{ pitchText }}°</span>
@@ -555,6 +558,10 @@ onUnmounted(() => {
 .frame-slider {
   flex: 1;
   min-width: 120px;
+}
+
+.source-file {
+  margin-top: var(--space-2);
 }
 
 .meta-row {
