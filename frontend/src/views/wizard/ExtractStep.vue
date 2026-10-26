@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Download, Refresh, VideoPlay } from '@element-plus/icons-vue'
 import { fetchCase, runOperation } from '@/api/case'
@@ -15,8 +15,17 @@ const { latest, start } = useCaseTasks(
   computed(() => props.caseName),
   ['extract'],
 )
-const running = ref(false)
-let startedAt = 0
+// 进行中从任务状态推导，而不是“本页是否点过按钮”：中途刷新/切页回来后
+// 按钮加载态与完成刷新都还能工作（2026-10-26 用户反馈的陈旧“文件缺失”）。
+const submitting = ref(false)
+const running = computed(() => {
+  const task = latest.value
+  return submitting.value || Boolean(
+    task && task.kind === 'extract'
+      && (task.status === 'queued' || task.status === 'running'),
+  )
+})
+const mountedAt = Date.now()
 
 const pickGate = computed(() => props.info.gates.pick)
 const extractGate = computed(() => props.info.gates.extract)
@@ -38,28 +47,31 @@ async function runExtract(): Promise<void> {
     ElMessage.warning(pickGate.value.reason || '先完成选区')
     return
   }
-  running.value = true
-  startedAt = Date.now()
+  submitting.value = true
   try {
     await runOperation(props.caseName, 'extract')
     start()
   } catch (err) {
-    running.value = false
     ElMessage.error(err instanceof Error ? err.message : '启动抽取失败')
+  } finally {
+    submitting.value = false
   }
 }
 
+// 挂载即开始轮询：任务从哪里发起（本页、别的页、重启前的旧任务）都看得到，
+// 完成后的自动刷新才有数据源。
+onMounted(() => start())
+
 watch(latest, async (task) => {
-  if (!running.value || !task || task.kind !== 'extract') return
+  if (!task || task.kind !== 'extract') return
   const created = new Date(task.created_at).getTime()
-  if (Number.isNaN(created) || created < startedAt - 5000) return
+  // 挂载之前就完成的旧任务不触发刷新：挂载时拿到的 info 已是最新。
+  if (Number.isNaN(created) || created < mountedAt - 5000) return
   if (task.status === 'done') {
-    running.value = false
     const data = await fetchCase(props.caseName)
     emit('updated', data)
     ElMessage.success('抽取完成')
   } else if (task.status === 'failed') {
-    running.value = false
     ElMessage.error(task.error || '抽取失败，原因见下方任务日志')
   }
 })

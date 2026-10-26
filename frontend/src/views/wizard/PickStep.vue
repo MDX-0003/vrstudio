@@ -156,13 +156,39 @@ async function onChangeSize(value: unknown): Promise<void> {
   }
 }
 
-function startJoystick(dyaw: number, dpitch: number): void {
+const NUDGE_STORAGE_KEY = 'vr.pickNudgeDegPerSec'
+const NUDGE_INTERVAL_MS = 100
+
+function loadNudgeSpeed(): number {
+  try {
+    const raw = Number(localStorage.getItem(NUDGE_STORAGE_KEY))
+    if (Number.isFinite(raw) && raw >= 0.2 && raw <= 5) return Math.round(raw * 10) / 10
+  } catch {
+    /* localStorage 不可用（隐私模式等）就用默认值 */
+  }
+  return 1.0
+}
+
+/** 摇杆微调速度（°/秒），页面滑块实时可调；默认 1.0 等于旧的 0.1°/100ms。 */
+const nudgeSpeed = ref(loadNudgeSpeed())
+
+watch(nudgeSpeed, (value) => {
+  try {
+    localStorage.setItem(NUDGE_STORAGE_KEY, String(value))
+  } catch {
+    /* 存不进去不影响本次会话 */
+  }
+})
+
+function startJoystick(dirYaw: number, dirPitch: number): void {
   stopJoystick()
   const tick = async (): Promise<void> => {
     if (joystickInFlight) return
     joystickInFlight = true
     try {
-      applyGeometry(await nudgeViewport(props.caseName, dyaw, dpitch))
+      const step = (nudgeSpeed.value * NUDGE_INTERVAL_MS) / 1000
+      applyGeometry(await nudgeViewport(
+        props.caseName, dirYaw * step, dirPitch * step))
     } catch {
       stopJoystick()
     } finally {
@@ -170,7 +196,7 @@ function startJoystick(dyaw: number, dpitch: number): void {
     }
   }
   void tick()
-  joystickTimer = setInterval(() => void tick(), 100)
+  joystickTimer = setInterval(() => void tick(), NUDGE_INTERVAL_MS)
 }
 
 function stopJoystick(): void {
@@ -312,7 +338,6 @@ onUnmounted(() => {
               height: `${box.h * 100}%`,
             }"
           />
-          <div class="erp-cross" :style="{ left: '50%', top: '50%' }" />
         </div>
 
         <div class="scrub">
@@ -416,7 +441,7 @@ onUnmounted(() => {
             <span />
             <button
               type="button"
-              @pointerdown="startJoystick(0, 0.1)"
+              @pointerdown="startJoystick(0, 1)"
               @pointerup="stopJoystick"
               @pointerleave="stopJoystick"
             >
@@ -425,7 +450,7 @@ onUnmounted(() => {
             <span />
             <button
               type="button"
-              @pointerdown="startJoystick(-0.1, 0)"
+              @pointerdown="startJoystick(-1, 0)"
               @pointerup="stopJoystick"
               @pointerleave="stopJoystick"
             >
@@ -434,7 +459,7 @@ onUnmounted(() => {
             <span class="joystick-dot">•</span>
             <button
               type="button"
-              @pointerdown="startJoystick(0.1, 0)"
+              @pointerdown="startJoystick(1, 0)"
               @pointerup="stopJoystick"
               @pointerleave="stopJoystick"
             >
@@ -443,7 +468,7 @@ onUnmounted(() => {
             <span />
             <button
               type="button"
-              @pointerdown="startJoystick(0, -0.1)"
+              @pointerdown="startJoystick(0, -1)"
               @pointerup="stopJoystick"
               @pointerleave="stopJoystick"
             >
@@ -451,7 +476,18 @@ onUnmounted(() => {
             </button>
             <span />
           </div>
-          <span class="muted">按住持续微调（0.1°/0.1 秒）</span>
+          <div class="nudge-row">
+            <span class="muted">按住持续微调</span>
+            <el-slider
+              v-model="nudgeSpeed"
+              class="nudge-slider"
+              :min="0.2"
+              :max="5"
+              :step="0.1"
+              :show-tooltip="false"
+            />
+            <span class="mono muted nudge-speed-value">{{ nudgeSpeed.toFixed(1) }}°/秒</span>
+          </div>
         </div>
 
         <div class="frames-row">
@@ -507,16 +543,6 @@ onUnmounted(() => {
   position: absolute;
   border: 2px solid #22c55e;
   background: rgba(34, 197, 94, 0.12);
-  pointer-events: none;
-}
-
-.erp-cross {
-  position: absolute;
-  width: 14px;
-  height: 14px;
-  transform: translate(-50%, -50%);
-  border: 1px solid rgba(255, 255, 255, 0.7);
-  border-radius: 50%;
   pointer-events: none;
 }
 
@@ -601,6 +627,25 @@ onUnmounted(() => {
   align-items: center;
   gap: var(--space-3);
   margin-top: var(--space-3);
+}
+
+.nudge-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.nudge-slider {
+  flex: 1;
+  min-width: 100px;
+  max-width: 180px;
+}
+
+.nudge-speed-value {
+  min-width: 52px;
+  text-align: right;
 }
 
 .joystick {
