@@ -317,6 +317,106 @@ def test_media_extract_serves_version_file(client, patch_case, tmp_path):
     assert client.get(f"/media/extract/{patch_case}/v1/nope.mp4").status_code == 404
 
 
+# ── /file：按根寻址的原片直开 ─────────────────────────────────────────────
+
+
+def _file_roots(tmp_path, monkeypatch):
+    """三个白名单根都落在 tmp_path 下，避免依赖仓库内数据。"""
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    runs = tmp_path / "vrgen_runs"
+    runs.mkdir()
+    monkeypatch.setattr(web_app, "sources_dir", lambda: sources)
+    monkeypatch.setattr(web_app, "_workdir", lambda: runs)
+    return sources, runs
+
+
+def test_file_route_serves_each_whitelist_root(client, tmp_path, monkeypatch):
+    sources, runs = _file_roots(tmp_path, monkeypatch)
+    case_dir = tmp_path / "c1"
+    case_dir.mkdir()
+    (case_dir / "clip.mp4").write_bytes(b"0123456789")
+    (case_dir / "clip_mask.png").write_bytes(b"\x89PNG")
+    (sources / "src.mp4").write_bytes(b"source")
+    round_dir = runs / "c1" / "r1"
+    round_dir.mkdir(parents=True)
+    (round_dir / "run.json").write_text("{}", encoding="utf-8")
+
+    mp4 = client.get("/file", params={"root": "cases", "p": "c1/clip.mp4"})
+    assert mp4.status_code == 200 and mp4.content == b"0123456789"
+    assert mp4.headers["content-type"] == "video/mp4"
+    assert mp4.headers["content-disposition"].startswith("inline")
+    assert mp4.headers["x-content-type-options"] == "nosniff"
+
+    png = client.get("/file", params={"root": "cases", "p": "c1/clip_mask.png"})
+    assert png.status_code == 200
+    assert png.headers["content-type"] == "image/png"
+
+    blob = client.get("/file", params={"root": "workdir", "p": "c1/r1/run.json"})
+    assert blob.status_code == 200
+    assert blob.headers["content-type"] == "application/json"
+
+    src = client.get("/file", params={"root": "sources", "p": "src.mp4"})
+    assert src.status_code == 200 and src.content == b"source"
+
+
+def test_file_route_supports_range(client, tmp_path, monkeypatch):
+    _file_roots(tmp_path, monkeypatch)
+    case_dir = tmp_path / "c1"
+    case_dir.mkdir()
+    (case_dir / "clip.mp4").write_bytes(b"0123456789")
+    r = client.get("/file", params={"root": "cases", "p": "c1/clip.mp4"},
+                   headers={"Range": "bytes=0-3"})
+    assert r.status_code == 206
+    assert r.content == b"0123"
+    assert r.headers["content-range"] == "bytes 0-3/10"
+
+
+@pytest.mark.parametrize("query", [
+    {"root": "cases", "p": "../outside.txt"},
+    {"root": "cases", "p": "c1"},
+    {"root": "cases", "p": "nope.mp4"},
+    {"root": "cases", "p": ""},
+    {"root": "evil", "p": "c1/clip.mp4"},
+    {"root": "", "p": "c1/clip.mp4"},
+])
+def test_file_route_rejects_bad_targets(client, tmp_path, monkeypatch, query):
+    _file_roots(tmp_path, monkeypatch)
+    case_dir = tmp_path / "c1"
+    case_dir.mkdir()
+    (case_dir / "clip.mp4").write_bytes(b"x")
+    (tmp_path.parent / "outside.txt").write_bytes(b"secret")
+    assert client.get("/file", params=query).status_code == 404
+
+
+def test_file_route_rejects_absolute_and_encoded_traversal(
+        client, tmp_path, monkeypatch):
+    _file_roots(tmp_path, monkeypatch)
+    case_dir = tmp_path / "c1"
+    case_dir.mkdir()
+    (case_dir / "clip.mp4").write_bytes(b"x")
+    (tmp_path.parent / "outside.txt").write_bytes(b"secret")
+
+    absolute = str((case_dir / "clip.mp4").resolve())
+    assert client.get("/file", params={"root": "cases", "p": absolute}).status_code == 404
+    assert client.get("/file?root=cases&p=c1%2F..%2F..%2Foutside.txt").status_code == 404
+    assert client.get("/file?root=cases&p=%2E%2E%2Foutside.txt").status_code == 404
+
+
+def test_file_route_rejects_symlink_escape(client, tmp_path, monkeypatch):
+    _file_roots(tmp_path, monkeypatch)
+    case_dir = tmp_path / "c1"
+    case_dir.mkdir()
+    outside = tmp_path.parent / "outside_link.txt"
+    outside.write_bytes(b"secret")
+    link = case_dir / "link.txt"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("本机不允许创建符号链接")
+    assert client.get("/file", params={"root": "cases", "p": "c1/link.txt"}).status_code == 404
+
+
 def test_case_meta_revision_and_conflict(client, patch_case, tmp_path):
     info = client.get(f"/api/case/{patch_case}").json()
     assert info["meta"]["revision"] == 0

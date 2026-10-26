@@ -82,6 +82,18 @@ _WEB_DIR = Path(__file__).parent
 _VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi"}
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 
+#: ``/file`` 的展示类型：覆盖 case.py 与 app.py 两侧已接受的视频/图片扩展名；
+#: 未知后缀不拒绝访问，只按下载展示。类型表不参与白名单判定。
+_FILE_MEDIA_TYPES = {
+    ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime",
+    ".webm": "video/webm", ".mkv": "video/x-matroska", ".avi": "video/x-msvideo",
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".json": "application/json",
+    ".txt": "text/plain; charset=utf-8", ".toml": "text/plain; charset=utf-8",
+    ".log": "text/plain; charset=utf-8",
+}
+
 _env = jinja2.Environment(loader=jinja2.FileSystemLoader(_WEB_DIR / "templates"),
                           autoescape=True)
 
@@ -398,6 +410,55 @@ async def video_out_proxy(request):
         return JSONResponse({"error": "proxy not ready"}, status_code=404)
     fp = file_proxy(case, p, _ctx["cases_root"])
     return FileResponse(str(fp.video), media_type="video/mp4")
+
+
+# ── 原片直开（/file）：白名单根只决定"能不能读"，类型只决定"怎么展示" ──
+
+
+def _open_roots() -> dict[str, Path]:
+    """``/file`` 的白名单根；位置判定与 open_url 生成共用这一份。"""
+    return {"cases": _root(), "sources": sources_dir(), "workdir": _workdir()}
+
+
+def _file_target(token: str, raw: str) -> Path | None:
+    """把 root + 根内相对路径解析成真实文件；任何越界都返回 None。
+
+    只认相对路径：绝对值、盘符、UNC 在归一后仍会被拒绝；解析后再做一次
+    resolve() 包含判断，兜住 symlink/junction 逃逸。
+    """
+    root = _open_roots().get(token)
+    if root is None or not raw:
+        return None
+    rel = Path(raw.replace("\\", "/"))
+    if rel.is_absolute() or rel.drive or not rel.parts:
+        return None
+    if any(part in ("..", "") for part in rel.parts):
+        return None
+    try:
+        base = root.resolve()
+        target = (base / rel).resolve()
+        if not target.is_relative_to(base) or not target.is_file():
+            return None
+    except (OSError, ValueError):
+        return None
+    return target
+
+
+async def file_open(request):
+    """``GET /file?root=<cases|sources|workdir>&p=<根内相对路径>``：只读原片。"""
+    target = _file_target(request.query_params.get("root", ""),
+                          request.query_params.get("p", ""))
+    if target is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    response = FileResponse(
+        str(target),
+        media_type=_FILE_MEDIA_TYPES.get(target.suffix.lower(),
+                                         "application/octet-stream"),
+        filename=target.name,
+        content_disposition_type="inline",
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 async def img(request):
@@ -2583,6 +2644,7 @@ routes = [
     Route("/", index),
     Route("/case/{name}", wizard),
     Route("/img/{name}/{file}", img),
+    Route("/file", file_open),
     Route("/img/asset/{name}/{file}", asset_img),
     Route("/img/keyframe/{name}/{round}/{index}", keyframe_img),
     Route("/video/source/{name}", video_source),
