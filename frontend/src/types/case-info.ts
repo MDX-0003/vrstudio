@@ -250,6 +250,5 @@ export interface CaseInfo {
   generation_params: GenerationParams
   rounds: RoundsPayload
   meta: CaseMeta
-  keyframe_queued?: boolean
   keyframe_hint?: string
 }

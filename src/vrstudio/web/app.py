@@ -2134,9 +2134,7 @@ async def api_keyframe_pick(request):
                     return JSONResponse(
                         {"error": "首帧与尾帧宽高不一致，请重新出图"}, status_code=400)
         info = await asyncio.to_thread(_keyframe_accept, name, role, round_name,
-                                       index, target,
-                                       current_user(request),
-                                       getattr(request.state, "rid", None))
+                                       index, target)
     except (CaseError, OSError, VideoIOError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     finally:
@@ -2144,21 +2142,13 @@ async def api_keyframe_pick(request):
     return JSONResponse(info)
 
 
-def _keyframe_resolution_for(path: Path) -> str:
-    """自动尾帧批次沿用首帧定稿的档位，避免默认 4K 与 2K 首帧宽高不一致。"""
-    meta = _media_meta(path, "image")
-    width = int(meta.get("width") or 0)
-    if width <= 1536:
-        return "1K"
-    if width <= 3072:
-        return "2K"
-    return "4K"
-
-
 def _keyframe_accept(name: str, role: str, round_name: str, index: int,
-                     target: Path, owner=None,
-                     request_id: str | None = None) -> dict:
-    """落素材、更新 keyframe.toml；首帧换新时清掉旧尾帧并自动排队尾帧批次。"""
+                     target: Path) -> dict:
+    """落素材、更新 keyframe.toml；首帧换新时清掉旧尾帧。
+
+    这里只写台账与素材，不提交生成批次：消耗额度的操作只能由用户点
+    「生成首帧候选 / 生成尾帧候选」发起，定稿不产生副作用。
+    """
     case = case_mod.load(name, _ctx["cases_root"])
     cdir = case.dir(_ctx["cases_root"])
     state = keyframe_mod.load(cdir)
@@ -2178,32 +2168,12 @@ def _keyframe_accept(name: str, role: str, round_name: str, index: int,
                         if x != old_last.asset]
             if selected != (updated.submit_selected or []):
                 case_mod.set_submit_selected(name, selected, _ctx["cases_root"])
-        queued, hint = False, "首帧已定稿"
-        if not same_first:
-            try:
-                payload = _keyframe_prompt(name, "last")
-                values = payload.get("vars") or {}
-                if (not str(values.get("figure") or "").strip()
-                        or not str(values.get("pose_last") or "").strip()):
-                    hint = ("首帧已定稿；尾帧提示词还缺人物外观或尾帧姿态，"
-                            "补齐后点「生成尾帧候选」")
-                else:
-                    first_asset = updated.asset(new_id)
-                    resolution = _keyframe_resolution_for(
-                        first_asset.resolved(updated, _ctx["cases_root"]))
-                    argv = _keyframe_argv(
-                        name, {"step": "last", "resolution": resolution})
-                    QUEUE.submit("keyframe", name, argv, owner=owner,
-                                 request_id=request_id)
-                    queued, hint = True, "首帧已定稿；尾帧已自动开始生成"
-            except CaseError as exc:
-                hint = f"首帧已定稿；尾帧没有自动开始：{exc}"
+        hint = "首帧已定稿；尾帧不会自动生成，点「生成尾帧候选」提交"
     else:
         state.last = keyframe_mod.Pick(round_name, index, new_id)
         keyframe_mod.save(cdir, state)
-        queued, hint = False, "尾帧已定稿"
+        hint = "尾帧已定稿"
     info = _info_with_generation(name)
-    info["keyframe_queued"] = queued
     info["keyframe_hint"] = hint
     return info
 

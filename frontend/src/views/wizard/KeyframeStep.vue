@@ -222,15 +222,13 @@ async function pick(round: KeyframeRound, index: number): Promise<void> {
     emit('updated', data)
     await loadRounds()
     if (step.value === 'first') {
-      if (data.keyframe_queued) {
-        ElMessage.success(data.keyframe_hint || '首帧已定稿；尾帧已自动开始生成')
-      } else {
-        ElMessage.info(data.keyframe_hint || '首帧已定稿；补齐尾帧提示词后生成尾帧')
-      }
+      ElMessage.success(
+        data.keyframe_hint || '首帧已定稿；尾帧不会自动生成，点「生成尾帧候选」提交',
+      )
       step.value = 'last'
       await loadPrompt('last')
     } else {
-      ElMessage.success('尾帧已定稿')
+      ElMessage.success(data.keyframe_hint || '尾帧已定稿')
     }
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : '挑选候选失败')

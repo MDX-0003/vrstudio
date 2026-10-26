@@ -1002,15 +1002,6 @@ def test_failed_task_tail_keeps_the_error_line(tmp_path):
     assert "ERROR mglc code" not in " ".join(t.tail(1))
 
 
-def test_keyframe_resolution_follows_first_asset_width(monkeypatch):
-    monkeypatch.setattr(web_app, "_media_meta", lambda path, kind: {"width": 1024})
-    assert web_app._keyframe_resolution_for(Path("a.png")) == "1K"
-    monkeypatch.setattr(web_app, "_media_meta", lambda path, kind: {"width": 2048})
-    assert web_app._keyframe_resolution_for(Path("a.png")) == "2K"
-    monkeypatch.setattr(web_app, "_media_meta", lambda path, kind: {"width": 3840})
-    assert web_app._keyframe_resolution_for(Path("a.png")) == "4K"
-
-
 def test_task_view_includes_billing_attribution():
     task = tasks_mod.Task("submit", "x", ["echo"], billing={
         "project_id": 12, "episode_id": 3, "session_id": 456,
@@ -1474,7 +1465,9 @@ def test_keyframe_prompt_uses_vars_file(client, patch_case, tmp_path, monkeypatc
     assert "figure=新外观" in calls[-1]
 
 
-def test_keyframe_pick_first_queues_last(client, patch_case, tmp_path, monkeypatch):
+def test_keyframe_pick_first_does_not_submit_a_batch(
+        client, patch_case, tmp_path, monkeypatch):
+    """定稿只写台账；消耗额度的批次必须由用户点按钮提交（2026-10-26 决策）。"""
     _keyframe_ready(tmp_path, monkeypatch)
     run_dir = tmp_path / "runs" / "p1" / "img-abc12345"
     run_dir.mkdir(parents=True)
@@ -1490,9 +1483,6 @@ def test_keyframe_pick_first_queues_last(client, patch_case, tmp_path, monkeypat
     monkeypatch.setattr(web_app, "_capture", fake_capture)
     monkeypatch.setattr(web_app, "_media_meta",
                         lambda path, kind: {"width": 1920, "height": 1080})
-    monkeypatch.setattr(web_app, "_current_session", lambda name: 123)
-    monkeypatch.setattr(web_app, "_keyframe_prompt",
-                        lambda name, step: {"vars": {"figure": "x", "pose_last": "y"}})
     captured = []
     monkeypatch.setattr(web_app.QUEUE, "submit",
                         lambda op, name, argv, **kwargs:
@@ -1502,15 +1492,12 @@ def test_keyframe_pick_first_queues_last(client, patch_case, tmp_path, monkeypat
                     json={"round": "img-abc12345", "index": 1, "role": "first_frame"})
     assert r.status_code == 200, r.text
     info = r.json()
-    assert info["keyframe_queued"] is True
+    assert captured == []
+    assert "keyframe_queued" not in info
+    assert "不会自动生成" in info["keyframe_hint"]
     state = keyframe.load(case_mod.case_dir("p1", tmp_path))
     assert state.first is not None and state.first.round == "img-abc12345"
     assert state.first.asset == info["assets"][-1]["id"]
-    op, name, argv = captured[0]
-    assert op == "keyframe" and name == "p1"
-    assert argv[argv.index("--step") + 1] == "last"
-    images = [argv[i + 1] for i, item in enumerate(argv) if item == "--image"]
-    assert len(images) == 3 and Path(images[2]).name.startswith("i")
 
 
 def test_keyframe_handoff_sets_mode_and_selection(client, patch_case, tmp_path, monkeypatch):
