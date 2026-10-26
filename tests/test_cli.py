@@ -67,6 +67,42 @@ def test_case_new_patch_rejects_mode(tmp_path):
     assert r.exit_code == 2 and "--mode" in r.output
 
 
+def test_case_new_patch_seeds_default_draft(tmp_path, monkeypatch):
+    """CLI 与 web 抽屉共用 patch_default_draft：新 case 打开选区页就有默认草稿。"""
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"fake")
+
+    class FakeInfo:
+        width = 8000
+        height = 4000
+        frames = 590
+
+    monkeypatch.setattr(case_cli, "probe", lambda path: FakeInfo())
+    r = runner.invoke(app, ["case", "new", "p1", "--flow", "patch",
+                            "--source", str(src), "--cases-dir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    case = case_mod.load("p1", tmp_path)
+    assert case.viewport == {"yaw_deg": 0.0, "pitch_deg": 0.0, "fov_h_deg": 59.0,
+                             "width": 1920, "height": 1080}
+    assert case.frames == {"start": 0, "end": 589}
+
+
+def test_case_new_patch_probe_failure_keeps_case(tmp_path, monkeypatch):
+    """probe 失败不拦创建：只是没有默认草稿，web pick / 手改 toml 照常可用。"""
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"fake")
+
+    def boom(path):
+        raise case_cli.VideoIOError("ffprobe down")
+
+    monkeypatch.setattr(case_cli, "probe", boom)
+    r = runner.invoke(app, ["case", "new", "p2", "--flow", "patch",
+                            "--source", str(src), "--cases-dir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    case = case_mod.load("p2", tmp_path)
+    assert case.viewport is None and case.frames is None
+
+
 def test_case_new_gen_keeps_case_when_mode_save_fails(tmp_path, monkeypatch):
     def boom(name, mode):
         raise case_mod.CaseError("vrgen down")

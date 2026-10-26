@@ -82,3 +82,16 @@ def test_preview_logs_timing(patch_case, erp, monkeypatch):
     assert data["case"] == name
     for key in ("decode_ms", "reproject_ms", "png_ms", "total_ms"):
         assert key in data and data[key] >= 0
+
+
+def test_reproject_reports_missing_viewport_as_value_error(tmp_path):
+    """F1（2026-10-25 验收发现）：没有 [viewport] 的 case 请求 vp.png 曾以
+    KeyError 变成 500。/img 的错误映射接 ValueError——视口不完整要在这里
+    变成带原因的 400，而不是炸成 500。"""
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"fake")
+    case_mod.create("p1", "patch", src, root=tmp_path)
+    store = PreviewStore("p1", tmp_path)
+    assert store.case.viewport is None
+    with pytest.raises(ValueError, match="还没有可用的视口"):
+        store._reproject(np.zeros((32, 64, 3), dtype=np.uint8))

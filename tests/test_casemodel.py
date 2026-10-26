@@ -28,6 +28,23 @@ def test_create_patch_pins_sha256(tmp_path, src_video):
     assert back.viewport is None          # 新 case 草稿未定，合法
 
 
+def test_patch_default_draft_is_the_web_and_cli_seed(tmp_path, src_video):
+    draft = case_mod.patch_default_draft(8000, 590)
+    assert draft["viewport"]["width"] == 1920 and draft["viewport"]["height"] == 1080
+    assert draft["viewport"]["fov_h_deg"] == 59.0
+    assert draft["inner"] == {"x": 480, "y": 270, "width": 960, "height": 540}
+    assert draft["frames"] == {"start": 0, "end": 589}
+    # 窄源不放大：视口宽度跟随源宽，高度按 16:9 折算；帧数未知时先给一帧。
+    narrow = case_mod.patch_default_draft(1280, 0)
+    assert narrow["viewport"]["width"] == 1280 and narrow["viewport"]["height"] == 720
+    assert narrow["frames"] == {"start": 0, "end": 0}
+    # 播种后 case.toml 三段齐了，web pick 打开即有默认值。
+    case_mod.create("p1", "patch", src_video, root=tmp_path)
+    case_mod.set_draft("p1", root=tmp_path, **draft)
+    back = case_mod.load("p1", tmp_path)
+    assert back.viewport == draft["viewport"] and back.frames == draft["frames"]
+
+
 def test_create_fullredraw_hash_optional(tmp_path, src_video):
     case = case_mod.create("pano", "fullredraw", src_video, root=tmp_path)
     assert case.sha256 is None            # pad 之后源不再被读（决策：哈希可选）

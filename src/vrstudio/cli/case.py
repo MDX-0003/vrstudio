@@ -15,6 +15,7 @@ import typer
 from .. import case as case_mod
 from .. import config as config_mod
 from ..case import CaseError
+from ..media.videoio import VideoIOError, probe
 from ..procenv import decode_text, utf8_env
 
 app = typer.Typer(add_completion=False, no_args_is_help=True,
@@ -56,6 +57,20 @@ def save_mode(name: str, mode: str) -> None:
         raise CaseError(f"模式没保存：{detail}")
 
 
+def seed_patch_draft(name: str, source: Path, cases_dir: Path | None) -> None:
+    """patch 建立后写默认草稿（与 web 抽屉共用 ``case_mod.patch_default_draft``）。
+
+    probe 失败不拦创建：只是没有默认值，web pick / 手改 toml 照常可用。
+    单独成函数是为了测试可以替换它。
+    """
+    try:
+        info = probe(source)
+    except VideoIOError:
+        return
+    case_mod.set_draft(name, root=cases_dir,
+                       **case_mod.patch_default_draft(info.width, info.frames))
+
+
 @app.command("new")
 def new(
     name: str = typer.Argument(..., help="case 名（= cases/ 下的目录名 = vrgen 的 job 名）。"),
@@ -80,6 +95,8 @@ def new(
         _fail(CaseError(f"flow={flow} 必须给 --source"))
     try:
         case = case_mod.create(name, flow, source, root=cases_dir)
+        if flow == "patch":
+            seed_patch_draft(case.name, source, cases_dir)
         if flow == "gen":
             save_mode(case.name, mode)
     except CaseError as exc:
@@ -94,7 +111,8 @@ def new(
         typer.echo(f"mode     {mode} → runs/{case.name}/generation.toml")
         typer.echo("下一步：web 生成页的「素材」步骤添加视频与图片，或手改 case.toml 的 [[assets]]")
     elif flow == "patch":
-        typer.echo("下一步：web pick 选区（M4），或手填 case.toml 的 [viewport]/[inner]/[frames]")
+        typer.echo("下一步：web pick 选区（已写默认草稿），"
+                   "或手改 case.toml 的 [viewport]/[inner]/[frames]")
     else:
         typer.echo("下一步：vrstudio pad --in <源> --out <case>/seedance_input.mp4")
 

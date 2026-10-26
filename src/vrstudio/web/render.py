@@ -214,12 +214,21 @@ class PreviewStore:
 
     def _reproject(self, med: np.ndarray) -> np.ndarray:
         vp = self._vp()
-        w0, h0 = int(vp["width"]), int(vp["height"])
+        try:
+            w0, h0 = int(vp["width"]), int(vp["height"])
+            fov = float(vp["fov_h_deg"])
+            yaw = float(vp["yaw_deg"])
+            pitch = float(vp["pitch_deg"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "还没有可用的视口（case.toml 的 [viewport] 缺字段）："
+                "先在选区页点全景图并选好视口尺寸，预览才有投影参数") from exc
+        if w0 <= 0 or h0 <= 0:
+            raise ValueError("视口宽高必须是正数：case.toml 的 [viewport] width/height")
         scale = min(VIEWPORT_PREVIEW_W / w0, 1.0)
         vw, vh = int(round(w0 * scale)), int(round(h0 * scale))
-        return erp_to_rect(med, np.radians(vp["yaw_deg"]),
-                           np.radians(vp["pitch_deg"]),
-                           np.radians(vp["fov_h_deg"]), vw, vh)
+        return erp_to_rect(med, np.radians(yaw), np.radians(pitch),
+                           np.radians(fov), vw, vh)
 
     def _medium_of(self, frame: np.ndarray) -> np.ndarray:
         h, w = frame.shape[:2]

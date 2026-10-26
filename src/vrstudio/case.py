@@ -510,6 +510,22 @@ def set_submit_selected(name: str, selected: list[str] | None,
     return save(case, root)
 
 
+def patch_default_draft(source_width: int, source_frames: int) -> dict:
+    """patch 建立时的默认草稿三段（web 抽屉与 CLI ``case new`` 共用）。
+
+    视口取 16:9、宽度封顶 1920；inner 先放中央一半；帧范围铺满全片。
+    都只是起点，之后由 web pick 或手改 toml 逐项收敛。
+    """
+    vpw = min(1920, max(1, int(source_width)))
+    vph = int(vpw * 9 / 16)
+    return {
+        "viewport": {"yaw_deg": 0.0, "pitch_deg": 0.0, "fov_h_deg": 59.0,
+                     "width": vpw, "height": vph},
+        "inner": {"x": vpw // 4, "y": vph // 4, "width": vpw // 2, "height": vph // 2},
+        "frames": {"start": 0, "end": max(0, int(source_frames) - 1)},
+    }
+
+
 def set_draft(name: str, *, viewport: dict | None = None, inner: dict | None = None,
               frames: dict | None = None, root: str | Path | None = None) -> Case:
     """pick 草稿写入（web pick / CLI 都是调用方；唯一权威在 case 模型）。

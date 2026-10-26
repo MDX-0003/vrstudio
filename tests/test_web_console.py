@@ -710,6 +710,10 @@ def test_case_info_ok_for_fresh_fullredraw(client, tmp_path):
     assert r.status_code == 200
     gates = r.json()["gates"]
     assert gates["pad"]["ok"] is False and "扩充" in gates["pad"]["reason"]
+    # F5（2026-10-25 验收发现）：pad 有 ready 语义——源在就可以开始第一次扩充，
+    # 不能让「扩充画面」按钮在新 case 上永远禁用（死锁）。
+    assert gates["pad"]["ready"] is True
+    assert gates["generate"]["ready"] is False
 
 
 def test_prompt_save_passes_through_to_vrgen(client, patch_case, monkeypatch):

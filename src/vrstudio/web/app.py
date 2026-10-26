@@ -1047,8 +1047,8 @@ def _gates(case: case_mod.Case, extracts: list[dict]) -> dict:
         # evidence 只在 ok 时被页面读到，但仍须防御求值——全新 case 没有
         # manifest，无条件取 [0] 会让整个 /api/case 500（2026-10-16 验收发现）
         steps = {
-            "pad": {"ok": padded,
-                    "reason": "" if padded else "先把两侧画面扩充好，再送生成",
+            "pad": {"ok": padded, "ready": bool(case.source_path),
+                    "reason": "" if padded else "还没有扩充过画面；先扩充，生成步才可用",
                     "evidence": (f"在 {pad_manifests[0]} 检测到扩充画面的记录文件，"
                                  f"这一步已完成；再点一次按钮会重新扩充并覆盖它"
                                  ) if padded else ""},
@@ -1221,15 +1221,8 @@ async def api_cases(request):
     try:
         case = case_mod.create(name, flow, video, root=_ctx["cases_root"])
         if flow == "patch":
-            vpw = min(1920, w)
-            vph = int(vpw * 9 / 16)
             case_mod.set_draft(name, root=_ctx["cases_root"],
-                               viewport={"yaw_deg": 0.0, "pitch_deg": 0.0,
-                                         "fov_h_deg": 59.0,
-                                         "width": vpw, "height": vph},
-                               inner={"x": vpw // 4, "y": vph // 4,
-                                      "width": vpw // 2, "height": vph // 2},
-                               frames={"start": 0, "end": max(0, n - 1)})
+                               **case_mod.patch_default_draft(w, n))
     except CaseError as e:
         return JSONResponse({"error": str(e)}, status_code=409)
     if flow == "gen":
