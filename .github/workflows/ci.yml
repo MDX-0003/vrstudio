@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: sync
-        run: uv sync --extra dev
+        run: uv sync --extra dev --extra web
       - name: lint
         run: uv run ruff check .
       - name: test
