@@ -16,6 +16,7 @@ import type { KeyframeRound } from '@/api/keyframe'
 import { useCaseTasks } from '@/composables/useCaseTasks'
 import VariableCard from '@/components/prompt/VariableCard.vue'
 import FileOpenLink from '@/components/common/FileOpenLink.vue'
+import KeyframeRoundBlock from '@/components/keyframe/KeyframeRoundBlock.vue'
 import AssetUploadDialog from '@/components/upload/AssetUploadDialog.vue'
 import { KEYFRAME_MAX_CANDIDATES, KEYFRAME_RESOLUTIONS } from '@/constants/keyframe'
 import { taskStatusMeta } from '@/constants/taskStatus'
@@ -44,6 +45,7 @@ const sheetSaving = ref(false)
 const sheetOpen = ref(false)
 const uploadOpen = ref(false)
 const taskOpen = ref(false)
+const olderOpen = ref(false)
 const modelId = ref<number | null>(null)
 const resolution = ref('2K')
 const num = ref(4)
@@ -65,9 +67,25 @@ const rawLast = computed(() => props.info.raw_frames.find((item) => item.role ==
 const firstPick = computed(() => keyframe.value.first)
 const lastPick = computed(() => keyframe.value.last)
 const stepPick = computed(() => (step.value === 'first' ? firstPick.value : lastPick.value))
-const stepRounds = computed(() =>
-  rounds.value.filter((round) => round.step === step.value).slice(0, 8),
-)
+const stepRounds = computed(() => rounds.value.filter((round) => round.step === step.value))
+const recentRounds = computed(() => stepRounds.value.slice(0, 8))
+const pinnedRound = computed(() => {
+  const pick = stepPick.value
+  if (!pick) return null
+  return stepRounds.value.find((round) => round.round === pick.round) ?? null
+})
+// 常显：最新一批，加上当前定稿所在的那一批（它可能不是最新）。
+const shownRounds = computed(() => {
+  const head = recentRounds.value.slice(0, 1)
+  const pinned = pinnedRound.value
+  return pinned && !head.some((round) => round.round === pinned.round)
+    ? [...head, pinned]
+    : head
+})
+const olderRounds = computed(() => {
+  const shown = new Set(shownRounds.value.map((round) => round.round))
+  return recentRounds.value.filter((round) => !shown.has(round.round))
+})
 const canRun = computed(() => {
   if (!ready.value?.ready) return false
   if (step.value === 'last' && !firstPick.value) return false
@@ -115,9 +133,9 @@ function pickedUrl(pick: { asset: string } | null): string {
   return assetUrl(pick?.asset)
 }
 
-function isPicked(round: KeyframeRound, index: number): boolean {
+function pickedIndexFor(round: KeyframeRound): number | null {
   const pick = stepPick.value
-  return Boolean(pick && pick.round === round.round && pick.index === index)
+  return pick && pick.round === round.round ? pick.index : null
 }
 
 function fileName(path: string): string {
@@ -274,6 +292,7 @@ async function handoff(): Promise<void> {
 }
 
 watch(step, (value) => {
+  olderOpen.value = false
   void loadPrompt(value)
 })
 
@@ -449,25 +468,30 @@ onUnmounted(() => {
             :image-size="72"
           />
         </div>
-        <div v-for="round in stepRounds" :key="round.round" class="round-block">
-          <div class="round-head">
-            <span class="mono">{{ round.round }}</span>
-            <el-tag size="small" effect="light">{{ round.stage || '未知阶段' }}</el-tag>
-          </div>
-          <div class="candidate-grid">
-            <div v-for="item in round.results" :key="item.index" class="candidate-wrap">
-              <button
-                type="button"
-                class="candidate-card"
-                :class="{ picked: isPicked(round, item.index) }"
-                :disabled="Boolean(picking)"
-                @click="pick(round, item.index)"
-              >
-                <img :src="item.url" :alt="`候选 ${item.index}`" />
-                <span v-if="isPicked(round, item.index)" class="picked-mark">已定稿</span>
-              </button>
-              <FileOpenLink :file="item" label="打开候选原图" class="card-open" />
-            </div>
+        <div class="round-list">
+          <KeyframeRoundBlock
+            v-for="round in shownRounds"
+            :key="round.round"
+            :round="round"
+            :picked-index="pickedIndexFor(round)"
+            :disabled="Boolean(picking)"
+            @pick="(index) => pick(round, index)"
+          />
+        </div>
+
+        <div v-if="olderRounds.length" class="older-batches">
+          <el-button link type="primary" @click="olderOpen = !olderOpen">
+            {{ olderOpen ? '收起更早的批次' : `更早的批次（${olderRounds.length}）` }}
+          </el-button>
+          <div v-if="olderOpen" class="round-list older-list">
+            <KeyframeRoundBlock
+              v-for="round in olderRounds"
+              :key="round.round"
+              :round="round"
+              :picked-index="pickedIndexFor(round)"
+              :disabled="Boolean(picking)"
+              @pick="(index) => pick(round, index)"
+            />
           </div>
         </div>
 
@@ -718,64 +742,18 @@ onUnmounted(() => {
   gap: var(--space-2);
 }
 
-.round-block + .round-block {
+.round-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.older-batches {
   margin-top: var(--space-3);
 }
 
-.round-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  margin-bottom: var(--space-2);
-  font-size: var(--text-sm);
-}
-
-.candidate-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--space-2);
-}
-
-.candidate-wrap {
-  position: relative;
-}
-
-.candidate-card {
-  position: relative;
-  width: 100%;
-  padding: 0;
-  overflow: hidden;
-  border: 2px solid transparent;
-  border-radius: var(--radius-md);
-  background: var(--color-video-bg);
-  cursor: pointer;
-}
-
-.candidate-card img {
-  display: block;
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  object-fit: cover;
-}
-
-.candidate-card:hover {
-  border-color: var(--color-primary);
-}
-
-.candidate-card.picked {
-  border-color: var(--color-success);
-}
-
-.picked-mark {
-  position: absolute;
-  right: 6px;
-  bottom: 6px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--color-success);
-  color: #fff;
-  font-size: 11px;
+.older-list {
+  margin-top: var(--space-2);
 }
 
 .kf-task {
@@ -875,10 +853,6 @@ onUnmounted(() => {
 
 @media (max-width: 1280px) {
   .kf-slots {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .candidate-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 

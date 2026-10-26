@@ -1,7 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { defineComponent } from 'vue'
 import ElementPlus from 'element-plus'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/api/case', () => ({ fetchCase: vi.fn() }))
 
@@ -139,6 +139,33 @@ async function mountStep(data: CaseInfo = info()) {
   return wrapper
 }
 
+function round(name: string, step: string, count = 1) {
+  return {
+    round: name,
+    key: name,
+    stage: 'checked',
+    step,
+    model_id: null,
+    num: count,
+    gate: {},
+    results: Array.from({ length: count }, (_, i) => ({
+      index: i + 1,
+      url: `/img/keyframe/p1/${name}/${i + 1}`,
+      name: `result_${i + 1}.png`,
+      path: `E:/repo/vrgen_runs/p1/${name}/result_${i + 1}.png`,
+      rel: `vrgen_runs/p1/${name}/result_${i + 1}.png`,
+      exists: true,
+      mtime: null,
+      size: 10,
+      open_url: `/file?root=workdir&p=p1%2F${name}%2Fresult_${i + 1}.png`,
+    })),
+  }
+}
+
+beforeEach(() => {
+  keyframeApi.rounds = []
+})
+
 describe('KeyframeStep 四格输入', () => {
   it('links the current raw frame with name and rel path in the tooltip', async () => {
     const wrapper = await mountStep()
@@ -200,6 +227,50 @@ describe('KeyframeStep 四格输入', () => {
       .find((item) => item.text().includes('交接给视频步'))!
     expect(handoff.attributes('disabled')).toBeDefined()
     expect(wrapper.text()).toContain('尾帧未定稿')
+    wrapper.unmount()
+  })
+})
+
+describe('KeyframeStep 候选批次折叠', () => {
+  it('只展开最新一批，更早的收进折叠项', async () => {
+    keyframeApi.rounds = [
+      round('img-newest', 'first'),
+      round('img-mid', 'first'),
+      round('img-oldest', 'first'),
+    ]
+    const wrapper = await mountStep()
+
+    expect(wrapper.findAll('.candidate-card')).toHaveLength(1)
+    expect(wrapper.text()).toContain('更早的批次（2）')
+
+    const toggle = wrapper.findAll('button').find((item) => item.text().includes('更早的批次'))!
+    await toggle.trigger('click')
+    expect(wrapper.findAll('.candidate-card')).toHaveLength(3)
+    expect(wrapper.text()).toContain('收起更早的批次')
+    wrapper.unmount()
+  })
+
+  it('当前定稿在旧批次时，那一批也保持展开', async () => {
+    keyframeApi.rounds = [
+      round('img-newest', 'first'),
+      round('img-abc12345', 'first'),
+      round('img-oldest', 'first'),
+    ]
+    const wrapper = await mountStep()
+
+    // 最新一批 + 定稿所在批次（img-abc12345）常显，剩下 1 批折叠
+    expect(wrapper.findAll('.candidate-card')).toHaveLength(2)
+    expect(wrapper.findAll('.picked-mark')).toHaveLength(1)
+    expect(wrapper.text()).toContain('更早的批次（1）')
+    wrapper.unmount()
+  })
+
+  it('只有一批时不显示折叠项', async () => {
+    keyframeApi.rounds = [round('img-abc12345', 'first')]
+    const wrapper = await mountStep()
+
+    expect(wrapper.findAll('.candidate-card')).toHaveLength(1)
+    expect(wrapper.text()).not.toContain('更早的批次')
     wrapper.unmount()
   })
 })
