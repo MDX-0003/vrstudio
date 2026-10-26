@@ -116,6 +116,43 @@ describe('ExtractStep 输出文件走统一文件视图', () => {
   })
 })
 
+describe('ExtractStep 产物四格', () => {
+  it('renders one tile per product and opens each by open_url', async () => {
+    const data = info()
+    const entry = (name: string) => ({
+      name,
+      path: `E:/repo/cases/p1/extracts/v1/${name}`,
+      rel: `cases/p1/extracts/v1/${name}`,
+      exists: true,
+      mtime: null,
+      size: 2048,
+      open_url: `/file?root=cases&p=cases%2Fp1%2Fextracts%2Fv1%2F${name}`,
+    })
+    data.step_files.extract = {
+      inputs: [],
+      outputs: [
+        entry('clip.mp4'),
+        entry('clip_mask.png'),
+        entry('clip.json'),
+        entry('first_frame_raw.png'),
+        entry('last_frame_raw.png'),
+      ],
+    }
+    const wrapper = mount(ExtractStep, {
+      props: { caseName: 'p1', info: data },
+      global: { stubs },
+    })
+    await flushPromises()
+
+    expect(wrapper.findAll('.ex-prod')).toHaveLength(4)
+    expect(wrapper.find('.ex-prod:nth-child(2) img').attributes('src')).toBe(
+      '/file?root=cases&p=cases%2Fp1%2Fextracts%2Fv1%2Fclip_mask.png',
+    )
+    expect(wrapper.findAll('.ex-pair a')).toHaveLength(2)
+    wrapper.unmount()
+  })
+})
+
 describe('ExtractStep 完成刷新（2026-10-26 陈旧文件列表修复）', () => {
   it('starts task polling on mount, so externally started tasks are visible', async () => {
     tasksState.start.mockClear()

@@ -3,9 +3,9 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh, VideoPlay } from '@element-plus/icons-vue'
 import { fetchCase, runOperation } from '@/api/case'
-import FileRow from '@/components/common/FileRow.vue'
 import { useCaseTasks } from '@/composables/useCaseTasks'
 import { taskStatusMeta } from '@/constants/taskStatus'
+import { formatSize } from '@/utils/format'
 import type { CaseInfo, FileInfo } from '@/types/case-info'
 
 const props = defineProps<{ caseName: string; info: CaseInfo }>()
@@ -33,6 +33,21 @@ const pickGate = computed(() => props.info.gates.pick)
 const extractGate = computed(() => props.info.gates.extract)
 const outputs = computed<FileInfo[]>(() => props.info.step_files.extract?.outputs ?? [])
 const current = computed(() => props.info.extract_current)
+
+function output(name: string): FileInfo | undefined {
+  return outputs.value.find((file) => file.name === name)
+}
+
+const clip = computed(() => output('clip.mp4'))
+const mask = computed(() => output('clip_mask.png'))
+const sidecar = computed(() => output('clip.json'))
+const rawFirstFile = computed(() => output('first_frame_raw.png'))
+const rawLastFile = computed(() => output('last_frame_raw.png'))
+
+function sizeText(file: FileInfo | undefined): string {
+  if (!file || !file.exists) return '文件缺失'
+  return formatSize(file.size)
+}
 
 async function runExtract(): Promise<void> {
   if (running.value) return
@@ -71,136 +86,366 @@ watch(latest, async (task) => {
 </script>
 
 <template>
-  <div class="step-layout">
+  <div class="ex-page">
     <section class="panel">
-      <div class="panel-head">
-        <h2 class="panel-title">抽取</h2>
-        <el-button
-          type="primary"
-          size="small"
-          :icon="VideoPlay"
-          :loading="running"
-          :disabled="Boolean(pickGate && !pickGate.ok)"
-          @click="runExtract"
-        >
-          {{ current ? '重新抽取' : '运行抽取' }}
-        </el-button>
-      </div>
       <div class="panel-body">
-        <div class="summary-row">
-          <span
-            >当前版本：<b class="mono">{{ current || '还没有' }}</b></span
+        <div class="ex-bar">
+          <div>
+            <div class="ex-label">当前版本</div>
+            <div class="ex-value mono">{{ current || '还没有' }}</div>
+          </div>
+          <div class="ex-divider" />
+          <span class="ex-gate" :class="pickGate?.ok ? 'ok' : 'todo'">
+            {{ pickGate?.ok ? '✓ 选区已保存' : '选区未完成' }}
+          </span>
+          <span class="ex-gate" :class="extractGate?.ok ? 'ok' : 'todo'">
+            {{ extractGate?.ok ? '✓ 抽取已完成' : '抽取未完成' }}
+          </span>
+          <span class="spacer" />
+          <el-button
+            type="primary"
+            size="large"
+            :icon="VideoPlay"
+            :loading="running"
+            :disabled="Boolean(pickGate && !pickGate.ok)"
+            @click="runExtract"
           >
-          <span>选区：{{ pickGate?.ok ? '已保存' : '未完成' }}</span>
-          <span>抽取：{{ extractGate?.ok ? '已完成' : '未完成' }}</span>
+            {{ current ? '重新抽取' : '运行抽取' }}
+          </el-button>
         </div>
         <el-alert
           v-if="pickGate && !pickGate.ok"
           type="warning"
           :closable="false"
           :title="pickGate.reason || '先完成选区'"
-          class="gate-alert"
+          class="ex-alert"
         />
-        <el-alert
-          v-else-if="extractGate && !extractGate.ok"
-          type="info"
-          :closable="false"
-          :title="extractGate.reason || '点击运行抽取'"
-          class="gate-alert"
-        />
-        <p class="muted summary-note">
-          一次抽取生成 clip.mp4、clip_mask.png、clip.json 与首尾原始帧；版本目录保留旧结果，不覆盖。
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2 class="panel-title">本次产物</h2>
+        <span class="muted">版本目录保留旧结果，不覆盖</span>
+      </div>
+      <div class="panel-body">
+        <div v-if="outputs.length" class="ex-products">
+          <div class="ex-prod">
+            <a
+              v-if="clip?.exists && clip.open_url"
+              :href="clip.open_url"
+              target="_blank"
+              class="ex-prod-media ex-prod-video"
+              :aria-label="`播放 ${clip.name}`"
+            >
+              <img
+                v-if="rawFirstFile?.exists && rawFirstFile.open_url"
+                :src="rawFirstFile.open_url"
+                alt="clip.mp4 首帧"
+                class="ex-poster"
+              />
+              <span class="ex-scrim" />
+              <span class="ex-play">▶</span>
+              <span class="ex-prod-hint">播放</span>
+            </a>
+            <div v-else class="ex-prod-media ex-prod-empty">文件缺失</div>
+            <div class="ex-prod-body">
+              <div class="ex-prod-name mono">clip.mp4</div>
+              <div class="ex-prod-meta">{{ sizeText(clip) }}</div>
+            </div>
+          </div>
+
+          <div class="ex-prod">
+            <a
+              v-if="mask?.exists && mask.open_url"
+              :href="mask.open_url"
+              target="_blank"
+              class="ex-prod-media"
+              :aria-label="`打开 ${mask.name}`"
+            >
+              <img :src="mask.open_url" alt="clip_mask.png" />
+            </a>
+            <div v-else class="ex-prod-media ex-prod-empty">文件缺失</div>
+            <div class="ex-prod-body">
+              <div class="ex-prod-name mono">clip_mask.png</div>
+              <div class="ex-prod-meta">区域遮罩 · {{ sizeText(mask) }}</div>
+            </div>
+          </div>
+
+          <div class="ex-prod">
+            <a
+              v-if="sidecar?.exists && sidecar.open_url"
+              :href="sidecar.open_url"
+              target="_blank"
+              class="ex-prod-media ex-prod-json"
+              :aria-label="`打开 ${sidecar.name}`"
+            >
+              { case, viewport, frames, … }
+            </a>
+            <div v-else class="ex-prod-media ex-prod-empty">文件缺失</div>
+            <div class="ex-prod-body">
+              <div class="ex-prod-name mono">clip.json</div>
+              <div class="ex-prod-meta">片段台账 · {{ sizeText(sidecar) }}</div>
+            </div>
+          </div>
+
+          <div class="ex-prod">
+            <div v-if="rawFirstFile?.exists && rawLastFile?.exists" class="ex-pair">
+              <a
+                v-if="rawFirstFile.open_url"
+                :href="rawFirstFile.open_url"
+                target="_blank"
+                :aria-label="`打开 ${rawFirstFile.name}`"
+              >
+                <img :src="rawFirstFile.open_url" alt="首帧原始图" />
+              </a>
+              <a
+                v-if="rawLastFile.open_url"
+                :href="rawLastFile.open_url"
+                target="_blank"
+                :aria-label="`打开 ${rawLastFile.name}`"
+              >
+                <img :src="rawLastFile.open_url" alt="尾帧原始图" />
+              </a>
+            </div>
+            <div v-else class="ex-prod-media ex-prod-empty">文件缺失</div>
+            <div class="ex-prod-body">
+              <div class="ex-prod-name mono">首尾原始帧</div>
+              <div class="ex-prod-meta">png × 2 · 工作台输入底图</div>
+            </div>
+          </div>
+        </div>
+        <p v-else class="muted ex-empty-note">
+          还没有抽取结果。运行抽取会生成 clip.mp4、clip_mask.png、clip.json 与首尾原始帧。
         </p>
       </div>
     </section>
 
-    <section class="panel">
-      <div class="panel-head">
-        <h2 class="panel-title">输出文件</h2>
-        <span class="muted">{{ outputs.length }} 个</span>
-      </div>
-      <div class="panel-body file-list">
-        <div v-if="!outputs.length" class="empty">
-          <el-empty description="还没有抽取结果" :image-size="72" />
+    <div class="ex-cols">
+      <section class="panel">
+        <div class="panel-head">
+          <h2 class="panel-title">抽取版本</h2>
+          <span class="muted">{{ info.extracts.length }} 个版本</span>
         </div>
-        <FileRow v-for="file in outputs" :key="file.path" :entry="file" />
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-head">
-        <h2 class="panel-title">抽取版本</h2>
-        <span class="muted">{{ info.extracts.length }} 个版本</span>
-      </div>
-      <div class="panel-body version-list">
-        <div v-if="!info.extracts.length" class="muted">还没有可用版本。</div>
-        <div v-for="item in info.extracts" :key="item.version" class="version-row">
-          <span class="mono">{{ item.version }}</span>
-          <el-tag v-if="item.version === current" size="small" type="success" effect="light"
-            >当前</el-tag
-          >
-          <span class="muted">{{ item.has_result ? '有生成结果' : '未生成' }}</span>
-        </div>
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-head">
-        <h2 class="panel-title">抽取任务</h2>
-        <el-button link type="primary" :icon="Refresh" @click="start()">刷新</el-button>
-      </div>
-      <div class="panel-body">
-        <div v-if="!latest" class="muted">还没有抽取任务。</div>
-        <template v-else>
-          <div class="task-summary">
-            <el-tag size="small" effect="light" :type="taskStatusMeta(latest.status).type">
-              {{ taskStatusMeta(latest.status).text }}
-            </el-tag>
-            <span class="mono">{{ latest.id }}</span>
-            <span v-if="latest.queue_position" class="muted"
-              >排队第 {{ latest.queue_position }} 位</span
+        <div class="panel-body version-list">
+          <div v-if="!info.extracts.length" class="muted">还没有可用版本。</div>
+          <div v-for="item in info.extracts" :key="item.version" class="version-row">
+            <span class="mono">{{ item.version }}</span>
+            <el-tag v-if="item.version === current" size="small" type="success" effect="light"
+              >当前</el-tag
             >
+            <span class="muted">{{ item.has_result ? '有生成结果' : '未生成' }}</span>
           </div>
-          <el-alert
-            v-if="latest.error"
-            type="error"
-            :closable="false"
-            :title="latest.error"
-            class="gate-alert"
-          />
-          <pre v-if="latest.tail.length" class="task-tail">{{ latest.tail.join('\n') }}</pre>
-          <p class="muted task-note">本页只显示最近一次抽取任务；全部任务在任务中心。</p>
-        </template>
-      </div>
-    </section>
+          <p class="muted ex-note">切换版本会同时切换首尾原始帧与后续步骤的输入；旧版本不清除。</p>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2 class="panel-title">最近一次抽取任务</h2>
+          <el-button link type="primary" :icon="Refresh" @click="start()">刷新</el-button>
+        </div>
+        <div class="panel-body">
+          <div v-if="!latest" class="muted">还没有抽取任务。</div>
+          <template v-else>
+            <div class="task-summary">
+              <el-tag size="small" effect="light" :type="taskStatusMeta(latest.status).type">
+                {{ taskStatusMeta(latest.status).text }}
+              </el-tag>
+              <span class="mono">{{ latest.id }}</span>
+              <span v-if="latest.queue_position" class="muted"
+                >排队第 {{ latest.queue_position }} 位</span
+              >
+            </div>
+            <el-alert
+              v-if="latest.error"
+              type="error"
+              :closable="false"
+              :title="latest.error"
+              class="ex-alert"
+            />
+            <pre v-if="latest.tail.length" class="task-tail">{{ latest.tail.join('\n') }}</pre>
+            <p class="muted ex-note">全部任务在任务中心。</p>
+          </template>
+        </div>
+      </section>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.step-layout {
+.ex-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.ex-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.ex-label {
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+
+.ex-value {
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+
+.ex-divider {
+  width: 1px;
+  height: 32px;
+  background: var(--color-border);
+}
+
+.ex-gate {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: var(--text-xs);
+}
+
+.ex-gate.ok {
+  background: var(--color-success-soft);
+  color: var(--color-success);
+}
+
+.ex-gate.todo {
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}
+
+.ex-alert {
+  margin-top: var(--space-3);
+}
+
+.ex-products {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.ex-prod {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.ex-prod-media {
+  position: relative;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
+  text-decoration: none;
+}
+
+.ex-prod-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.ex-prod-video {
+  gap: var(--space-1);
+  background: linear-gradient(135deg, #1e3a8a, #3b82f6);
+  color: #e2e8f0;
+}
+
+.ex-poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.ex-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.35);
+}
+
+.ex-play {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: rgba(15, 23, 42, 0.45);
+  font-size: 14px;
+}
+
+.ex-prod-hint {
+  position: relative;
+  z-index: 1;
+  font-size: var(--text-xs);
+}
+
+.ex-prod-json {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.ex-prod-empty {
+  border-bottom: 1px dashed var(--color-border-strong);
+  color: var(--color-text-faint);
+  font-size: var(--text-xs);
+}
+
+.ex-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  background: var(--color-video-bg);
+}
+
+.ex-pair img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.ex-prod-body {
+  padding: var(--space-2) var(--space-3);
+}
+
+.ex-prod-name {
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.ex-prod-meta {
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ex-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
   gap: var(--space-4);
   align-items: start;
 }
 
-.summary-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-4);
-  font-size: var(--text-sm);
-}
-
-.summary-note {
-  margin: var(--space-3) 0 0;
-  font-size: var(--text-xs);
-}
-
-.gate-alert {
-  margin-top: var(--space-2);
-}
-
-.file-list,
 .version-list {
   display: flex;
   flex-direction: column;
@@ -220,13 +465,22 @@ watch(latest, async (task) => {
   border-bottom: 0;
 }
 
-.task-note {
+.ex-note {
   margin: var(--space-2) 0 0;
   font-size: var(--text-xs);
 }
 
+.ex-empty-note {
+  margin: 0;
+  font-size: var(--text-xs);
+}
+
 @media (max-width: 1280px) {
-  .step-layout {
+  .ex-products {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ex-cols {
     grid-template-columns: minmax(0, 1fr);
   }
 }
