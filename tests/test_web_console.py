@@ -495,6 +495,7 @@ def test_keyframe_pick_and_sheet_candidates_carry_open_url(
     assert first["file"]["open_url"].startswith("/file?root=cases&p=")
     sheet = info["keyframe"]["sheet_candidates"][0]
     assert sheet["open_url"].startswith("/file?root=cases&p=")
+    assert info["keyframe"]["role_help"]["detail_ref"].startswith("细节参考")
 
 
 def test_external_source_has_path_but_no_open_url(client, tmp_path):
