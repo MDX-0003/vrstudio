@@ -18,6 +18,7 @@ export interface AssetDetail {
   height: number | null
   duration: number | null
   fps: number | null
+  open_url?: string | null
 }
 
 export interface PromptPayload {
@@ -81,14 +82,18 @@ export interface GenerationParams {
   error?: string
 }
 
-export interface OutputFile {
+export interface OutputFile extends FileInfo {
   file: string
-  url: string
   proxy_url: string
   proxy_state: string
   proxy_width?: number | null
   version?: string
   partial?: boolean
+}
+
+export interface RoundFiles {
+  result: FileInfo
+  run_json: FileInfo
 }
 
 export interface RoundSummary {
@@ -100,6 +105,7 @@ export interface RoundSummary {
   result: string
   updated: string
   round_dir: string
+  files?: RoundFiles
 }
 
 export interface RoundsPayload {
@@ -148,6 +154,7 @@ export interface FileInfo {
   exists: boolean
   mtime: number | null
   size: number | null
+  open_url?: string | null
 }
 
 export interface ExtractVersion {
@@ -165,13 +172,20 @@ export interface KeyframePick {
   round: string
   index: number
   asset: string
+  file?: FileInfo | null
 }
 
 export interface KeyframeState {
   enabled: boolean
   error: string | null
   sheet: string | null
-  sheet_candidates: { id: string; label: string; path: string }[]
+  sheet_candidates: {
+    id: string
+    label: string
+    path: string
+    rel?: string | null
+    open_url?: string | null
+  }[]
   first: KeyframePick | null
   last: KeyframePick | null
   extract: string | null
@@ -183,12 +197,16 @@ export interface RawFrame {
   id: string
   role: string
   label: string
+  name: string
   path: string
+  rel: string | null
   exists: boolean
+  mtime: number | null
   width: number | null
   height: number | null
   size: number | null
   url: string
+  open_url?: string | null
 }
 
 export interface CaseMeta {

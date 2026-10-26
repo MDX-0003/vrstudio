@@ -1,4 +1,4 @@
-import type { CaseInfo, PromptPayload } from '@/types/case-info'
+import type { CaseInfo, FileInfo, PromptPayload } from '@/types/case-info'
 import { getJson, postJson, putJson } from './client'
 import { casePath } from './path'
 
@@ -10,7 +10,7 @@ export interface KeyframeRound {
   model_id: number | null
   num: number | null
   gate: Record<string, unknown>
-  results: { index: number; url: string }[]
+  results: ({ index: number; url: string } & FileInfo)[]
 }
 
 export interface KeyframeRounds {

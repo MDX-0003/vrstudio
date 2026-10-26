@@ -175,6 +175,8 @@ function toAssetRow(asset: AssetDetail, selected: Set<string>): AssetRow {
     tone: assetTone(asset),
     url: asset.url,
     exists: asset.exists,
+    rel: asset.rel,
+    open_url: asset.open_url,
   }
 }
 

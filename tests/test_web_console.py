@@ -417,6 +417,95 @@ def test_file_route_rejects_symlink_escape(client, tmp_path, monkeypatch):
     assert client.get("/file", params={"root": "cases", "p": "c1/link.txt"}).status_code == 404
 
 
+# ── file_entry：payload 侧的 open_url ────────────────────────────────────
+
+
+def test_step_file_entries_open_url_does_not_depend_on_repo_rel(
+        client, patch_case, tmp_path, monkeypatch):
+    """临时 cases 根在仓库外：rel 为 None，open_url 仍按 cases 根生成。"""
+    _file_roots(tmp_path, monkeypatch)
+    d = _mk_extract("p1", tmp_path, "v1")
+    (d / "clip.mp4").write_bytes(b"clip")
+    case_mod.set_extract_current("p1", "v1", root=tmp_path)
+    info = client.get("/api/case/p1").json()
+    clip = next(row for row in info["step_files"]["extract"]["outputs"]
+                if row["name"] == "clip.mp4")
+    assert clip["exists"] is True
+    assert clip["rel"] is None
+    assert clip["open_url"].startswith("/file?root=cases&p=")
+    assert client.get(clip["open_url"]).content == b"clip"
+
+    missing = next(row for row in info["step_files"]["extract"]["outputs"]
+                   if row["name"] == "first_frame_raw.png")
+    assert missing["exists"] is False
+    assert "open_url" not in missing
+
+
+def test_output_entry_uses_open_url_instead_of_legacy_url(
+        client, patch_case, tmp_path, monkeypatch):
+    _file_roots(tmp_path, monkeypatch)
+    out = tmp_path / "p1" / "out"
+    out.mkdir(parents=True)
+    (out / "v1_frame.mp4").write_bytes(b"out")
+    monkeypatch.setattr(web_app, "_video_frames", lambda path: 6)
+    entry = client.get("/api/case/p1").json()["outputs"][0]
+    assert entry["file"] == "v1_frame.mp4"
+    assert "url" not in entry
+    assert entry["open_url"].startswith("/file?root=cases&p=")
+    assert entry["proxy_url"].startswith("/video/outproxy/")
+
+
+def test_rounds_include_result_and_run_json_file_entries(client, tmp_path, monkeypatch):
+    runs = tmp_path / "vrgen_runs"
+    round_dir = runs / "x" / "r1"
+    round_dir.mkdir(parents=True)
+    (round_dir / "result.mp4").write_bytes(b"r")
+    (round_dir / "run.json").write_text(
+        json.dumps({"result": str(round_dir / "result.mp4")}), encoding="utf-8")
+    (runs / "x" / "r2").mkdir()
+    monkeypatch.setattr(web_app, "_workdir", lambda: runs)
+    monkeypatch.setattr(web_app.subprocess, "run", lambda *a, **k:
+                        web_app.subprocess.CompletedProcess(
+                            a[0], 0, stdout=(
+                                "  * r1 mglc checked gate=ok result=yes 2026-10-26T01:00:00Z\n"
+                                "  * r2 mglc failed gate=bad result=no 2026-10-26T02:00:00Z\n"),
+                            stderr=""))
+    files = {row["round"]: row["files"] for row in web_app._rounds("x")["rounds"]}
+    assert files["r1"]["result"]["exists"] is True
+    assert files["r1"]["result"]["open_url"].startswith("/file?root=workdir&p=")
+    assert files["r1"]["run_json"]["exists"] is True
+    assert files["r2"]["result"]["exists"] is False
+    assert "open_url" not in files["r2"]["result"]
+    assert files["r2"]["run_json"]["exists"] is False
+
+
+def test_keyframe_pick_and_sheet_candidates_carry_open_url(
+        client, patch_case, tmp_path, monkeypatch):
+    _keyframe_ready(tmp_path, monkeypatch)
+    _add_image("p1", tmp_path, "first", "first_frame")
+    cdir = case_mod.case_dir("p1", tmp_path)
+    keyframe.save(cdir, keyframe.State(
+        extract="v1", sheet="i1", first=keyframe.Pick("img-a", 1, "i2")))
+    info = client.get("/api/case/p1").json()
+    first = info["keyframe"]["first"]
+    assert first["asset"] == "i2"
+    assert first["file"]["exists"] is True
+    assert first["file"]["name"].endswith(".png")
+    assert first["file"]["open_url"].startswith("/file?root=cases&p=")
+    sheet = info["keyframe"]["sheet_candidates"][0]
+    assert sheet["open_url"].startswith("/file?root=cases&p=")
+
+
+def test_external_source_has_path_but_no_open_url(client, tmp_path):
+    src = tmp_path.parent / "external_source.mp4"
+    src.write_bytes(b"external")
+    case_mod.create("f9", "fullredraw", src, root=tmp_path)
+    info = client.get("/api/case/f9").json()
+    assert info["source_file"]["exists"] is True
+    assert info["source_file"]["rel"] is None
+    assert "open_url" not in info["source_file"]
+
+
 def test_case_meta_revision_and_conflict(client, patch_case, tmp_path):
     info = client.get(f"/api/case/{patch_case}").json()
     assert info["meta"]["revision"] == 0
@@ -1298,6 +1387,9 @@ def test_keyframe_rounds_lists_candidates(client, patch_case, tmp_path, monkeypa
     assert data["rounds"][0]["step"] == "first"
     assert data["rounds"][0]["num"] == 4
     assert [row["index"] for row in data["rounds"][0]["results"]] == [1, 2]
+    first = data["rounds"][0]["results"][0]
+    assert first["name"] == "result_1.png"
+    assert first["open_url"].startswith("/file?root=workdir&p=")
 
 
 def test_keyframe_pick_rejects_mismatched_pair(client, tmp_path, monkeypatch):

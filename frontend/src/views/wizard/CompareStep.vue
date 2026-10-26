@@ -39,7 +39,7 @@ const sourceUrl = computed(() =>
 const outputUrl = computed(() => {
   const item = selected.value
   if (!item) return ''
-  return outputProxy.value === 'ready' ? item.proxy_url : item.url
+  return outputProxy.value === 'ready' ? item.proxy_url : (item.open_url ?? '')
 })
 const timeText = computed(() => {
   const format = (value: number): string =>

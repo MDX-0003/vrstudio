@@ -22,6 +22,7 @@ import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 import cv2
 import jinja2
@@ -501,6 +502,18 @@ _ROUND_LINE = re.compile(
     r"gate=(?P<gate>\S+)\s+result=(?P<result>yes|no)\s+(?P<updated>\S+)")
 
 
+def _round_files(round_dir: Path) -> dict:
+    """轮次目录里的原始结果与 run.json；缺失也照常返回，页面标红。"""
+    run_json = round_dir / "run.json"
+    recorded = None
+    try:
+        recorded = json.loads(run_json.read_text(encoding="utf-8")).get("result")
+    except (OSError, ValueError):
+        pass
+    result = Path(recorded) if recorded else round_dir / "result.mp4"
+    return {"result": file_entry(result), "run_json": file_entry(run_json)}
+
+
 def _rounds(name: str) -> dict:
     """问 vrgen 要轮次列表（子进程，跨仓库只走 CLI 契约）。
     vrgen 不在（未装/路径未配）不炸页面——轮次区显示提示。"""
@@ -518,6 +531,7 @@ def _rounds(name: str) -> dict:
             d = m.groupdict()
             # status 只显示目录名（≠ run key）；adopt 走目录全路径最稳
             d["round_dir"] = str(_workdir() / name / d["round"])
+            d["files"] = _round_files(Path(d["round_dir"]))
             rounds.append(d)
     return {"rounds": rounds,
             "hint": "" if rounds else (r.stdout or r.stderr or "").strip()}
@@ -682,6 +696,17 @@ def _extracts(case: case_mod.Case) -> list[dict]:
     return out
 
 
+def _output_entry(case: case_mod.Case, path: Path) -> dict:
+    """成片条目：文件信息 + 预览代理状态；打开走 open_url（原片）。"""
+    return {
+        "file": path.name,
+        **file_entry(path),
+        "proxy_url": f"/video/outproxy/{case.name}/{path.name}",
+        "proxy_state": file_proxy_state(case, path, _ctx["cases_root"]),
+        "proxy_width": file_proxy_width(case, path, _ctx["cases_root"]),
+    }
+
+
 def _outputs(case: case_mod.Case) -> list[dict]:
     """成片列表。patch 按版本选一个：``_frame.mp4`` 优先，缺失时回退 ``_space.mp4``。
 
@@ -693,11 +718,7 @@ def _outputs(case: case_mod.Case) -> list[dict]:
         return []
     files = sorted(odir.glob("*.mp4"))
     if case.flow != "patch":
-        return [{"file": p.name, "url": f"/video/out/{case.name}/{p.name}",
-                 "proxy_url": f"/video/outproxy/{case.name}/{p.name}",
-                 "proxy_state": file_proxy_state(case, p, _ctx["cases_root"]),
-                 "proxy_width": file_proxy_width(case, p, _ctx["cases_root"])}
-                for p in files]
+        return [_output_entry(case, p) for p in files]
     chosen: dict[str, tuple[str, Path]] = {}
     for p in files:
         stem = p.stem
@@ -711,10 +732,7 @@ def _outputs(case: case_mod.Case) -> list[dict]:
     for version in sorted(chosen):
         kind, path = chosen[version]
         partial = kind == "space" and not _is_whole_extract(case, version)
-        out.append({"file": path.name, "url": f"/video/out/{case.name}/{path.name}",
-                    "proxy_url": f"/video/outproxy/{case.name}/{path.name}",
-                    "proxy_state": file_proxy_state(case, path, _ctx["cases_root"]),
-                    "proxy_width": file_proxy_width(case, path, _ctx["cases_root"]),
+        out.append({**_output_entry(case, path),
                     "version": version, "partial": partial})
     return out
 
@@ -774,6 +792,52 @@ def _file_info(path: Path) -> dict:
             "mtime": st.st_mtime, "size": st.st_size}
 
 
+def _file_open_target(path: Path) -> tuple[str, str] | None:
+    """文件落在哪个白名单根内，以及相对该根的 posix 路径；不在任何根内为 None。
+
+    根之间可能重叠（例如把 workdir 配到 cases 下），取最深的一个：生成的 URL
+    语义更具体，且结果不随根表的字典顺序漂移。
+    """
+    try:
+        target = Path(path).resolve()
+    except (OSError, ValueError):
+        return None
+    best: tuple[str, Path, Path] | None = None
+    for token, root in _open_roots().items():
+        try:
+            base = Path(root).resolve()
+            rel = target.relative_to(base)
+        except (OSError, ValueError):
+            continue
+        if best is None or len(base.parts) > len(best[1].parts):
+            best = (token, base, rel)
+    if best is None:
+        return None
+    return best[0], best[2].as_posix()
+
+
+def _open_url(path: Path) -> str | None:
+    hit = _file_open_target(path)
+    if hit is None:
+        return None
+    token, rel = hit
+    return f"/file?root={token}&p={quote(rel, safe='')}"
+
+
+def file_entry(path: Path) -> dict:
+    """``_file_info`` + 可选的 open_url。
+
+    文件不存在或落在白名单之外时条目照常返回（页面标红、显示路径），但不带
+    open_url——不给出点了必然 404 的链接。
+    """
+    info = _file_info(path)
+    if info["exists"]:
+        url = _open_url(path)
+        if url is not None:
+            info["open_url"] = url
+    return info
+
+
 def _imread(path: Path, flags: int):
     """OpenCV 在 Windows 上不认非 ASCII 路径；从字节解码绕开它。"""
     data = np.fromfile(str(path), dtype=np.uint8)
@@ -813,7 +877,7 @@ def _asset_details(case: case_mod.Case) -> list[dict]:
     for cand in candidates(case, _ctx["cases_root"]):
         counters[cand.kind] += 1
         prefix = "Video" if cand.kind == "video" else "Image"
-        info = _file_info(cand.path)
+        info = file_entry(cand.path)
         meta = _media_meta(cand.path, cand.kind)
         out.append({
             "id": cand.id, "kind": cand.kind, "role": cand.role,
@@ -831,11 +895,20 @@ DEFAULT_KEYFRAME_PRESERVE = (
     "除指定人物外不新增、不删除任何物体。")
 
 
-def _pick_row(pick: keyframe_mod.Pick | None, ids: set[str]) -> dict | None:
-    """指针只有在素材仍在库里时才有效；素材被删后按“未定稿”处理。"""
-    if pick is None or pick.asset not in ids:
+def _pick_row(pick: keyframe_mod.Pick | None,
+              by_id: dict[str, dict]) -> dict | None:
+    """指针只有在素材仍在角色集合里时才有效；素材被删后按“未定稿”处理。
+
+    选定图要能查名、查路径、单独打开，所以这里把素材的文件条目一并带回。
+    """
+    if pick is None:
         return None
-    return {"round": pick.round, "index": pick.index, "asset": pick.asset}
+    row = by_id.get(pick.asset)
+    if row is None:
+        return None
+    return {"round": pick.round, "index": pick.index, "asset": pick.asset,
+            "file": {key: row.get(key) for key in
+                     ("name", "rel", "path", "exists", "mtime", "size", "open_url")}}
 
 
 def _keyframe_state(case: case_mod.Case) -> dict:
@@ -860,15 +933,16 @@ def _keyframe_state(case: case_mod.Case) -> dict:
     sheet = state.sheet if state.sheet in sheet_ids else None
     if state.sheet is None and len(sheets) == 1:
         sheet = sheets[0]["id"]           # 唯一一张三视图：默认绑定，不写文件
-    first = _pick_row(state.first, {d["id"] for d in details
+    first = _pick_row(state.first, {d["id"]: d for d in details
                                     if d["role"] == "first_frame"})
-    last = _pick_row(state.last, {d["id"] for d in details
+    last = _pick_row(state.last, {d["id"]: d for d in details
                                   if d["role"] == "last_frame"})
     stale = bool(state.extract and case.extract_current
                  and state.extract != case.extract_current)
     base.update({
         "sheet": sheet,
-        "sheet_candidates": [{"id": d["id"], "label": d["label"], "path": d["path"]}
+        "sheet_candidates": [{"id": d["id"], "label": d["label"], "path": d["path"],
+                              "rel": d.get("rel"), "open_url": d.get("open_url")}
                              for d in sheets],
         "first": first, "last": last, "extract": state.extract,
         "stale": stale,
@@ -890,9 +964,8 @@ def _raw_frames(case: case_mod.Case) -> list[dict]:
         exists = path.is_file()
         meta = _media_meta(path, "image") if exists else {}
         rows.append({"id": asset_id, "role": role, "label": label,
-                     "path": str(path), "exists": exists,
+                     **file_entry(path),
                      "width": meta.get("width"), "height": meta.get("height"),
-                     "size": path.stat().st_size if exists else None,
                      "url": f"/img/asset/{case.name}/{asset_id}"})
     return rows
 
@@ -929,14 +1002,14 @@ def _generation_groups(case: case_mod.Case, inputs: list[dict],
     groups = [{
         "label": "生成",
         "inputs": inputs,
-        "outputs": ([_file_info(raw)] if raw is not None else []) +
-                   ([_file_info(run_json)] if run_json is not None else []),
+        "outputs": ([file_entry(raw)] if raw is not None else []) +
+                   ([file_entry(run_json)] if run_json is not None else []),
     }]
     if raw is not None:
         groups.append({
             "label": "采用",
-            "inputs": [_file_info(raw)],
-            "outputs": [_file_info(adopted)],
+            "inputs": [file_entry(raw)],
+            "outputs": [file_entry(adopted)],
         })
     return {"groups": groups}
 
@@ -969,15 +1042,15 @@ def _fullredraw_step_files(case: case_mod.Case, cdir: Path) -> dict:
         outputs = [out, out.with_name(out.stem + "_recompose.json")]
     return {
         "pad": {
-            "inputs": [_file_info(source)],
-            "outputs": [_file_info(padded), _file_info(mask), _file_info(manifest)],
+            "inputs": [file_entry(source)],
+            "outputs": [file_entry(padded), file_entry(mask), file_entry(manifest)],
         },
         "generate": _generation_groups(
-            case, [_file_info(padded), _file_info(mask), _file_info(manifest)],
+            case, [file_entry(padded), file_entry(mask), file_entry(manifest)],
             result),
         "recompose": {
-            "inputs": [_file_info(result), _file_info(manifest)],
-            "outputs": [_file_info(p) for p in outputs],
+            "inputs": [file_entry(result), file_entry(manifest)],
+            "outputs": [file_entry(p) for p in outputs],
         },
     }
 
@@ -987,9 +1060,9 @@ def _patch_step_files(case: case_mod.Case, cdir: Path) -> dict:
     只显示已知的源，不猜版本目录。"""
     source = Path(case.source_path)
     steps = {
-        "extract": {"inputs": [_file_info(source)], "outputs": []},
+        "extract": {"inputs": [file_entry(source)], "outputs": []},
         "generate": {"inputs": [], "outputs": []},
-        "merge": {"inputs": [_file_info(source)], "outputs": []},
+        "merge": {"inputs": [file_entry(source)], "outputs": []},
     }
     if not case.extract_current:
         return steps
@@ -1004,24 +1077,24 @@ def _patch_step_files(case: case_mod.Case, cdir: Path) -> dict:
     # 首尾原始帧是这一步的产物，直接追加到已有的输出列表；它们只给工作台
     # 当输入底图，不是提交候选，不需要再拆一组。
     steps["extract"] = {
-        "inputs": [_file_info(source)],
-        "outputs": [_file_info(clip), _file_info(mask), _file_info(sidecar),
-                    _file_info(d / "first_frame_raw.png"),
-                    _file_info(d / "last_frame_raw.png")],
+        "inputs": [file_entry(source)],
+        "outputs": [file_entry(clip), file_entry(mask), file_entry(sidecar),
+                    file_entry(d / "first_frame_raw.png"),
+                    file_entry(d / "last_frame_raw.png")],
     }
     steps["generate"] = _generation_groups(
-        case, [_file_info(clip), _file_info(mask), _file_info(sidecar)], ai)
+        case, [file_entry(clip), file_entry(mask), file_entry(sidecar)], ai)
     steps["merge"] = {
-        "inputs": [_file_info(source), _file_info(ai),
-                   _file_info(sidecar), _file_info(clip)],
-        "outputs": [_file_info(p) for p in outs],
+        "inputs": [file_entry(source), file_entry(ai),
+                   file_entry(sidecar), file_entry(clip)],
+        "outputs": [file_entry(p) for p in outs],
     }
     return steps
 
 
 def _gen_step_files(case: case_mod.Case, cdir: Path) -> dict:
     """gen：素材副本是输入；采用后的副本落在 case/result.mp4。"""
-    files = [_file_info(a.resolved(case, _ctx["cases_root"])) for a in case.assets]
+    files = [file_entry(a.resolved(case, _ctx["cases_root"])) for a in case.assets]
     return {
         "assets": {"inputs": [], "outputs": files},
         "generate": _generation_groups(case, files, cdir / "result.mp4"),
@@ -1206,6 +1279,8 @@ def _case_info(name: str) -> dict | None:
         "flow": case.flow,
         "source_url": f"/video/source/{case.name}",
         "source_path": case.source_path,
+        "source_file": (file_entry(Path(case.source_path))
+                        if case.source_path else None),
         "viewport": case.viewport, "inner": case.inner, "frames": case.frames,
         "frame_count": store.frame_count if store else None,
         "fps": store.fps if store else None,
@@ -1875,9 +1950,11 @@ def _keyframe_rounds(name: str) -> dict:
             continue
         results = []
         for index, raw in enumerate(blob.get("results") or [], start=1):
-            if Path(raw).is_file():
+            path = Path(raw)
+            if path.is_file():
                 results.append({"index": index,
-                                "url": f"/img/keyframe/{name}/{directory.name}/{index}"})
+                                "url": f"/img/keyframe/{name}/{directory.name}/{index}",
+                                **file_entry(path)})
         params = blob.get("params") or {}
         rows.append({"round": directory.name, "key": blob.get("key", ""),
                      "stage": blob.get("stage", ""),

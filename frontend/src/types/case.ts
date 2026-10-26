@@ -67,6 +67,8 @@ export interface AssetRow {
   tone: string
   url?: string
   exists?: boolean
+  rel?: string | null
+  open_url?: string | null
 }
 
 export interface PromptVariable {

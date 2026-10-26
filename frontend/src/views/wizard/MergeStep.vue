@@ -210,7 +210,7 @@ watch(latest, async (task) => {
               {{ file.partial ? '仅中间段（时间拼接未完成）' : '整片' }}
             </div>
           </div>
-          <el-link :href="file.url" target="_blank" type="primary" underline="never">
+          <el-link :href="file.open_url ?? ''" target="_blank" type="primary" underline="never">
             <el-icon><Download /></el-icon>播放
           </el-link>
         </div>

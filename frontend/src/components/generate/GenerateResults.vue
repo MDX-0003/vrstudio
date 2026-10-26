@@ -53,7 +53,11 @@ function formatRoundTime(value: string): string {
       <video
         v-if="recentOutput"
         class="output-video"
-        :src="recentOutput.proxy_state === 'ready' ? recentOutput.proxy_url : recentOutput.url"
+        :src="
+          recentOutput.proxy_state === 'ready'
+            ? recentOutput.proxy_url
+            : (recentOutput.open_url ?? '')
+        "
         controls
         preload="metadata"
       />
