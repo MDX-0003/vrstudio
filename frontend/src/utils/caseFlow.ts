@@ -20,7 +20,7 @@ export function nextStepForFlow(flow: Flow, gates: Gates = {}): NextStep {
   }
 
   if (flow === 'fullredraw') {
-    if (!gates.pad?.ok) return { key: 'pad', label: '等待扩充画面', actionable: true }
+    if (!gates.pad?.ok) return { key: 'pad', label: '可以扩充画面', actionable: true }
     if (!gates.generate?.ok) {
       return gates.generate?.ready
         ? { key: 'generate', label: '可以生成', actionable: true }

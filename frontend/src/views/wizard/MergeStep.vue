@@ -152,6 +152,13 @@ watch(latest, async (task) => {
             </el-button>
           </div>
           <el-alert
+            v-if="padGate && !padGate.ok"
+            type="info"
+            :closable="false"
+            :title="padGate.reason || '还没有扩充过画面'"
+            class="gate-alert"
+          />
+          <el-alert
             v-if="recomposeGate && !recomposeGate.ready"
             type="warning"
             :closable="false"

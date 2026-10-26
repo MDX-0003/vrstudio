@@ -46,7 +46,7 @@ describe('flow steps', () => {
   it('returns the next full redraw step with Chinese labels', () => {
     expect(nextStepForFlow('fullredraw', { pad: { ok: false } })).toEqual({
       key: 'pad',
-      label: '等待扩充画面',
+      label: '可以扩充画面',
       actionable: true,
     })
     expect(

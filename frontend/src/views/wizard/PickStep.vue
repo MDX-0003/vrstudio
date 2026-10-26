@@ -69,6 +69,7 @@ const vpUrl = computed(() => {
   const separator = base.includes('?') ? '&' : '?'
   return `${base}${separator}frame=${frame.value}&t=${vpVersion.value}`
 })
+const viewportReady = computed(() => Boolean(viewport.value?.width))
 const innerStyle = computed(() => {
   if (!inner.value || !viewport.value) return null
   return {
@@ -380,12 +381,16 @@ onUnmounted(() => {
 
         <div class="vp-wrap" :class="{ dragging: drag.dragging.value }">
           <img
+            v-if="viewportReady"
             ref="vpImage"
             :src="vpUrl"
             alt="视口预览"
             draggable="false"
             @pointerdown="drag.begin"
           />
+          <div v-else class="vp-empty muted">
+            先在左侧全景图上点一下、再选视口尺寸，这里会出现视口预览
+          </div>
           <div v-if="innerStyle" class="inner-box" :style="innerStyle" />
           <div
             v-if="drag.rect.value"
@@ -564,6 +569,15 @@ onUnmounted(() => {
   width: 100%;
   cursor: crosshair;
   touch-action: none;
+}
+
+.vp-empty {
+  display: grid;
+  place-items: center;
+  min-height: 160px;
+  padding: var(--space-3);
+  text-align: center;
+  font-size: var(--text-sm);
 }
 
 .vp-wrap.dragging img {

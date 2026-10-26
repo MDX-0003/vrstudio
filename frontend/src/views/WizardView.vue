@@ -208,6 +208,7 @@ watch(caseName, (_next, previous) => {
         type="button"
         class="step"
         :class="{ active: step.key === activeStep, done: index < activeIndex }"
+        :aria-label="`${index + 1} ${step.label}`"
         @click="selectStep(step.key)"
       >
         <span class="step-index">

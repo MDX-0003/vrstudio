@@ -1,11 +1,13 @@
 <script setup lang="ts">
+import { computed, ref } from 'vue'
 import type { PromptVariable } from '@/types/case'
 
-defineProps<{
+const props = defineProps<{
   variables: PromptVariable[]
   rendered: string
   renderError: string
   saving: boolean
+  adding: boolean
 }>()
 
 const open = defineModel<boolean>('open', { required: true })
@@ -13,7 +15,24 @@ const open = defineModel<boolean>('open', { required: true })
 const emit = defineEmits<{
   save: []
   input: [key: string, value: string]
+  'add-var': [key: string, value: string]
 }>()
+
+const newKey = ref('')
+const newValue = ref('')
+
+const newKeyUsable = computed(() => {
+  const key = newKey.value.trim()
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)
+    && !props.variables.some((item) => item.key === key)
+})
+
+function submitNewVar(): void {
+  if (!newKeyUsable.value) return
+  emit('add-var', newKey.value.trim(), newValue.value)
+  newKey.value = ''
+  newValue.value = ''
+}
 </script>
 
 <template>
@@ -27,7 +46,7 @@ const emit = defineEmits<{
         v-if="renderError"
         type="warning"
         :closable="false"
-        :title="renderError"
+        :title="`提示词暂时无法完整展开：${renderError}`"
         class="prompt-error"
       />
       <div v-if="variables.length" class="prompt-summary">
@@ -49,7 +68,7 @@ const emit = defineEmits<{
           v-if="renderError"
           type="warning"
           :closable="false"
-          :title="renderError"
+          :title="`提示词暂时无法完整展开：${renderError}`"
           class="prompt-error"
         />
         <pre>{{ rendered || '还没有提示词内容' }}</pre>
@@ -68,6 +87,38 @@ const emit = defineEmits<{
             class="prompt-var-input"
             @input="emit('input', item.key, item.value)"
           />
+        </div>
+        <div class="var-card add-var">
+          <div class="var-head">
+            <span class="var-label">添加变量</span>
+          </div>
+          <p class="var-help">
+            模板没覆盖的补充约定可以做成变量再写进正文；素材清单等自动变量由系统生成，不能手工添加。
+          </p>
+          <div class="add-var-row">
+            <el-input
+              v-model="newKey"
+              placeholder="变量名（英文）"
+              class="add-var-key"
+            />
+            <el-input
+              v-model="newValue"
+              type="textarea"
+              :autosize="{ minRows: 1 }"
+              placeholder="变量的值（可留空，之后再填）"
+            />
+            <el-button
+              size="small"
+              :disabled="!newKeyUsable"
+              :loading="adding"
+              @click="submitNewVar"
+            >
+              添加
+            </el-button>
+          </div>
+          <p v-if="newKey.trim() && !newKeyUsable" class="var-help">
+            变量名只支持英文字母、数字与下划线，且不能与现有变量重名。
+          </p>
         </div>
       </section>
     </div>
@@ -173,5 +224,20 @@ const emit = defineEmits<{
   margin: var(--space-1) 0 var(--space-2);
   color: var(--color-text-muted);
   font-size: var(--text-xs);
+}
+
+.add-var {
+  border-style: dashed;
+}
+
+.add-var-row {
+  display: grid;
+  grid-template-columns: minmax(140px, max-content) minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--space-2);
+}
+
+.add-var-row :deep(textarea) {
+  min-height: 32px;
 }
 </style>

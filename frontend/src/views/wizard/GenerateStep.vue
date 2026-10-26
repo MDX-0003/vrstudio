@@ -437,6 +437,23 @@ async function savePrompt(): Promise<void> {
   ElMessage.success(hadPending ? '提示词已保存' : '提示词没有改动')
 }
 
+const addingVar = ref(false)
+
+async function addPromptVar(key: string, value: string): Promise<void> {
+  const name = caseName.value
+  if (!name || addingVar.value) return
+  addingVar.value = true
+  try {
+    const data = await savePromptVar(name, key, value)
+    if (name === caseName.value) applyInfo(data)
+    ElMessage.success(`已添加变量 ${key}`)
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '添加变量失败')
+  } finally {
+    addingVar.value = false
+  }
+}
+
 const previewSignature = computed(() =>
   JSON.stringify({
     assets: assets.value
@@ -745,8 +762,10 @@ function statusTone(): string {
         :rendered="promptRendered"
         :render-error="promptRenderError"
         :saving="promptSaving"
+        :adding="addingVar"
         @save="savePrompt"
         @input="schedulePromptSave"
+        @add-var="addPromptVar"
       />
     </section>
 

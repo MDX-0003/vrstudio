@@ -14,9 +14,14 @@ const ButtonStub = defineComponent({
   template: '<button :disabled="disabled"><slot /></button>',
 })
 
+const AlertStub = defineComponent({
+  props: { title: String },
+  template: '<div class="alert">{{ title }}</div>',
+})
+
 const stubs = {
   'el-button': ButtonStub,
-  'el-alert': true,
+  'el-alert': AlertStub,
   'el-tag': true,
   'el-link': true,
   'el-icon': true,
@@ -52,20 +57,37 @@ function button(wrapper: ReturnType<typeof mount>, label: string) {
 }
 
 describe('MergeStep gate buttons', () => {
-  it('disables 扩充画面 when the pad gate is not ok, even with a reason', async () => {
-    const wrapper = await mountWith({ ok: false, reason: '先扩充' }, { ok: false, ready: false })
+  it('enables 扩充画面 on a fresh case: the pad gate is ready before the first run', async () => {
+    // F5（2026-10-25 验收发现）：pad gate 的 ready 表示“源在、可以开始扩充”，
+    // ok 只表示“已经扩充过”。此前按钮只看 ok，新 case 永远点不了第一次。
+    const wrapper = await mountWith(
+      { ok: false, ready: true, reason: '还没有扩充过画面' },
+      { ok: false, ready: false },
+    )
+    expect(button(wrapper, '扩充画面').attributes('disabled')).toBeUndefined()
+    // F6：pad 自己的原因要显示出来，不再只有裁回尺寸的原因。
+    expect(wrapper.text()).toContain('还没有扩充过画面')
+    expect(wrapper.text()).toContain('先采用一次生成结果')
+    wrapper.unmount()
+  })
+
+  it('disables 扩充画面 only when the pad gate is not ready', async () => {
+    const wrapper = await mountWith(
+      { ok: true, ready: false },
+      { ok: false, ready: false },
+    )
     expect(button(wrapper, '扩充画面').attributes('disabled')).toBeDefined()
     wrapper.unmount()
   })
 
-  it('enables 扩充画面 when the pad gate is ok', async () => {
-    const wrapper = await mountWith({ ok: true }, { ok: false, ready: false })
+  it('keeps 扩充画面 enabled after pad has run (ok=true)', async () => {
+    const wrapper = await mountWith({ ok: true, ready: true }, { ok: false, ready: false })
     expect(button(wrapper, '扩充画面').attributes('disabled')).toBeUndefined()
     wrapper.unmount()
   })
 
   it('disables 裁回原尺寸 until the recompose gate is ready', async () => {
-    const wrapper = await mountWith({ ok: true }, { ok: false, ready: false, reason: '先采用' })
+    const wrapper = await mountWith({ ok: true, ready: true }, { ok: false, ready: false, reason: '先采用' })
     expect(button(wrapper, '裁回原尺寸').attributes('disabled')).toBeDefined()
     wrapper.unmount()
   })
