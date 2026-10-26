@@ -309,15 +309,11 @@ def test_upload_create_cleans_expired_sessions(client, tmp_path):
     assert (tmp_path / ".uploads" / r.json()["upload_id"]).is_dir()
 
 
-def test_media_extract_serves_version_file(client, patch_case, tmp_path):
-    directory = _mk_extract(patch_case, tmp_path, "v1")
-    (directory / "clip.mp4").write_bytes(b"clip")
-    r = client.get(f"/media/extract/{patch_case}/v1/clip.mp4")
-    assert r.status_code == 200 and r.content == b"clip"
-    assert client.get(f"/media/extract/{patch_case}/v1/nope.mp4").status_code == 404
-
-
 # ── /file：按根寻址的原片直开 ─────────────────────────────────────────────
+
+
+def test_media_extract_route_is_retired(client, patch_case):
+    assert client.get(f"/media/extract/{patch_case}/v1/clip.mp4").status_code == 404
 
 
 def _file_roots(tmp_path, monkeypatch):

@@ -3,9 +3,9 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Download, Refresh, VideoPlay } from '@element-plus/icons-vue'
 import { fetchCase, runOperation } from '@/api/case'
+import FileRow from '@/components/common/FileRow.vue'
 import { useCaseTasks } from '@/composables/useCaseTasks'
 import { gateBlocked } from '@/utils/gates'
-import { formatSize } from '@/utils/format'
 import { taskStatusMeta } from '@/constants/taskStatus'
 import type { CaseInfo } from '@/types/case-info'
 
@@ -28,10 +28,6 @@ const patchFiles = computed(() => props.info.step_files.merge)
 const padFiles = computed(() => props.info.step_files.pad)
 const recomposeFiles = computed(() => props.info.step_files.recompose)
 const outputs = computed(() => props.info.outputs)
-
-function outputUrl(file: string): string {
-  return `/video/out/${encodeURIComponent(props.caseName)}/${encodeURIComponent(file)}`
-}
 
 onMounted(() => start())
 
@@ -101,24 +97,11 @@ watch(latest, async (task) => {
           <div class="file-groups">
             <div class="file-group">
               <h3>合并输入</h3>
-              <div v-for="file in patchFiles?.inputs ?? []" :key="file.path" class="file-row">
-                <span class="mono">{{ file.name }}</span>
-                <span class="muted">{{ formatSize(file.size) }}</span>
-              </div>
+              <FileRow v-for="file in patchFiles?.inputs ?? []" :key="file.path" :entry="file" />
             </div>
             <div class="file-group">
               <h3>合并输出</h3>
-              <div v-for="file in patchFiles?.outputs ?? []" :key="file.path" class="file-row">
-                <el-link
-                  :href="outputUrl(file.name)"
-                  target="_blank"
-                  type="primary"
-                  underline="never"
-                >
-                  <el-icon><Download /></el-icon>{{ file.name }}
-                </el-link>
-                <span class="muted">{{ formatSize(file.size) }}</span>
-              </div>
+              <FileRow v-for="file in patchFiles?.outputs ?? []" :key="file.path" :entry="file" />
               <span v-if="!(patchFiles?.outputs ?? []).length" class="muted">还没有输出</span>
             </div>
           </div>
@@ -168,25 +151,16 @@ watch(latest, async (task) => {
           <div class="file-groups">
             <div class="file-group">
               <h3>扩充画面输出</h3>
-              <div v-for="file in padFiles?.outputs ?? []" :key="file.path" class="file-row">
-                <span class="mono">{{ file.name }}</span>
-                <span class="muted">{{ formatSize(file.size) }}</span>
-              </div>
+              <FileRow v-for="file in padFiles?.outputs ?? []" :key="file.path" :entry="file" />
               <span v-if="!(padFiles?.outputs ?? []).length" class="muted">还没有输出</span>
             </div>
             <div class="file-group">
               <h3>裁回原尺寸输出</h3>
-              <div v-for="file in recomposeFiles?.outputs ?? []" :key="file.path" class="file-row">
-                <el-link
-                  :href="outputUrl(file.name)"
-                  target="_blank"
-                  type="primary"
-                  underline="never"
-                >
-                  <el-icon><Download /></el-icon>{{ file.name }}
-                </el-link>
-                <span class="muted">{{ formatSize(file.size) }}</span>
-              </div>
+              <FileRow
+                v-for="file in recomposeFiles?.outputs ?? []"
+                :key="file.path"
+                :entry="file"
+              />
               <span v-if="!(recomposeFiles?.outputs ?? []).length" class="muted">还没有输出</span>
             </div>
           </div>
@@ -289,23 +263,15 @@ watch(latest, async (task) => {
   margin-top: var(--space-3);
 }
 
-.file-group h3 {
-  margin: 0 0 var(--space-2);
-  font-size: var(--text-sm);
-}
-
-.file-row {
+.file-group {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
   gap: var(--space-2);
-  padding: var(--space-1) 0;
-  border-bottom: 1px solid var(--color-border);
-  font-size: var(--text-sm);
 }
 
-.file-row:last-child {
-  border-bottom: 0;
+.file-group h3 {
+  margin: 0;
+  font-size: var(--text-sm);
 }
 
 .output-list {

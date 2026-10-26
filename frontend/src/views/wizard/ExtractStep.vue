@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Download, Refresh, VideoPlay } from '@element-plus/icons-vue'
+import { Refresh, VideoPlay } from '@element-plus/icons-vue'
 import { fetchCase, runOperation } from '@/api/case'
+import FileRow from '@/components/common/FileRow.vue'
 import { useCaseTasks } from '@/composables/useCaseTasks'
-import { formatSize } from '@/utils/format'
 import { taskStatusMeta } from '@/constants/taskStatus'
 import type { CaseInfo, FileInfo } from '@/types/case-info'
 
@@ -33,15 +33,6 @@ const pickGate = computed(() => props.info.gates.pick)
 const extractGate = computed(() => props.info.gates.extract)
 const outputs = computed<FileInfo[]>(() => props.info.step_files.extract?.outputs ?? [])
 const current = computed(() => props.info.extract_current)
-
-function fileUrl(file: FileInfo): string {
-  if (!current.value) return ''
-  return `/media/extract/${encodeURIComponent(props.caseName)}/${encodeURIComponent(current.value)}/${encodeURIComponent(file.name)}`
-}
-
-function isVideo(file: FileInfo): boolean {
-  return file.name.endsWith('.mp4')
-}
 
 async function runExtract(): Promise<void> {
   if (running.value) return
@@ -132,31 +123,7 @@ watch(latest, async (task) => {
         <div v-if="!outputs.length" class="empty">
           <el-empty description="还没有抽取结果" :image-size="72" />
         </div>
-        <div
-          v-for="file in outputs"
-          :key="file.path"
-          class="file-row"
-          :class="{ missing: !file.exists }"
-        >
-          <div class="file-main">
-            <div class="file-name mono">{{ file.name }}</div>
-            <div class="file-meta">
-              <span>{{ file.rel || file.path }}</span>
-              <span>{{ formatSize(file.size) }}</span>
-              <span v-if="!file.exists" class="bad">文件缺失</span>
-            </div>
-          </div>
-          <el-link
-            v-if="file.exists"
-            :href="fileUrl(file)"
-            target="_blank"
-            type="primary"
-            underline="never"
-          >
-            <el-icon><Download /></el-icon>
-            {{ isVideo(file) ? '播放' : '打开' }}
-          </el-link>
-        </div>
+        <FileRow v-for="file in outputs" :key="file.path" :entry="file" />
       </div>
     </section>
 
@@ -238,41 +205,6 @@ watch(latest, async (task) => {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-}
-
-.file-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-}
-
-.file-row.missing {
-  opacity: 0.55;
-}
-
-.file-main {
-  flex: 1;
-  min-width: 0;
-}
-
-.file-name {
-  font-weight: 600;
-}
-
-.file-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  color: var(--color-text-muted);
-  font-size: var(--text-xs);
-  word-break: break-all;
-}
-
-.file-meta .bad {
-  color: var(--color-danger);
 }
 
 .version-row {

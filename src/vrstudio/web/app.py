@@ -368,20 +368,6 @@ async def video_out(request):
     return FileResponse(str(p), media_type="video/mp4")
 
 
-async def media_extract(request):
-    """抽取版本目录里的文件（clip.mp4、mask、clip.json、首尾原始帧）。"""
-    name = request.path_params["name"]
-    version = request.path_params["version"]
-    fn = request.path_params["file"]
-    for part in (version, fn):
-        if "/" in part or "\\" in part or ".." in part:
-            return JSONResponse({"error": "bad name"}, status_code=400)
-    p = case_mod.case_dir(name, _ctx["cases_root"]) / "extracts" / version / fn
-    if not p.is_file():
-        return JSONResponse({"error": "not found"}, status_code=404)
-    return FileResponse(str(p))
-
-
 async def video_proxy(request):
     """源片代理：pick 顶部播放器与对比页左路共用（首次访问时后台生成）。"""
     try:
@@ -2727,7 +2713,6 @@ routes = [
     Route("/video/source/{name}", video_source),
     Route("/video/proxy/{name}", video_proxy),
     Route("/video/out/{name}/{file}", video_out),
-    Route("/media/extract/{name}/{version}/{file}", media_extract),
     Route("/video/outproxy/{name}/{file}", video_out_proxy),
     Route("/api/cases", api_cases, methods=["GET", "POST"]),
     Route("/api/case/{name}", api_case),

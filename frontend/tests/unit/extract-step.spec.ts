@@ -40,12 +40,17 @@ const ButtonStub = defineComponent({
   template: '<button :disabled="disabled || loading"><slot /></button>',
 })
 
+const LinkStub = defineComponent({
+  props: { href: String, target: String },
+  template: '<a :href="href" :target="target"><slot /></a>',
+})
+
 const stubs = {
   'el-button': ButtonStub,
   'el-alert': true,
   'el-empty': true,
   'el-tag': true,
-  'el-link': true,
+  'el-link': LinkStub,
   'el-icon': true,
 }
 
@@ -81,6 +86,35 @@ async function mountStep() {
   await flushPromises()
   return wrapper
 }
+
+describe('ExtractStep 输出文件走统一文件视图', () => {
+  it('links each output by the payload open_url instead of a family route', async () => {
+    const data = info()
+    data.step_files.extract = {
+      inputs: [],
+      outputs: [
+        {
+          name: 'clip.mp4',
+          path: 'E:/repo/cases/p1/extracts/v1/clip.mp4',
+          rel: 'cases/p1/extracts/v1/clip.mp4',
+          exists: true,
+          mtime: null,
+          size: 1024,
+          open_url: '/file?root=cases&p=cases%2Fp1%2Fextracts%2Fv1%2Fclip.mp4',
+        },
+      ],
+    }
+    const wrapper = mount(ExtractStep, {
+      props: { caseName: 'p1', info: data },
+      global: { stubs },
+    })
+    await flushPromises()
+    const link = wrapper.find('a')
+    expect(link.attributes('href')).toBe('/file?root=cases&p=cases%2Fp1%2Fextracts%2Fv1%2Fclip.mp4')
+    expect(link.text()).toContain('播放')
+    wrapper.unmount()
+  })
+})
 
 describe('ExtractStep 完成刷新（2026-10-26 陈旧文件列表修复）', () => {
   it('starts task polling on mount, so externally started tasks are visible', async () => {
