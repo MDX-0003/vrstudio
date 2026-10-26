@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 import uuid
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote
 
@@ -819,13 +820,31 @@ def _imread(path: Path, flags: int):
     return cv2.imdecode(data, flags) if data.size else None
 
 
+def _empty_media() -> dict:
+    return {"width": None, "height": None, "duration": None, "fps": None}
+
+
 def _media_meta(path: Path, kind: str) -> dict:
-    """尺寸/时长/帧率：素材卡片与缩略图共用的只读元数据。"""
-    meta: dict = {"width": None, "height": None, "duration": None, "fps": None}
+    """尺寸/时长/帧率：素材卡片与缩略图共用的只读元数据。
+
+    取一次宽高要把整张图解码（4K PNG 约 90ms），而这些值只随文件内容变化，
+    所以按 路径 + mtime + 大小 记忆；文件被替换时缓存键自然变化。
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return _empty_media()
     if not path.is_file():
-        return meta
+        return _empty_media()
+    return dict(_probe_media_meta(str(path), stat.st_mtime_ns, stat.st_size, kind))
+
+
+@lru_cache(maxsize=1024)
+def _probe_media_meta(path: str, mtime_ns: int, size: int, kind: str) -> dict:
+    file = Path(path)
+    meta = _empty_media()
     if kind == "video":
-        cap = cv2.VideoCapture(str(path))
+        cap = cv2.VideoCapture(str(file))
         if cap.isOpened():
             meta["width"] = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or None
             meta["height"] = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or None
@@ -835,7 +854,7 @@ def _media_meta(path: Path, kind: str) -> dict:
             meta["duration"] = round(frames / fps, 3) if fps and frames else None
         cap.release()
         return meta
-    image = _imread(path, cv2.IMREAD_UNCHANGED)
+    image = _imread(file, cv2.IMREAD_UNCHANGED)
     if image is not None:
         meta["height"], meta["width"] = int(image.shape[0]), int(image.shape[1])
     return meta
@@ -886,11 +905,12 @@ def _pick_row(pick: keyframe_mod.Pick | None,
                      ("name", "rel", "path", "exists", "mtime", "size", "open_url")}}
 
 
-def _keyframe_state(case: case_mod.Case) -> dict:
+def _keyframe_state(case: case_mod.Case, details: list[dict] | None = None) -> dict:
     """首尾帧工作台的只读状态：绑定关系、两帧指针、是否过期。
 
     图片步的输入全部从这里与原始帧解析，不读 ``[submit] selected``；视频提交集
-    仍只由素材侧边栏的勾选决定。"""
+    仍只由素材侧边栏的勾选决定。``details`` 允许调用方传入已算好的素材明细，
+    一次请求里不重复解码整批素材。"""
     base = {"enabled": case.flow in ("patch", "gen"), "error": None,
             "sheet": None, "sheet_candidates": [], "first": None, "last": None,
             "extract": None, "stale": False, "complete": False}
@@ -901,7 +921,7 @@ def _keyframe_state(case: case_mod.Case) -> dict:
     except keyframe_mod.KeyframeError as exc:
         base["error"] = str(exc)
         return base
-    details = _asset_details(case)
+    details = details if details is not None else _asset_details(case)
     sheets = [d for d in details
               if d["kind"] == "image" and d["role"] == "subject_ref" and d.get("exists")]
     sheet_ids = {d["id"] for d in sheets}
@@ -1088,12 +1108,14 @@ def _step_files(case: case_mod.Case) -> dict:
     return {}
 
 
-def _gates(case: case_mod.Case, extracts: list[dict]) -> dict:
+def _gates(case: case_mod.Case, extracts: list[dict],
+           details: list[dict] | None = None) -> dict:
     """软向导的门控判据与证据（服务端唯一权威，前端只渲染结果）。
 
     每一步带两段文字：没完成时 reason 说差什么；完成时 evidence 说"在哪个
     绝对路径检测到了什么文件、所以认为完成、想重跑怎么办"——页面上每一次
-    置灰/放行都可以对照文件复查。
+    置灰/放行都可以对照文件复查。``details`` 透传给 ``_keyframe_state``，
+    避免同一次请求里再解码一遍素材。
     """
     cdir = case.dir(_ctx["cases_root"])
     missing = case_mod.draft_ready(case)
@@ -1111,7 +1133,7 @@ def _gates(case: case_mod.Case, extracts: list[dict]) -> dict:
                     if partial_names else "")
     if case.flow == "patch":
         cur = cdir / "extracts" / (case.extract_current or "")
-        kf = _keyframe_state(case)
+        kf = _keyframe_state(case, details)
         raw_ok = all((cur / name).is_file()
                      for name in ("first_frame_raw.png", "last_frame_raw.png"))
         if not extracted:
@@ -1249,6 +1271,8 @@ def _case_info(name: str) -> dict | None:
         return None
     store = get_store(name) if case.flow == "patch" else None
     extracts = _extracts(case) if case.flow == "patch" else []
+    # 素材明细要解码整批图片，一次请求只算一遍：assets / keyframe / gates 共用。
+    assets = _asset_details(case)
     info = {
         "name": case.name,
         "flow": case.flow,
@@ -1267,15 +1291,15 @@ def _case_info(name: str) -> dict | None:
                   else None),
         "extract_current": case.extract_current,
         "adopt_round": case.adopt_round,
-        "assets": _asset_details(case),
+        "assets": assets,
         "raw_frames": _raw_frames(case),
-        "keyframe": _keyframe_state(case),
+        "keyframe": _keyframe_state(case, assets),
         "submit_selected": case.submit_selected,
         "derived": _derived(case),
         "extracts": extracts,
         "outputs": _outputs(case),
         "step_files": _step_files(case),
-        "gates": _gates(case, extracts),
+        "gates": _gates(case, extracts, assets),
         "previews": {"vp": f"/img/{case.name}/vp.png?k={store.key}"} if store else {},
         "viewport_options": _viewport_options(case) if case.flow == "patch" else [],
         "viewport_footprint": _footprint_payload(store) if store else [],
