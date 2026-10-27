@@ -1996,6 +1996,18 @@ def _keyframe_argv(name: str, body: dict) -> list[str]:
     return argv
 
 
+def _step_payload(payload: dict) -> dict:
+    """两帧步共用的 vars 草稿里，另一帧的变量不属于当前模板，不返回给页面。
+
+    展开提示词时 format_map 只取模板正文引用的键，裁掉它们不影响保存：
+    草稿文件里另一帧的值原样保留。
+    """
+    placeholders = set(payload.get("placeholders") or [])
+    payload["vars"] = {key: value for key, value in payload.get("vars", {}).items()
+                       if key in placeholders}
+    return payload
+
+
 def _keyframe_prompt(name: str, step: str) -> dict:
     """读图片步的提示词草稿并展开；首次访问把四个变量写成空值/通用默认。
 
@@ -2025,7 +2037,7 @@ def _keyframe_prompt(name: str, step: str) -> dict:
     payload = _vrgen_json(argv)
     if "error" in payload:
         raise CaseError(payload["error"])
-    return payload
+    return _step_payload(payload)
 
 
 def _keyframe_rounds(name: str) -> dict:
@@ -2091,7 +2103,7 @@ def _keyframe_save_prompt(name: str, step: str, sets: dict) -> dict:
     payload = _vrgen_json(argv)
     if "error" in payload:
         raise CaseError(payload["error"])
-    return payload
+    return _step_payload(payload)
 
 
 async def api_keyframe_refs(request):

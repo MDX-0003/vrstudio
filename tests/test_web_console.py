@@ -1521,7 +1521,7 @@ def test_keyframe_prompt_uses_vars_file(client, patch_case, tmp_path, monkeypatc
     def fake(argv):
         calls.append(argv)
         return {"template": "keyframe-first",
-                "vars": {"figure": "x", "pose_first": "y"},
+                "vars": {"figure": "x", "pose_first": "y", "pose_last": "z"},
                 "rendered": "图1 = 首帧原始图。",
                 "placeholders": ["image_roles", "pose_first", "figure", "preserve"],
                 "computed_keys": ["image_roles"], "labels": {}, "help": {}}
@@ -1529,6 +1529,7 @@ def test_keyframe_prompt_uses_vars_file(client, patch_case, tmp_path, monkeypatc
     monkeypatch.setattr(web_app, "_vrgen_json", fake)
     r = client.get("/api/case/p1/keyframe/prompt?step=first")
     assert r.status_code == 200, r.text
+    assert r.json()["vars"] == {"figure": "x", "pose_first": "y"}
     argv = calls[0]
     assert argv[0] == "prompt"          # _vrgen_json 自己补可执行文件，不能再传一遍
     assert argv[argv.index("--vars-file") + 1] == "keyframe-vars.toml"
@@ -1541,6 +1542,7 @@ def test_keyframe_prompt_uses_vars_file(client, patch_case, tmp_path, monkeypatc
     assert r.status_code == 200, r.text
     assert "--set" in calls[-1]
     assert "figure=新外观" in calls[-1]
+    assert r.json()["vars"] == {"figure": "x", "pose_first": "y"}
 
 
 def test_keyframe_pick_first_does_not_submit_a_batch(
