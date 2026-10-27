@@ -15,6 +15,11 @@ const MAX_REVISIONS = 100
 const DEFAULT_TIMEOUT_MS = 30_000
 const BLOB_TIMEOUT_MS = 120_000
 
+/** 发生过未解决 409 的 case：期间重复 409 不再弹窗，重新加载或覆盖成功后解除。 */
+const conflicted = new Set<string>()
+/** 最近一次 409 的请求，供「仍要保存（覆盖对方改动）」重发。 */
+let pendingOverwrite: { path: string; init: RequestInit } | null = null
+
 function setRevision(caseName: string, revision: number): void {
   revisions.delete(caseName)
   revisions.set(caseName, revision)
@@ -31,6 +36,7 @@ export function rememberRevision(caseName: string, revision: number): void {
 
 export function forgetRevision(caseName: string): void {
   revisions.delete(caseName)
+  conflicted.delete(caseName)
 }
 
 function caseNameOf(path: string): string | null {
@@ -54,17 +60,46 @@ function noteRevision(path: string, response: Response): void {
   if (Number.isFinite(value)) setRevision(name, value)
 }
 
-function noteConflict(data: unknown, status: number): void {
+function noteConflict(data: unknown, status: number, path = '', init?: RequestInit): void {
   if (status !== 409 || !data || typeof data !== 'object') return
   if ((data as { code?: string }).code !== 'revision_conflict') return
+  const name = caseNameOf(path)
+  // 同一轮冲突只弹一次：未解决期间重复 409 静默抛错。
+  if (name && conflicted.has(name)) return
+  if (name) conflicted.add(name)
+  if (init) pendingOverwrite = { path, init }
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('case-conflict', { detail: data }))
   }
 }
 
-function failure(data: unknown, status: number): ApiRequestError {
-  noteConflict(data, status)
+function failure(data: unknown, status: number, path = '', init?: RequestInit): ApiRequestError {
+  noteConflict(data, status, path, init)
   return new ApiRequestError(describeError(data, status), status, data)
+}
+
+/**
+ * 「仍要保存（覆盖对方改动）」：去掉 revision 头重发最近一次 409 的请求。
+ * 成功后响应头带回新 revision，noteRevision 自动恢复后续的常规保护。
+ */
+export async function retryOverwrite(): Promise<boolean> {
+  const pending = pendingOverwrite
+  pendingOverwrite = null
+  if (!pending) return false
+  const headers = new Headers(pending.init.headers)
+  headers.delete('X-Case-Revision')
+  try {
+    await request(pending.path, { ...pending.init, headers })
+    const name = caseNameOf(pending.path)
+    if (name) conflicted.delete(name)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function isCaseConflicted(name: string): boolean {
+  return conflicted.has(name)
 }
 
 async function parseBody(response: Response): Promise<unknown> {
@@ -101,7 +136,10 @@ async function request<T>(
     const response = await fetch(path, { ...init, signal: controller.signal })
     noteRevision(path, response)
     const data = await parseBody(response)
-    if (!response.ok) throw failure(data, response.status)
+    if (!response.ok) throw failure(data, response.status, path, init)
+    // 重新加载成功 = 冲突解除（revision 已刷新）。
+    const name = caseNameOf(path)
+    if (name && !init.method) conflicted.delete(name)
     return data as T
   } catch (err) {
     if (err instanceof ApiRequestError) throw err

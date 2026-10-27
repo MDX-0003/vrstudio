@@ -1,4 +1,4 @@
-import type { CaseInfo } from '@/types/case-info'
+import type { CaseInfo, CaseMeta } from '@/types/case-info'
 import {
   ApiRequestError,
   forgetRevision,
@@ -18,6 +18,10 @@ export async function fetchCase(name: string): Promise<CaseInfo> {
     if (err instanceof ApiRequestError && err.status === 404) forgetRevision(name)
     throw err
   }
+}
+
+export function assignOwnerToMe(name: string): Promise<{ meta: CaseMeta }> {
+  return postJson(`${casePath(name)}/owner`, {})
 }
 
 export function saveSubmitSelection(

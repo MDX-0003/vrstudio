@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
-import { Back, Expand, Fold, FolderOpened, List, Setting } from '@element-plus/icons-vue'
+import { Expand, Fold, FolderOpened, List, Setting } from '@element-plus/icons-vue'
 import { useUiStore } from '@/stores/ui'
 
 const ui = useUiStore()
@@ -17,10 +17,6 @@ const collapsed = computed(() => ui.navCollapsed)
 
 function isActive(path: string): boolean {
   return route.path === path || route.path.startsWith(`${path}/`)
-}
-
-function goOldConsole(): void {
-  window.location.assign('/')
 }
 </script>
 
@@ -46,10 +42,6 @@ function goOldConsole(): void {
     </nav>
 
     <div class="side-bottom">
-      <button class="nav-item as-button" type="button" @click="goOldConsole">
-        <el-icon :size="18"><Back /></el-icon>
-        <span v-if="!collapsed">旧版入口</span>
-      </button>
       <button class="nav-item as-button" type="button" @click="ui.toggleNav()">
         <el-icon :size="18">
           <Expand v-if="collapsed" />

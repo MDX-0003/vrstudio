@@ -17,6 +17,8 @@ const duration = ref(0)
 const playing = ref(false)
 const split = ref(50)
 const viewerError = ref('')
+// original = 播放原始分辨率（默认）；proxy = 播放代理，代理未就绪的路自动回落。
+const quality = ref<'proxy' | 'original'>('original')
 
 const wrap = ref<HTMLElement | null>(null)
 const videoA = ref<HTMLVideoElement | null>(null)
@@ -32,14 +34,16 @@ const selected = computed(
   () => outputs.value.find((item) => item.file === selectedFile.value) ?? null,
 )
 const sourceUrl = computed(() =>
-  sourceProxy.value === 'ready'
+  quality.value === 'proxy' && sourceProxy.value === 'ready'
     ? `/video/proxy/${encodeURIComponent(props.caseName)}`
     : props.info.source_url,
 )
 const outputUrl = computed(() => {
   const item = selected.value
   if (!item) return ''
-  return outputProxy.value === 'ready' ? item.proxy_url : (item.open_url ?? '')
+  return quality.value === 'proxy' && outputProxy.value === 'ready'
+    ? item.proxy_url
+    : (item.open_url ?? '')
 })
 const timeText = computed(() => {
   const format = (value: number): string =>
@@ -68,12 +72,15 @@ function onSelect(value: string | number): void {
   selectOutput(String(value))
 }
 
+// 漂移超过这个值才追帧；追太勤会让 B 路不断从关键帧重解，反而永远追不平。
+const SYNC_THRESHOLD = 0.3
+
 function syncFromMaster(): void {
   const master = videoA.value
   const follower = videoB.value
   if (!master) return
   currentTime.value = master.currentTime
-  if (follower && Math.abs(follower.currentTime - master.currentTime) > 0.05) {
+  if (follower && !follower.seeking && Math.abs(follower.currentTime - master.currentTime) > SYNC_THRESHOLD) {
     follower.currentTime = master.currentTime
   }
 }
@@ -83,6 +90,25 @@ function onLoaded(): void {
   if (!master) return
   duration.value = Number.isFinite(master.duration) ? master.duration : 0
   currentTime.value = master.currentTime
+}
+
+// B 路必须随 A 路一起播/停：它自己没有任何播放驱动，不播就只靠 seek 挪进度，
+// 每 0.3 秒重解一次关键帧，右路画面成了一跳一跳的。
+function onMasterPlay(): void {
+  playing.value = true
+  void videoB.value?.play()
+}
+
+function onMasterPause(): void {
+  playing.value = false
+  videoB.value?.pause()
+}
+
+function onFollowerLoaded(): void {
+  const master = videoA.value
+  const follower = videoB.value
+  if (!master || !follower || follower.seeking) return
+  follower.currentTime = master.currentTime
 }
 
 function togglePlay(): void {
@@ -104,9 +130,26 @@ function onSeek(value: number | number[]): void {
   currentTime.value = target
 }
 
-function onSplit(value: number | number[]): void {
-  split.value = Number(Array.isArray(value) ? value[0] : value)
+// 分割线直接在画面上拖（旧版交互）：线条自己是拖拽把手，事件不落到画布上免得带动视角。
+const splitDragging = ref(false)
+
+function onLineDown(event: PointerEvent): void {
+  splitDragging.value = true
+  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+  event.stopPropagation()
+}
+
+function onLineMove(event: PointerEvent): void {
+  if (!splitDragging.value || !canvas.value) return
+  event.stopPropagation()
+  const rect = canvas.value.getBoundingClientRect()
+  const fx = ((event.clientX - rect.left) / Math.max(1, rect.width)) * 100
+  split.value = Math.min(98, Math.max(2, fx))
   viewer?.setSplit(split.value / 100)
+}
+
+function onLineUp(): void {
+  splitDragging.value = false
 }
 
 function resetView(): void {
@@ -242,6 +285,14 @@ onUnmounted(() => {
 })
 
 function onKeydown(event: KeyboardEvent): void {
+  // 空格切播放/暂停；焦点在按钮等控件上时让控件自己处理，避免双触发。
+  if (event.code === 'Space') {
+    const tag = (event.target as HTMLElement | null)?.tagName ?? ''
+    if (['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(tag)) return
+    event.preventDefault()
+    togglePlay()
+    return
+  }
   if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
   event.preventDefault()
   const delta = event.key === 'ArrowLeft' ? -2 : 2
@@ -274,6 +325,13 @@ function onKeydown(event: KeyboardEvent): void {
             />
           </el-select>
         </label>
+        <label class="ctl">
+          <span>播放画质</span>
+          <el-select v-model="quality" size="small" style="width: 130px">
+            <el-option label="代理" value="proxy" />
+            <el-option label="原始分辨率" value="original" />
+          </el-select>
+        </label>
         <span class="muted">左路：{{ sourceLabel }}</span>
         <span class="muted">右路：{{ outputLabel }}</span>
         <el-button
@@ -296,24 +354,35 @@ function onKeydown(event: KeyboardEvent): void {
           ref="videoA"
           :src="sourceUrl"
           muted
+          loop
           playsinline
           preload="auto"
           @loadedmetadata="onLoaded"
           @timeupdate="syncFromMaster"
           @seeked="syncFromMaster"
-          @play="playing = true"
-          @pause="playing = false"
+          @play="onMasterPlay"
+          @pause="onMasterPause"
         />
         <video
           ref="videoB"
           :src="outputUrl"
           muted
+          loop
           playsinline
           preload="auto"
-          @loadedmetadata="onLoaded"
+          @loadedmetadata="onFollowerLoaded"
         />
         <canvas ref="canvas" class="compare-canvas" />
-        <div class="split-line" :style="{ left: `${split}%` }" />
+        <div
+          class="split-line"
+          :class="{ dragging: splitDragging }"
+          :style="{ left: `${split}%` }"
+          title="拖动调整分割线位置"
+          @pointerdown="onLineDown"
+          @pointermove="onLineMove"
+          @pointerup="onLineUp"
+          @pointercancel="onLineUp"
+        />
         <div v-if="viewerError" class="viewer-error">{{ viewerError }}</div>
       </div>
 
@@ -330,20 +399,11 @@ function onKeydown(event: KeyboardEvent): void {
           @update:model-value="onSeek"
         />
         <span class="mono muted">{{ timeText }}</span>
-        <span class="split-label">分割线 {{ split }}%</span>
-        <el-slider
-          :model-value="split"
-          :min="2"
-          :max="98"
-          :show-tooltip="false"
-          class="split-slider"
-          @update:model-value="onSplit"
-        />
         <el-button size="small" @click="resetView">视角复位</el-button>
         <el-button size="small" :icon="FullScreen" @click="toggleFullscreen">全屏</el-button>
       </div>
       <p class="muted hint">
-        拖动画面转头，滚轮变焦；左右方向键微调分割线。两路共用同一组视角与时钟，拖动分割线不改变视角。
+        拖动画面转头，滚轮变焦，空格播放/暂停；在画面上左右拖动分割线调整对比位置（左右方向键微调）。两路自动循环播放，共用同一组视角与时钟。
       </p>
     </template>
   </div>
@@ -374,14 +434,21 @@ function onKeydown(event: KeyboardEvent): void {
 
 .compare-stage video {
   position: absolute;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* 不能是 opacity:0 或 1px 尺寸：不可见的视频元素会失去 GPU 直拷贝快路径，
+     texImage2D 退回 CPU 读回整帧导致卡顿；canvas 不透明盖在上面，低透明度不会露出来。 */
+  opacity: 0.01;
   pointer-events: none;
+  z-index: 0;
 }
 
 .compare-canvas {
   display: block;
+  position: relative;
+  z-index: 1;
   width: 100%;
   height: min(66vh, 720px);
   cursor: grab;
@@ -393,10 +460,23 @@ function onKeydown(event: KeyboardEvent): void {
   top: 0;
   bottom: 0;
   width: 2px;
+  z-index: 2;
   background: rgba(255, 255, 255, 0.85);
   transform: translateX(-1px);
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: ew-resize;
   box-shadow: 0 0 8px rgba(0, 0, 0, 0.6);
+}
+
+/* 视觉 2px，命中区放宽到 14px，方便在视频上直接抓取。 */
+.split-line::before {
+  content: '';
+  position: absolute;
+  inset: 0 -6px;
+}
+
+.split-line.dragging {
+  background: rgba(255, 255, 255, 1);
 }
 
 .viewer-error {
@@ -422,16 +502,6 @@ function onKeydown(event: KeyboardEvent): void {
 .time-slider {
   flex: 1;
   min-width: 160px;
-}
-
-.split-slider {
-  width: 140px;
-}
-
-.split-label {
-  color: var(--color-text-muted);
-  font-size: var(--text-xs);
-  white-space: nowrap;
 }
 
 .hint {

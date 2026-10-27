@@ -171,7 +171,7 @@ onMounted(loadCases)
       <el-select v-model="flowFilter" style="width: 150px">
         <el-option label="全部流程" value="all" />
         <el-option label="局部重绘" value="patch" />
-        <el-option label="全流程重绘" value="fullredraw" />
+        <el-option label="全画幅重绘" value="fullredraw" />
         <el-option label="简单生成" value="gen" />
       </el-select>
       <el-select v-model="ownerFilter" style="width: 130px">
@@ -231,7 +231,7 @@ onMounted(loadCases)
         <el-form-item label="流程">
           <el-radio-group v-model="form.flow">
             <el-radio-button value="patch">局部重绘</el-radio-button>
-            <el-radio-button value="fullredraw">全流程重绘</el-radio-button>
+            <el-radio-button value="fullredraw">全画幅重绘</el-radio-button>
             <el-radio-button value="gen">简单生成</el-radio-button>
           </el-radio-group>
         </el-form-item>

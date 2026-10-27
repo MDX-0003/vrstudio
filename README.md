@@ -47,6 +47,47 @@ uv run vrstudio serve
 
 注意：改了 `src/vrstudio/` 下的 Python 代码（包括 `web/app.py`）必须重启服务才会生效；只改模板或静态文件时刷新网页即可。`--cases-dir` 可指定别的 case 根目录，默认是本仓库的 `cases/`。
 
+### 完整的重建与启动流程（含前端）
+
+前端有两份形态：`frontend/` 是源码，`src/vrstudio/web/static/next/` 是
+`npm run build` 的产物——8760 服务的是**产物**，不是源码。改了前端源码但
+没重新 build，8760 上看到的永远是旧版（vite 开发服务器 5173 端口看到的
+才是实时的）。
+
+工作目录（两条命令在不同路径下执行）：
+
+| 命令 | 执行路径 |
+|---|---|
+| `uv sync …` / `uv run …` | `E:\VRAIGC\vrstudio`（仓库根） |
+| `npm install` / `npm run build` / `npm run dev` | `E:\VRAIGC\vrstudio\frontend` |
+
+场景一：**拉了新代码或依赖有变更后首次启动**（顺序执行）：
+
+```bash
+# ① 仓库根：装/更新 Python 环境
+uv sync --extra dev --extra web
+# ② frontend/：装/更新前端依赖（node_modules 已是最新时可跳过）
+cd frontend && npm install
+# ③ frontend/：把源码构建成 8760 服务的静态产物
+npm run build
+# ④ 回到仓库根：启动服务
+cd ..
+uv run vrstudio serve --host 0.0.0.0 --port 8760
+```
+
+场景二：**日常改代码后的更新**——
+
+- 改 Python（`src/vrstudio/**`）：无需 build，重启 serve 即可。
+- 改前端（`frontend/src/**`）：在 `frontend/` 下 `npm run build`，
+  **不用重启 serve**（静态产物每次请求现读盘），刷新网页即生效；
+  serve 运行中 build 也没问题。
+
+场景三：**前端开发调试**：`cd frontend && npm run dev`，用
+<http://localhost:5173/next/>（改动实时热更，不依赖 build）。
+
+补充：`serve` 启动时会自动接管被本项目旧实例占用的端口（portguard，
+控制台会打印接管日志）；占用者若是无关进程则照常报 10048。
+
 ## 目录（目标态，见 docs/architecture.md §3）
 
 ```

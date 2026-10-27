@@ -28,6 +28,7 @@ def serve(
 
     from ..web.app import build_app, sources_dir
     from ..web.logging import setup_logging
+    from ..web.portguard import reclaim_port
 
     log_path = setup_logging(log_dir, log_level, log_keep_days)
     logging.getLogger("vrstudio.serve").info("serve.start", extra={"data": {
@@ -41,5 +42,6 @@ def serve(
     print(f"vrstudio serve: http://{host}:{port}/")
     print(f"  sources/: {sources_dir()}   cases/: {cases_dir or '仓库 cases/'}")
     print(f"  logs/: {log_path}  (service-*.jsonl / client-*.jsonl)")
+    reclaim_port(port)
     uvicorn.run(build_app(cases_dir), host=host, port=port,
                 log_level=uvicorn_level, log_config=None, access_log=False)

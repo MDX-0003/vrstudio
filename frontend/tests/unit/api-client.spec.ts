@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiRequestError, forgetRevision, getJson, postJson, rememberRevision } from '@/api/client'
+import {
+  ApiRequestError,
+  forgetRevision,
+  getJson,
+  isCaseConflicted,
+  postJson,
+  rememberRevision,
+  retryOverwrite,
+} from '@/api/client'
 import { createUpload, putChunk } from '@/api/uploads'
 
 afterEach(() => {
@@ -12,6 +20,13 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { 'Content-Type': 'application/json' },
   })
+}
+
+function conflictResponse(): Response {
+  return jsonResponse(
+    { code: 'revision_conflict', error: 'case 已被其他人修改，请重新加载' },
+    409,
+  )
 }
 
 describe('api client', () => {
@@ -88,6 +103,56 @@ describe('api client', () => {
     await getJson('/api/case/rev-0')
     const headers = fetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>
     expect(headers['X-Case-Revision']).toBeUndefined()
+  })
+
+  it('retryOverwrite 重发最近一次 409 且不带 revision 头', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(conflictResponse())
+      .mockResolvedValue(jsonResponse({ ok: true }, 200))
+    vi.stubGlobal('fetch', fetchMock)
+
+    rememberRevision('ow-case', 3)
+    await expect(postJson('/api/case/ow-case/draft', {})).rejects.toThrow()
+    expect(await retryOverwrite()).toBe(true)
+
+    const retryInit = fetchMock.mock.calls[1]?.[1] as RequestInit
+    const headers = retryInit.headers as Headers
+    expect(headers.has('X-Case-Revision')).toBe(false)
+    expect(retryInit.body).toBe(JSON.stringify({}))
+  })
+
+  it('同一 case 的重复 409 不再派发冲突事件', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(conflictResponse())
+    vi.stubGlobal('fetch', fetchMock)
+    const listener = vi.fn()
+    window.addEventListener('case-conflict', listener)
+    try {
+      await expect(postJson('/api/case/dup-case/draft', {})).rejects.toThrow()
+      await expect(postJson('/api/case/dup-case/draft', {})).rejects.toThrow()
+      expect(listener).toHaveBeenCalledTimes(1)
+      expect(isCaseConflicted('dup-case')).toBe(true)
+      // 清掉模块级待重发槽，避免泄漏到后面的用例。
+      await retryOverwrite()
+    } finally {
+      window.removeEventListener('case-conflict', listener)
+    }
+  })
+
+  it('重新加载成功解除 conflicted，retryOverwrite 无待重发时返回 false', async () => {
+    expect(await retryOverwrite()).toBe(false)
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(conflictResponse())
+      .mockResolvedValue(jsonResponse({}, 200))
+    vi.stubGlobal('fetch', fetchMock)
+    rememberRevision('rl-case', 1)
+    await expect(postJson('/api/case/rl-case/draft', {})).rejects.toThrow()
+    expect(isCaseConflicted('rl-case')).toBe(true)
+
+    await getJson('/api/case/rl-case')
+    expect(isCaseConflicted('rl-case')).toBe(false)
   })
 })
 

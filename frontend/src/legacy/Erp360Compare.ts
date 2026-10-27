@@ -43,8 +43,8 @@ export class Erp360Compare {
   private lastKey = ['', '']
   private loc: Record<string, WebGLUniformLocation | null> = {}
   private raf = 0
+  private observer: ResizeObserver | null = null
   private dragging: { x: number; y: number } | null = null
-  private onResize = (): void => this.resize()
   private onPointerDown = (event: PointerEvent): void => {
     this.dragging = { x: event.clientX, y: event.clientY }
     this.canvas.setPointerCapture(event.pointerId)
@@ -79,7 +79,9 @@ export class Erp360Compare {
     if (!this.gl) return
     this.init()
     this.resize()
-    window.addEventListener('resize', this.onResize)
+    // 画布尺寸只在真正变化时重设；每帧读 clientWidth 会强制同步布局。
+    this.observer = new ResizeObserver(() => this.resize())
+    this.observer.observe(canvas)
     canvas.addEventListener('pointerdown', this.onPointerDown)
     canvas.addEventListener('pointermove', this.onPointerMove)
     canvas.addEventListener('pointerup', this.onPointerUp)
@@ -107,7 +109,8 @@ export class Erp360Compare {
 
   destroy(): void {
     cancelAnimationFrame(this.raf)
-    window.removeEventListener('resize', this.onResize)
+    this.observer?.disconnect()
+    this.observer = null
     this.canvas.removeEventListener('pointerdown', this.onPointerDown)
     this.canvas.removeEventListener('pointermove', this.onPointerMove)
     this.canvas.removeEventListener('pointerup', this.onPointerUp)
@@ -180,7 +183,6 @@ export class Erp360Compare {
   private frame(): void {
     const gl = this.gl
     if (!gl) return
-    this.resize()
     gl.viewport(0, 0, this.canvas.width, this.canvas.height)
     const aspect = this.canvas.width / Math.max(1, this.canvas.height)
     gl.uniform1f(this.loc.uYaw, this.yaw)

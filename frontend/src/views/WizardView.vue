@@ -3,8 +3,8 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Check } from '@element-plus/icons-vue'
-import { fetchCase } from '@/api/case'
-import { ApiRequestError } from '@/api/client'
+import { fetchCase, assignOwnerToMe } from '@/api/case'
+import { ApiRequestError, retryOverwrite } from '@/api/client'
 import { acquireLock, releaseLock } from '@/api/lock'
 import type { GeometryPayload } from '@/api/workflow'
 import CompareStep from '@/views/wizard/CompareStep.vue'
@@ -17,6 +17,7 @@ import CaseLibraryView from '@/views/case/CaseLibraryView.vue'
 import { flowMeta } from '@/constants/flow'
 import { stepsForFlow } from '@/constants/steps'
 import { useCaseLoader } from '@/composables/useCaseLoader'
+import { useSessionStore } from '@/stores/session'
 import type { SaveState } from '@/utils/saveState'
 import type { Flow } from '@/types/case'
 import type { CaseInfo } from '@/types/case-info'
@@ -44,6 +45,9 @@ const activeIndex = computed(() => {
 const caseInfo = ref<CaseInfo | null>(null)
 const saveState = ref<SaveState>('saved')
 const lockHolder = ref<string | null>(null)
+const session = useSessionStore()
+const takingOwner = ref(false)
+const conflictActive = ref(false)
 let lockTimer: ReturnType<typeof setInterval> | null = null
 let caseLoadSeq = 0
 let conflictDialogOpen = false
@@ -89,6 +93,32 @@ function goFlow(): void {
 function onCaseView(value: string | number | boolean | undefined): void {
   if (String(value) === 'library') goLibrary()
   else goFlow()
+}
+
+const ownerMeta = computed(() => caseInfo.value?.meta ?? null)
+const ownerLabel = computed(
+  () => ownerMeta.value?.owner_name ?? '未定（首次打开时自动归属）',
+)
+const ownerIsMine = computed(() => {
+  const uid = session.user?.id
+  return Boolean(uid) && ownerMeta.value?.owner_id === uid
+})
+
+async function takeOwnership(): Promise<void> {
+  if (!caseName.value || takingOwner.value) return
+  takingOwner.value = true
+  try {
+    const { meta } = await assignOwnerToMe(caseName.value)
+    if (caseInfo.value) caseInfo.value = { ...caseInfo.value, meta }
+    ElMessage.success(`已归属到 ${session.displayName} 名下`)
+  } catch (err) {
+    // 409 由全局 case-conflict 弹窗处理（提示后可重新加载再试）。
+    if (!(err instanceof ApiRequestError && err.status === 409)) {
+      ElMessage.error(err instanceof Error ? err.message : '归属失败')
+    }
+  } finally {
+    takingOwner.value = false
+  }
 }
 
 function onStepUpdated(data: CaseInfo): void {
@@ -155,6 +185,7 @@ function startLockHeartbeat(): void {
 }
 
 onMounted(() => {
+  void session.load()
   void loadCase()
   void acquireCaseLock()
   startLockHeartbeat()
@@ -173,18 +204,40 @@ onUnmounted(() => {
 function onCaseConflict(event: Event): void {
   if (conflictDialogOpen) return
   conflictDialogOpen = true
+  conflictActive.value = true
   const detail = (event as CustomEvent<{ error?: string }>).detail
+  const ownerSuffix =
+    caseInfo.value?.meta?.owner_id && caseInfo.value.meta.owner_id === session.user?.id
+      ? '你是这个 case 的负责人。'
+      : ''
   void ElMessageBox.confirm(
-    detail?.error || 'case 已被其他人修改，当前页面的保存会覆盖对方的改动。',
+    (detail?.error || 'case 已被其他人修改，当前页面的保存会覆盖对方的改动。') +
+      ' ' + ownerSuffix +
+      '「仍要保存」会覆盖对方的改动；「重新加载」会丢弃你未保存的修改；' +
+      '点右上角 × 保留当前页面，但本次会话的保存会被拒绝。',
     '保存冲突',
     {
       type: 'warning',
-      confirmButtonText: '重新加载',
-      cancelButtonText: '保留当前页面',
+      distinguishCancelAndClose: true,
+      confirmButtonText: '仍要保存（覆盖对方）',
+      cancelButtonText: '重新加载（丢弃本地修改）',
     },
   )
-    .then(() => loadCase())
-    .catch(() => undefined)
+    .then(async () => {
+      if (await retryOverwrite()) {
+        conflictActive.value = false
+        ElMessage.success('已覆盖保存；对方的改动被替换')
+      } else {
+        ElMessage.error('覆盖保存失败，请刷新页面后重试')
+      }
+    })
+    .catch((action) => {
+      // cancel = 重新加载；close（×）= 保留当前页面（保存仍被拒绝）。
+      if (action === 'cancel') {
+        conflictActive.value = false
+        void loadCase()
+      }
+    })
     .finally(() => {
       conflictDialogOpen = false
     })
@@ -217,12 +270,33 @@ watch(caseName, (_next, previous) => {
       </div>
     </div>
 
+    <div v-if="caseInfo" class="owner-line">
+      <span class="muted">当前归属 = {{ ownerLabel }}</span>
+      <template v-if="!ownerIsMine">
+        <el-button
+          size="small"
+          type="primary"
+          :loading="takingOwner"
+          @click="takeOwnership"
+        >
+          归属到我的名下
+        </el-button>
+        <span class="muted owner-hint">
+          点击后负责人变为「{{ session.displayName }}」；若他人刚修改过归属会提示冲突，刷新后再试。
+        </span>
+      </template>
+    </div>
+
     <el-alert
       v-if="lockHolder"
       type="warning"
       :closable="false"
-      :title="`case 正被 ${lockHolder} 使用；保存仍会写入，请先沟通`"
+      :title="`「${lockHolder}」可能正在编辑此 case；同时修改会互相覆盖，请先向对方确认`"
     />
+
+    <div v-if="conflictActive" class="conflict-line muted">
+      存在未解决的保存冲突：此页面的保存会被拒绝；重新加载或覆盖保存后解除。
+    </div>
 
     <div class="case-switch">
       <el-radio-group
@@ -338,6 +412,22 @@ watch(caseName, (_next, previous) => {
   align-items: flex-end;
   justify-content: space-between;
   gap: var(--space-4);
+}
+
+.owner-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.owner-hint {
+  font-size: var(--text-xs);
+}
+
+.conflict-line {
+  font-size: var(--text-sm);
 }
 
 .crumbs {

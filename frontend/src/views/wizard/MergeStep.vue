@@ -94,6 +94,9 @@ watch(latest, async (task) => {
             </el-button>
             <span v-if="mergeGate?.ok" class="muted">已有成片；再跑一次会覆盖同名文件</span>
           </div>
+          <p class="crop-hint muted">
+            AI 成片与视口比例不一致时默认拒绝合并；勾选后按 cover 缩放并居中裁掉多余画面。
+          </p>
           <div class="file-groups">
             <div class="file-group">
               <h3>合并输入</h3>
@@ -254,6 +257,11 @@ watch(latest, async (task) => {
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-3);
+}
+
+.crop-hint {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-xs);
 }
 
 .file-groups {

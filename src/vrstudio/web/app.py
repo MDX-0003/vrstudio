@@ -1440,7 +1440,7 @@ def _brief(name: str) -> dict | None:
             "gates": _gates(case, extracts),
             "updated_at": updated_at,
             "outputs": len(_outputs(case)),
-            "owner": None,
+            "owner": _meta().read(name).owner_name,
             "task_status": None}
 
 
@@ -1544,6 +1544,17 @@ async def api_case_lock(request):
         return JSONResponse({"error": str(exc), "lock": exc.current.as_dict()},
                             status_code=409)
     return JSONResponse({"lock": lock.as_dict(), "mine": True})
+
+
+async def api_case_owner(request):
+    """归属到我的名下；revision 检查与推进由 CaseRevisionMiddleware 统一做。"""
+    name = request.path_params["name"]
+    try:
+        case_mod.load(name, _ctx["cases_root"])
+    except CaseError:
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    meta = await asyncio.to_thread(_meta().set_owner, name, current_user(request))
+    return JSONResponse({"meta": meta.as_dict()})
 
 
 async def api_sessions(request):
@@ -2843,6 +2854,7 @@ routes = [
     Route("/api/cases", api_cases, methods=["GET", "POST"]),
     Route("/api/case/{name}", api_case),
     Route("/api/case/{name}/lock", api_case_lock, methods=["GET", "POST", "DELETE"]),
+    Route("/api/case/{name}/owner", api_case_owner, methods=["POST"]),
     Route("/api/case/{name}/draft", api_draft, methods=["POST"]),
     Route("/api/case/{name}/prompt", api_prompt, methods=["POST"]),
     Route("/api/case/{name}/params", api_params, methods=["POST"]),
@@ -2909,7 +2921,14 @@ class NoStoreMiddleware:
 #: 否则每次拖框都会让另一页的提示词保存撞 409。
 _REVISION_WRITES = re.compile(
     r"^/api/case/(?P<name>[^/]+)/"
-    r"(?:draft|prompt|params|assets|submit|reset-draft|keyframe/(?:prompt|sheet|refs|pick|handoff))$"
+    r"(?:draft|prompt|params|assets|submit|reset-draft|owner|keyframe/(?:prompt|sheet|refs|pick|handoff))$"
+)
+
+#: 几何高频写端点：拖动帧不带 revision 头，照旧放行不推进 revision；
+#: 落定帧（拖拽结束后的最后一次）带头时做可选校验，一致才落盘并推进。
+#: 没有这层，几何草稿就是纯粹的最后写入者胜出，会静默覆盖别人的草稿。
+_REVISION_GEOMETRY = re.compile(
+    r"^/api/case/(?P<name>[^/]+)/(?:viewport|inner|nudge|viewport-size)$"
 )
 
 
@@ -2930,14 +2949,22 @@ class CaseRevisionMiddleware:
             return
         method = scope["method"].upper()
         match = _REVISION_WRITES.match(scope["path"])
-        if not match or method in ("GET", "HEAD", "OPTIONS"):
+        geometry = _REVISION_GEOMETRY.match(scope["path"])
+        if not match and not geometry:
+            await self.app(scope, receive, send)
+            return
+        if method in ("GET", "HEAD", "OPTIONS"):
             await self.app(scope, receive, send)
             return
 
         request = Request(scope, receive)
-        name = match.group("name")
+        name = (match or geometry).group("name")
         expected: int | None = None
         raw = request.headers.get("x-case-revision")
+        if geometry and raw in (None, ""):
+            # 几何拖动帧：不带头不打断。
+            await self.app(scope, receive, send)
+            return
         body = b""
         if raw not in (None, ""):
             try:

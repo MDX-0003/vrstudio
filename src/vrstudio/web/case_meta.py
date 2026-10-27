@@ -96,15 +96,41 @@ class FileCaseMetaStore:
             if expected_revision is not None and expected_revision != meta.revision:
                 raise RevisionConflict(meta)
             now = _now()
+            uid = getattr(user, "id", None)
+            name = getattr(user, "display_name", None)
+            # owner 是自己时刷新显示名：用户改名后归属行不应留在旧名字上。
+            if meta.owner_id is None or meta.owner_id == uid:
+                owner_id, owner_name = uid, name
+            else:
+                owner_id, owner_name = meta.owner_id, meta.owner_name
             meta = replace(
                 meta,
-                owner_id=meta.owner_id or getattr(user, "id", None),
-                owner_name=meta.owner_name or getattr(user, "display_name", None),
+                owner_id=owner_id,
+                owner_name=owner_name,
                 created_at=meta.created_at or now,
                 updated_at=now,
-                updated_by_id=getattr(user, "id", None),
-                updated_by_name=getattr(user, "display_name", None),
+                updated_by_id=uid,
+                updated_by_name=name,
                 revision=meta.revision + 1,
+            )
+            self._write(case, meta)
+            return meta
+
+    def set_owner(self, case: str, user) -> CaseMeta:
+        """归属到 user 名下；revision 推进由调用方（revision 中间件）负责。"""
+        with self._lock:
+            meta = self.read(case)
+            now = _now()
+            uid = getattr(user, "id", None)
+            name = getattr(user, "display_name", None)
+            meta = replace(
+                meta,
+                owner_id=uid,
+                owner_name=name,
+                created_at=meta.created_at or now,
+                updated_at=now,
+                updated_by_id=uid,
+                updated_by_name=name,
             )
             self._write(case, meta)
             return meta
