@@ -28,11 +28,19 @@ interface Row {
   error: string
 }
 
-const props = defineProps<{ modelValue: boolean; caseName: string }>()
+const props = defineProps<{
+  modelValue: boolean
+  caseName?: string
+  /** assets = 加入素材库（默认，需 caseName）；source = 用作新建 case 的源视频。 */
+  destination?: 'assets' | 'source'
+}>()
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
   added: [data: CaseInfo]
+  uploaded: [file: { uploadId: string; name: string }]
 }>()
+
+const isSource = computed(() => props.destination === 'source')
 
 const visible = computed({
   get: () => props.modelValue,
@@ -164,6 +172,11 @@ function addFiles(files: File[]): void {
       continue
     }
     if (rows.value.some((row) => row.key === storageKey(file))) continue
+    if (isSource.value) {
+      // 源视频一次一个：替换列表（取消未完成的上传）。
+      cancelUploadingRows(false)
+      rows.value = []
+    }
     const row = reactive<Row>({
       key: storageKey(file),
       file,
@@ -234,8 +247,15 @@ async function confirmAdd(): Promise<void> {
   if (!canAdd.value) return
   adding.value = true
   try {
+    if (isSource.value) {
+      const row = completed.value[0]
+      emit('uploaded', { uploadId: row.uploadId as string, name: row.file.name })
+      rows.value = []
+      visible.value = false
+      return
+    }
     const data = await addAssetsByUploads(
-      props.caseName,
+      props.caseName as string,
       completed.value.map((row) => row.uploadId as string),
       completed.value.map((row) => row.role),
     )
@@ -282,7 +302,7 @@ onUnmounted(() => {
 <template>
   <el-dialog
     v-model="visible"
-    title="上传素材"
+    :title="isSource ? '上传源视频' : '上传素材'"
     width="720px"
     :close-on-click-modal="false"
     :before-close="beforeClose"
@@ -301,8 +321,8 @@ onUnmounted(() => {
       <input
         ref="fileInput"
         type="file"
-        multiple
-        accept=".mp4,.mov,.mkv,.avi,.png,.jpg,.jpeg,.webp"
+        :multiple="!isSource"
+        :accept="isSource ? '.mp4,.mov,.mkv,.avi' : '.mp4,.mov,.mkv,.avi,.png,.jpg,.jpeg,.webp'"
         class="file-input"
         @change="onPick"
       />
@@ -333,8 +353,13 @@ onUnmounted(() => {
 
     <template #footer>
       <el-button @click="visible = false">取消</el-button>
-      <el-button type="primary" :loading="adding" :disabled="!canAdd" @click="confirmAdd">
-        加入素材库（{{ completed.length }}）
+      <el-button
+        type="primary"
+        :loading="adding"
+        :disabled="!canAdd"
+        @click="confirmAdd"
+      >
+        {{ isSource ? `用作源视频（${completed.length}）` : `加入素材库（${completed.length}）` }}
       </el-button>
     </template>
   </el-dialog>

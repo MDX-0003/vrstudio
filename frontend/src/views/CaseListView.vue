@@ -2,8 +2,9 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Plus, Refresh, Search } from '@element-plus/icons-vue'
+import { Plus, Refresh, Search, UploadFilled } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
+import AssetUploadDialog from '@/components/upload/AssetUploadDialog.vue'
 import { createCaseRequest, fetchCases, fetchModes, fetchSources } from '@/api/cases'
 import { flowMeta } from '@/constants/flow'
 import { nextStepForFlow } from '@/utils/caseFlow'
@@ -75,6 +76,14 @@ const form = reactive<{ name: string; flow: Flow; mode: string; source: string }
   mode: '',
   source: '',
 })
+const sourceUploadOpen = ref(false)
+const lastUploaded = ref<{ uploadId: string; name: string } | null>(null)
+
+function onSourceUploaded(file: { uploadId: string; name: string }): void {
+  lastUploaded.value = file
+  if (!sources.value.includes(file.name)) sources.value = [...sources.value, file.name]
+  form.source = file.name
+}
 
 async function loadCreateOptions(): Promise<void> {
   try {
@@ -117,12 +126,18 @@ async function createCase(): Promise<void> {
   }
   creating.value = true
   try {
+    const useUpload = lastUploaded.value !== null && form.source === lastUploaded.value.name
     const result = await createCaseRequest({
       flow: form.flow,
       name,
-      ...(form.flow === 'gen' ? { mode: form.mode } : { video: form.source }),
+      ...(form.flow === 'gen'
+        ? { mode: form.mode }
+        : useUpload
+          ? { upload_id: lastUploaded.value!.uploadId }
+          : { video: form.source }),
     })
     createOpen.value = false
+    lastUploaded.value = null
     ElMessage.success(`已创建 ${result.name}`)
     await loadCases()
     const next = nextStepForFlow(form.flow, {})
@@ -236,15 +251,20 @@ onMounted(loadCases)
           </el-radio-group>
         </el-form-item>
         <el-form-item v-if="form.flow !== 'gen'" label="源视频" required>
-          <el-select
-            v-model="form.source"
-            placeholder="选择 sources/ 里的视频"
-            style="width: 100%"
-            :disabled="!sources.length"
-          >
-            <el-option v-for="file in sources" :key="file" :label="file" :value="file" />
-          </el-select>
-          <div v-if="!sources.length" class="field-hint">sources/ 目录里还没有视频。</div>
+          <div class="source-row">
+            <el-select
+              v-model="form.source"
+              placeholder="选择 sources/ 里的视频"
+              style="flex: 1"
+              :disabled="!sources.length"
+            >
+              <el-option v-for="file in sources" :key="file" :label="file" :value="file" />
+            </el-select>
+            <el-button :icon="UploadFilled" @click="sourceUploadOpen = true">上传视频</el-button>
+          </div>
+          <div v-if="!sources.length" class="field-hint">
+            sources/ 目录里还没有视频；可点击「上传视频」直接上传本机文件。
+          </div>
         </el-form-item>
         <el-form-item v-else label="生成模式" required>
           <el-select
@@ -268,6 +288,12 @@ onMounted(loadCases)
         <el-button type="primary" :loading="creating" @click="createCase">创建</el-button>
       </template>
     </el-drawer>
+
+    <AssetUploadDialog
+      v-model="sourceUploadOpen"
+      destination="source"
+      @uploaded="onSourceUploaded"
+    />
   </div>
 </template>
 
@@ -291,6 +317,13 @@ onMounted(loadCases)
   margin-top: var(--space-1);
   color: var(--color-text-muted);
   font-size: var(--text-xs);
+}
+
+.source-row {
+  display: flex;
+  gap: var(--space-2);
+  width: 100%;
+  align-items: center;
 }
 
 :deep(.el-table__row) {

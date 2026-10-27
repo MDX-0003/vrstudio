@@ -1378,6 +1378,30 @@ async def api_cases(request):
         return JSONResponse({"error": f"flow 必须是 {' 或 '.join(case_mod.FLOWS)}"},
                             status_code=400)
     raw_video = str(body.get("video") or "")
+    upload_id = str(body.get("upload_id") or "")
+    if raw_video and upload_id:
+        return JSONResponse({"error": "upload_id 与 video 只能二选一"}, status_code=400)
+    if upload_id:
+        # 外部用户直接上传源视频：复用分片上传会话，落进 sources/ 后走原路径。
+        try:
+            paths, upload_dirs = _uploaded_paths([upload_id])
+        except CaseError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        uploaded = paths[0]
+        if uploaded.suffix.lower() not in _VIDEO_EXTS:
+            return JSONResponse(
+                {"error": f"源视频必须是 {' / '.join(sorted(_VIDEO_EXTS))} 之一"},
+                status_code=400)
+        target = sources_dir() / uploaded.name
+        if target.exists():
+            return JSONResponse(
+                {"error": f"sources/ 里已有同名视频：{uploaded.name}，请重命名后重新上传"},
+                status_code=409)
+        sources_dir().mkdir(parents=True, exist_ok=True)
+        shutil.move(str(uploaded), str(target))
+        for directory in upload_dirs:
+            shutil.rmtree(directory, ignore_errors=True)
+        raw_video = uploaded.name
     video = sources_dir() / Path(raw_video).name if raw_video else None
     mode = body.get("mode")
     if flow == "gen":

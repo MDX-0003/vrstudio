@@ -89,4 +89,34 @@ describe('AssetUploadDialog', () => {
     await flushPromises()
     expect(cancelUpload).not.toHaveBeenCalled()
   })
+
+  it('source 目标：完成回调收到 upload_id 且不写素材库', async () => {
+    const uploads = await import('@/api/uploads')
+    vi.mocked(uploads.putChunk).mockResolvedValue({ received: 5 } as never)
+    vi.mocked(uploads.completeUpload).mockResolvedValue({
+      file_id: 'u1', name: 'src.mp4', size: 5, sha256: 'abc',
+    } as never)
+    const { addAssetsByUploads } = await import('@/api/case')
+
+    const wrapper = mount(AssetUploadDialog, {
+      props: { modelValue: true, destination: 'source' as const },
+      global: { stubs },
+    })
+
+    const input = wrapper.find('input[type="file"]')
+    const file = new File(['hello'], 'src.mp4', { type: 'video/mp4' })
+    Object.defineProperty(input.element, 'files', { value: [file] })
+    await input.trigger('change')
+    await flushPromises()
+
+    const confirm = wrapper
+      .findAll('button')
+      .find((b) => b.text().includes('用作源视频'))
+    expect(confirm).toBeTruthy()
+    await confirm!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.emitted('uploaded')).toEqual([[{ uploadId: 'u1', name: 'src.mp4' }]])
+    expect(addAssetsByUploads).not.toHaveBeenCalled()
+  })
 })

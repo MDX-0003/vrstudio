@@ -52,6 +52,8 @@ export interface CreateCasePayload {
   flow: Flow
   name?: string
   video?: string
+  /** 分片上传完成返回的 file_id；与 video 二选一。 */
+  upload_id?: string
   mode?: string
 }
 
