@@ -346,3 +346,27 @@ def test_master_image_fallback(tmp_path):
     last.write_bytes(b"last")
     case = case_mod.add_assets("g2", [(last, "last_frame")], root=tmp_path)
     assert case.master().id == "i1"       # 兜底第一条图片
+
+
+def test_kind_limited_roles(tmp_path, src_video):
+    case_mod.create("ship", "patch", src_video, root=tmp_path)
+    # 视频不能承担光照参考：添加、改角色、写提交角色三条路径都要拦。
+    with pytest.raises(CaseError, match="lighting_ref"):
+        case_mod.add_assets("ship", [(src_video, "lighting_ref")], root=tmp_path)
+    case = case_mod.add_assets("ship", [(src_video, "motion_ref")], root=tmp_path)
+    assert case.assets[0].kind == "video"
+    with pytest.raises(CaseError, match="lighting_ref"):
+        case_mod.set_asset_role("ship", "v1", "lighting_ref", root=tmp_path)
+    with pytest.raises(CaseError, match="lighting_ref"):
+        case_mod.set_submit_selected("ship", ["v1"], root=tmp_path,
+                                     roles={"v1": "lighting_ref"})
+    # 手改 case.toml 的加载路径同样拦。
+    case_mod.set_submit_selected("ship", ["v1"], root=tmp_path,
+                                 roles={"v1": "motion_ref"})
+    path = case_mod.case_toml("ship", tmp_path)
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            '"v1" = "motion_ref"', '"v1" = "lighting_ref"'),
+        encoding="utf-8")
+    with pytest.raises(CaseError, match="lighting_ref"):
+        case_mod.load("ship", tmp_path)

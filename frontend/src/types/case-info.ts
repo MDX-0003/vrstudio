@@ -224,6 +224,16 @@ export interface CaseMeta {
   revision: number
 }
 
+export interface RoleSpec {
+  name: string
+  label: string
+  help: string
+  kinds: string[] | null
+  modes: string[]
+  open: boolean
+  reserved: boolean
+}
+
 export interface CaseInfo {
   name: string
   flow: Flow
@@ -246,6 +256,7 @@ export interface CaseInfo {
   submit_roles: Record<string, string> | null
   submit_entries: { asset: string; role: string }[]
   role_help: Record<string, string>
+  roles: RoleSpec[]
   derived: FileInfo[]
   extracts: ExtractVersion[]
   outputs: OutputFile[]

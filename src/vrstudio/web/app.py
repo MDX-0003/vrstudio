@@ -44,6 +44,7 @@ from starlette.staticfiles import StaticFiles
 from .. import case as case_mod
 from .. import config as config_mod
 from .. import keyframe as keyframe_mod
+from .. import roles as roles_mod
 from ..case import CaseError
 from ..cli.generate import (
     GenError,
@@ -1314,7 +1315,8 @@ def _case_info(name: str) -> dict | None:
         "submit_selected": case.submit_selected,
         "submit_roles": case.submit_roles,
         "submit_entries": _submit_entries(case, assets),
-        "role_help": dict(case_mod.ROLE_LABELS),
+        "role_help": dict(roles_mod.ROLE_LABELS),
+        "roles": roles_mod.roles_payload(),
         "derived": _derived(case),
         "extracts": extracts,
         "outputs": _outputs(case),

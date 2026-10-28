@@ -6,11 +6,14 @@ import { removeAsset } from '@/api/case'
 import AssetUploadDialog from '@/components/upload/AssetUploadDialog.vue'
 import FileOpenLink from '@/components/common/FileOpenLink.vue'
 import FileRow from '@/components/common/FileRow.vue'
-import { ASSET_ROLE_LABELS } from '@/constants/assetRoles'
 import type { AssetDetail, CaseInfo, FileInfo } from '@/types/case-info'
 
 const props = defineProps<{ caseName: string; info: CaseInfo }>()
 const emit = defineEmits<{ updated: [data: CaseInfo] }>()
+
+const roleLabels = computed<Record<string, string>>(() =>
+  Object.fromEntries((props.info.roles ?? []).map((role) => [role.name, role.label])),
+)
 
 const search = ref('')
 const kind = ref<'all' | 'image' | 'video'>('all')
@@ -41,7 +44,7 @@ function usageList(asset: AssetDetail): UsageRow[] {
   const rows: UsageRow[] = []
   const video = props.info.submit_entries?.find((item) => item.asset === asset.id)
   if (video) {
-    rows.push({ step: '视频提交', role: ASSET_ROLE_LABELS[video.role] ?? video.role })
+    rows.push({ step: '视频提交', role: roleLabels.value[video.role] ?? video.role })
   }
   for (const ref of props.info.keyframe.refs ?? []) {
     if (ref.asset !== asset.id) continue

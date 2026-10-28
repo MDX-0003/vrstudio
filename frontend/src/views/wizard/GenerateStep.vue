@@ -738,6 +738,7 @@ function statusTone(): string {
         :case-name="caseName"
         :rows="submitRows"
         :mode="mode"
+        :roles="info.roles || []"
         :role-help="info.role_help || {}"
         :selected-count="selectedCount"
         :disabled="selectionSaving"

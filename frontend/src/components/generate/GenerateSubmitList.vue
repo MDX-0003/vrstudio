@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import AssetReferenceList from '@/components/assets/AssetReferenceList.vue'
-import { roleOptionsFor as rolesFor } from '@/constants/assetRoles'
+import { optionsFor } from '@/utils/roles'
 import type { RoleOption } from '@/constants/assetRoles'
+import type { RoleSpec } from '@/types/case-info'
 import type { ReferenceRow } from '@/types/reference'
 
 const props = withDefaults(
@@ -10,6 +11,7 @@ const props = withDefaults(
     caseName: string
     rows: ReferenceRow[]
     mode: string
+    roles: RoleSpec[]
     roleHelp?: Record<string, string>
     selectedCount: number
     disabled?: boolean
@@ -24,10 +26,10 @@ const emit = defineEmits<{
   role: [asset: string, role: string]
 }>()
 
-const roleOptions = computed(() => rolesFor(undefined, props.mode))
+const roleOptions = computed(() => optionsFor(props.roles, { mode: props.mode }))
 
 function roleOptionsFor(row: ReferenceRow): RoleOption[] {
-  return rolesFor(row.kind, props.mode)
+  return optionsFor(props.roles, { kind: row.kind, mode: props.mode }, row.role)
 }
 </script>
 

@@ -184,6 +184,18 @@ def test_asset_api_add_role_reorder_remove(client, gen_case, tmp_path):
                     json={"op": "role", "id": "i1", "role": "lighting_ref"})
     assert [a["role"] for a in r.json()["assets"]] == ["edit_master", "lighting_ref"]
 
+    # 光照参考只对图片成立：视频走同一个接口也要按种类拦下。
+    r = client.post("/api/case/g1/assets",
+                    json={"op": "role", "id": "v1", "role": "lighting_ref"})
+    assert r.status_code == 400 and "lighting_ref" in r.json()["error"]
+
+    # 下拉词表由服务端下发：open / kinds / modes 一并给前端。
+    roles = {item["name"]: item for item in client.get("/api/case/g1").json()["roles"]}
+    assert roles["lighting_ref"]["kinds"] == ["image"]
+    assert roles["lighting_ref"]["open"] is True
+    assert "videoEdit" in roles["lighting_ref"]["modes"]
+    assert roles["mask"]["reserved"] is True
+
     r = client.post("/api/case/g1/assets",
                     json={"op": "reorder", "ids": ["i1", "v1"]})
     assert [a["id"] for a in r.json()["assets"]] == ["i1", "v1"]

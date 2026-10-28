@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import REPO_ROOT
+from .roles import RESERVED_ROLES, ROLES, check_kinds
 
 SCHEMA = 1
 FLOWS = ("patch", "fullredraw", "gen")
@@ -29,27 +30,8 @@ _CASE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 _PATCH_SECTIONS = ("viewport", "inner", "frames", "extract")
 
-#: 素材种类与角色受控词表。mask 与首尾原始帧也在词表里（旧 case 与工作台需要
-#: 解析它们），但不能作为用户可添加的 ``[[assets]]`` 角色——它们由流程产物提供。
+#: 素材种类受控词表。角色词表在 roles.py（来自 roles.json 契约快照）。
 KINDS = ("video", "image")
-ROLE_LABELS = {
-    "edit_master": "编辑母版（时间轴、构图与动作基准）",
-    "motion_ref": "动作参考（只提供动作节奏与路径）",
-    "space_ref": "空间参考（只提供机位、构图与起终点位置）",
-    "scene_ref": "场景参考（只提供构图、背景与光照）",
-    "lighting_ref": "光照参考（只提供光源位置、色温、明暗对比与空气质感）",
-    "subject_ref": "主体参考（只定义角色外观）",
-    "first_frame": "首帧定稿图（视频第一帧，锁起点构图与人物外观）",
-    "last_frame": "尾帧定稿图（视频最后一帧，锁终点位置、大小与朝向）",
-    "mid_frame": "中间过渡帧（首尾间距过大时补充，预留）",
-    "first_frame_raw": "首帧原始抽取图（工作台输入底图，不是生成素材）",
-    "last_frame_raw": "尾帧原始抽取图（工作台输入底图，不是生成素材）",
-    "mask": "编辑区域标注（流程产物，装配器自动附带）",
-}
-ROLES = tuple(ROLE_LABELS)
-
-#: 用户不能给文件素材选的角色：由流程产物或工作台提供。
-RESERVED_ROLES = ("mask", "first_frame_raw", "last_frame_raw")
 
 #: 本期支持的生成模式；创建 gen case 与页面下拉框共用。
 GEN_MODES = ("videoEdit", "allMediaRef", "videoExtend", "firstLastFrame")
@@ -311,6 +293,18 @@ def _flow_asset_ids(flow: str) -> set[str]:
     return set()
 
 
+def _flow_asset_kinds(flow: str) -> dict[str, str]:
+    """流程产物都是视频：clip 与 pad 由 pad/extract 从源视频生成。"""
+    return {asset_id: "video" for asset_id in _flow_asset_ids(flow)}
+
+
+def _require_role_kind(role: str, kind: str, where: str) -> None:
+    """角色与素材种类不兼容时在这里拦住，接口直调也无法构造。"""
+    reason = check_kinds(role, kind)
+    if reason:
+        raise CaseError(f"{where}：{reason}")
+
+
 def _parse_submit(raw, assets: list[Asset], flow: str,
                   path: Path) -> tuple[list[str] | None, dict[str, str] | None]:
     """``[submit] selected`` 与可选的 ``[submit.roles]``。
@@ -342,6 +336,7 @@ def _parse_submit(raw, assets: list[Asset], flow: str,
     if not isinstance(roles_raw, dict):
         raise CaseError(f"{path}: [submit.roles] 必须是表")
     roles: dict[str, str] = {}
+    kinds = {asset.id: asset.kind for asset in assets} | _flow_asset_kinds(flow)
     for key, value in roles_raw.items():
         asset_id, role = str(key), str(value)
         if asset_id not in selected:
@@ -352,6 +347,8 @@ def _parse_submit(raw, assets: list[Asset], flow: str,
         if role in RESERVED_ROLES:
             raise CaseError(
                 f"{path}: [submit.roles] 的 {asset_id!r} 使用了保留角色 {role!r}")
+        _require_role_kind(role, kinds[asset_id],
+                           f"{path}: [submit.roles] 的 {asset_id!r}")
         roles[asset_id] = role
     return selected, roles or None
 
@@ -366,6 +363,7 @@ def _validate_asset(asset: Asset, path: Path) -> None:
             f"（kind={asset.kind!r} 应为 {prefix}1、{prefix}2…）")
     if asset.role not in ROLES:
         raise CaseError(f"{path}: 素材 {asset.id} 的 role {asset.role!r} 不合约")
+    _require_role_kind(asset.role, asset.kind, f"{path}: 素材 {asset.id}")
     if not asset.path:
         raise CaseError(f"{path}: 素材 {asset.id} 缺 path")
     rel = Path(asset.path)
@@ -438,6 +436,7 @@ def _add_assets_to(case: Case, pairs: list[tuple[str | Path, str]],
         if role in RESERVED_ROLES:
             raise CaseError(
                 f"角色 {role} 由流程产物或关键帧工作台提供，不能给文件素材指定")
+        _require_role_kind(role, kind, f"素材 {src.name}")
         prefix = "v" if kind == "video" else "i"
         asset_id = f"{prefix}{counters[kind]}"
         counters[kind] += 1
@@ -492,7 +491,9 @@ def set_asset_role(name: str, asset_id: str, role: str,
         raise CaseError(f"角色 {role!r} 不合约；可选：{', '.join(ROLES)}")
     if role in RESERVED_ROLES:
         raise CaseError(f"角色 {role} 由流程产物或关键帧工作台提供，不能给文件素材指定")
-    case.asset(asset_id).role = role
+    asset = case.asset(asset_id)
+    _require_role_kind(role, asset.kind, f"素材 {asset_id}")
+    asset.role = role
     return save(case, root)
 
 
@@ -565,6 +566,7 @@ def set_submit_selected(name: str, selected: list[str] | None,
         roles = {item: current[item] for item in selected if item in current} or None
     else:
         clean: dict[str, str] = {}
+        kinds = {asset.id: asset.kind for asset in case.assets} | _flow_asset_kinds(case.flow)
         for key, value in roles.items():
             asset_id, role = str(key), str(value)
             if asset_id not in selected:
@@ -573,6 +575,7 @@ def set_submit_selected(name: str, selected: list[str] | None,
                 raise CaseError(f"submit roles 的 {asset_id!r} 角色 {role!r} 不合约")
             if role in RESERVED_ROLES:
                 raise CaseError(f"submit roles 的 {asset_id!r} 使用了保留角色 {role!r}")
+            _require_role_kind(role, kinds[asset_id], f"submit roles 的 {asset_id!r}")
             clean[asset_id] = role
         roles = clean or None
     case.submit_selected = selected

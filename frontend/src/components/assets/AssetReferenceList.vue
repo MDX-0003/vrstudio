@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { ArrowDown, ArrowUp, Delete, Picture, Plus } from '@element-plus/icons-vue'
-import { legacyRoleOption, ASSET_ROLE_LABELS, type RoleOption } from '@/constants/assetRoles'
+import type { RoleOption } from '@/constants/assetRoles'
 import type { ReferenceRow } from '@/types/reference'
 
 const props = withDefaults(
@@ -35,20 +35,13 @@ const emit = defineEmits<{
 }>()
 
 function optionsFor(row: ReferenceRow): RoleOption[] {
-  const base = props.roleOptionsFor ? props.roleOptionsFor(row) : props.roleOptions
-  const options = [...base]
-  if (row.role && !options.some((item) => item.value === row.role)) {
-    const legacy = legacyRoleOption(row.role)
-    if (legacy) options.push(legacy)
-  }
-  return options
+  return props.roleOptionsFor ? props.roleOptionsFor(row) : props.roleOptions
 }
 
 function labelFor(row: ReferenceRow): string {
   return (
     row.roleLabel ||
     optionsFor(row).find((item) => item.value === row.role)?.label ||
-    ASSET_ROLE_LABELS[row.role] ||
     row.role
   )
 }
