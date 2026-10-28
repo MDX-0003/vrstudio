@@ -3,6 +3,7 @@ export const ASSET_ROLE_LABELS: Record<string, string> = {
   motion_ref: '动作参考',
   scene_ref: '场景参考',
   space_ref: '空间参考',
+  lighting_ref: '光照参考',
   subject_ref: '主体参考',
   first_frame: '首帧定稿',
   last_frame: '尾帧定稿',
@@ -25,6 +26,25 @@ export const VIDEO_ROLE_OPTIONS: RoleOption[] = [
   { value: 'subject_ref', label: '主体参考', help: '只定义角色外观。' },
   { value: 'motion_ref', label: '动作参考', help: '只提供动作节奏与路径。' },
 ]
+
+/** 图片只多一个光照参考：它只读光，不授予构图与画面内容。 */
+export const IMAGE_ROLE_OPTIONS: RoleOption[] = [
+  ...VIDEO_ROLE_OPTIONS,
+  {
+    value: 'lighting_ref',
+    label: '光照参考',
+    help: '只提供光源位置、色温、明暗对比与空气质感；不提供构图、机位、背景与任何画面内容。',
+  },
+]
+
+/** 提交清单里一行素材的可选角色：按模式与素材种类取。 */
+export function roleOptionsFor(
+  kind: 'video' | 'image' | undefined,
+  mode: string,
+): RoleOption[] {
+  if (mode === 'firstLastFrame') return FIRST_LAST_ROLE_OPTIONS
+  return kind === 'image' ? IMAGE_ROLE_OPTIONS : VIDEO_ROLE_OPTIONS
+}
 
 /** firstLastFrame 的模式专用角色；其它模式不显示。 */
 export const FIRST_LAST_ROLE_OPTIONS: RoleOption[] = [

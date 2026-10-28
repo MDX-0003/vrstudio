@@ -181,6 +181,10 @@ def test_asset_api_add_role_reorder_remove(client, gen_case, tmp_path):
     assert [a["role"] for a in r.json()["assets"]] == ["edit_master", "scene_ref"]
 
     r = client.post("/api/case/g1/assets",
+                    json={"op": "role", "id": "i1", "role": "lighting_ref"})
+    assert [a["role"] for a in r.json()["assets"]] == ["edit_master", "lighting_ref"]
+
+    r = client.post("/api/case/g1/assets",
                     json={"op": "reorder", "ids": ["i1", "v1"]})
     assert [a["id"] for a in r.json()["assets"]] == ["i1", "v1"]
 

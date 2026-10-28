@@ -150,6 +150,7 @@ const submitRows = computed<ReferenceRow[]>(() => {
     return {
       asset: entry.asset,
       role: entry.role,
+      kind: asset?.kind,
       number: index + 1,
       url: asset?.url ?? null,
       exists: asset?.exists ?? false,

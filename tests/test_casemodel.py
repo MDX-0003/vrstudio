@@ -213,6 +213,12 @@ def test_assets_allowed_for_all_flows(tmp_path, src_video):
     assert [a.role for a in case.assets] == ["scene_ref"]
     assert case_mod.load("pano", tmp_path).assets
 
+    # 光照参考只对图片开放：只能给照片读光，不承载场景内容。
+    assert "lighting_ref" in case_mod.ROLES
+    case = case_mod.set_asset_role("pano", "i1", "lighting_ref", root=tmp_path)
+    assert [a.role for a in case.assets] == ["lighting_ref"]
+    assert case_mod.load("pano", tmp_path).assets[0].role == "lighting_ref"
+
 
 def test_asset_crud_all_flows(tmp_path, src_video):
     case_mod.create("ship", "patch", src_video, root=tmp_path)

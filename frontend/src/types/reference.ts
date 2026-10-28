@@ -3,6 +3,7 @@ import type { FileInfo } from './case-info'
 export interface ReferenceRow {
   asset: string
   role: string
+  kind?: 'video' | 'image'
   note?: string
   number?: number
   file?: FileInfo | null

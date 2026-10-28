@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import AssetReferenceList from '@/components/assets/AssetReferenceList.vue'
-import { FIRST_LAST_ROLE_OPTIONS, VIDEO_ROLE_OPTIONS } from '@/constants/assetRoles'
+import { roleOptionsFor as rolesFor } from '@/constants/assetRoles'
+import type { RoleOption } from '@/constants/assetRoles'
 import type { ReferenceRow } from '@/types/reference'
 
 const props = withDefaults(
@@ -23,9 +24,11 @@ const emit = defineEmits<{
   role: [asset: string, role: string]
 }>()
 
-const roleOptions = computed(() =>
-  props.mode === 'firstLastFrame' ? FIRST_LAST_ROLE_OPTIONS : VIDEO_ROLE_OPTIONS,
-)
+const roleOptions = computed(() => rolesFor(undefined, props.mode))
+
+function roleOptionsFor(row: ReferenceRow): RoleOption[] {
+  return rolesFor(row.kind, props.mode)
+}
 </script>
 
 <template>
@@ -40,6 +43,7 @@ const roleOptions = computed(() =>
       <AssetReferenceList
         :rows="rows"
         :role-options="roleOptions"
+        :role-options-for="roleOptionsFor"
         :role-help="roleHelp"
         :disabled="disabled"
         compact

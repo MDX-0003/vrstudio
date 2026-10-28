@@ -8,6 +8,7 @@ const props = withDefaults(
   defineProps<{
     rows: ReferenceRow[]
     roleOptions: RoleOption[]
+    roleOptionsFor?: (row: ReferenceRow) => RoleOption[]
     roleHelp?: Record<string, string>
     showNote?: boolean
     compact?: boolean
@@ -34,7 +35,8 @@ const emit = defineEmits<{
 }>()
 
 function optionsFor(row: ReferenceRow): RoleOption[] {
-  const options = [...props.roleOptions]
+  const base = props.roleOptionsFor ? props.roleOptionsFor(row) : props.roleOptions
+  const options = [...base]
   if (row.role && !options.some((item) => item.value === row.role)) {
     const legacy = legacyRoleOption(row.role)
     if (legacy) options.push(legacy)
@@ -45,14 +47,14 @@ function optionsFor(row: ReferenceRow): RoleOption[] {
 function labelFor(row: ReferenceRow): string {
   return (
     row.roleLabel ||
-    props.roleOptions.find((item) => item.value === row.role)?.label ||
+    optionsFor(row).find((item) => item.value === row.role)?.label ||
     ASSET_ROLE_LABELS[row.role] ||
     row.role
   )
 }
 
-function helpFor(role: string): string {
-  const option = props.roleOptions.find((item) => item.value === role)
+function helpFor(row: ReferenceRow, role: string): string {
+  const option = optionsFor(row).find((item) => item.value === role)
   return props.roleHelp[role] || option?.help || ''
 }
 
@@ -97,7 +99,7 @@ const total = computed(() => props.rows.length)
         v-else
         :model-value="row.role"
         :disabled="disabled || row.locked"
-        :title="helpFor(row.role)"
+        :title="helpFor(row, row.role)"
         size="small"
         class="role-select"
         @change="(value: string | number | boolean | undefined) => emit('role', row.asset, String(value))"
@@ -108,7 +110,7 @@ const total = computed(() => props.rows.length)
           :label="option.label"
           :value="option.value"
         >
-          <span :title="helpFor(option.value)">{{ option.label }}</span>
+          <span :title="helpFor(row, option.value)">{{ option.label }}</span>
         </el-option>
       </el-select>
       <el-input
