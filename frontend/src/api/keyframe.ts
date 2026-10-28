@@ -68,10 +68,6 @@ export function setKeyframeRefs(name: string, refs: KeyframeRefInput[]): Promise
   return putJson<CaseInfo>(`${casePath(name)}/keyframe/refs`, { refs })
 }
 
-export function setKeyframeSheet(name: string, asset: string): Promise<CaseInfo> {
-  return putJson<CaseInfo>(`${casePath(name)}/keyframe/sheet`, { asset })
-}
-
 export function handoffKeyframe(name: string): Promise<CaseInfo> {
   return postJson<CaseInfo>(`${casePath(name)}/keyframe/handoff`, {})
 }

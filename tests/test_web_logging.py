@@ -31,11 +31,12 @@ class Capture(logging.Handler):
 
 def _restore_logger(name: str, saved) -> None:
     logger = logging.getLogger(name)
-    handlers, level, propagate, disabled = saved
+    handlers, level, propagate, disabled, filters = saved
     for handler in logger.handlers:
         if isinstance(handler, DailyJsonlHandler):
             handler.close()
     logger.handlers[:] = handlers
+    logger.filters[:] = filters
     logger.setLevel(level)
     logger.propagate = propagate
     logger.disabled = disabled
@@ -43,7 +44,8 @@ def _restore_logger(name: str, saved) -> None:
 
 def _save_logger(name: str):
     logger = logging.getLogger(name)
-    return (list(logger.handlers), logger.level, logger.propagate, logger.disabled)
+    return (list(logger.handlers), logger.level, logger.propagate, logger.disabled,
+            list(logger.filters))
 
 
 def test_daily_handler_writes_jsonl(tmp_path):
@@ -139,3 +141,49 @@ def test_setup_logging_attaches_separate_files(tmp_path):
     finally:
         for name in names:
             _restore_logger(name, saved[name])
+
+
+def test_setup_logging_drops_duplicate_asgi_exception(tmp_path):
+    """uvicorn 的同一条 ASGI 异常不再记第二遍：请求中间件已经带路径记过。"""
+    names = ["vrstudio", CLIENT_LOGGER, "uvicorn", "uvicorn.error", "uvicorn.access"]
+    saved = {name: _save_logger(name) for name in names}
+
+    def record(message: str) -> logging.LogRecord:
+        return logging.LogRecord("uvicorn.error", logging.ERROR, __file__, 1,
+                                 message, None, None)
+
+    try:
+        setup_logging(tmp_path, "INFO", keep_days=1)
+        uvicorn_error = logging.getLogger("uvicorn.error")
+        # uvicorn 实际发出的文案带尾随换行（h11_impl 里写的是 "...\n"）
+        assert uvicorn_error.filter(record("Exception in ASGI application\n")) is False
+        assert uvicorn_error.filter(record("Exception in ASGI application")) is False
+        assert uvicorn_error.filter(record("Application startup failed.")) is True
+    finally:
+        for name in names:
+            _restore_logger(name, saved[name])
+
+
+def test_request_error_record_carries_path_and_traceback():
+    access = logging.getLogger("vrstudio.web.access")
+    saved = _save_logger(access.name)
+    cap = Capture()
+    access.handlers[:] = [cap]
+    access.setLevel(logging.DEBUG)
+    access.propagate = False
+
+    def boom(request):
+        raise RuntimeError("kaboom")
+
+    try:
+        app = Starlette(routes=[Route("/boom", boom)])
+        app.add_middleware(RequestLogMiddleware)
+        response = TestClient(app, raise_server_exceptions=False).get("/boom")
+    finally:
+        _restore_logger(access.name, saved)
+
+    assert response.status_code == 500
+    assert len(cap.records) == 1
+    message = cap.records[0].getMessage()
+    assert "request.error" in message and "/boom" in message
+    assert cap.records[0].exc_info is not None

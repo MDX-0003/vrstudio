@@ -50,11 +50,11 @@ log = logging.getLogger(PROXY_LOGGER)
 def proxy_max_w() -> int:
     """预览代理的宽度上限（``web.proxy_max_w``）。
 
-    每次调用都读配置：这个值是机器级取舍（远程桌面软解环境要调低），
-    改 vrstudio.toml 后无需重启 serve；侧车记录构建时的 max_w，配置变了
-    旧代理就不再是 ready，按需按新宽度重建。选区全景与对比页两路共用。
+    读的是进程启动时定格的配置（``config.active``），改配置要重启 serve 才
+    生效；侧车记录构建时的 max_w，重启后配置变了旧代理就不再是 ready，按需
+    按新宽度重建。选区全景与对比页两路共用这个上限。
     """
-    return int(config_mod.load().get("web.proxy_max_w", 4096))
+    return int(config_mod.active().get("web.proxy_max_w", 4096))
 
 
 @dataclass

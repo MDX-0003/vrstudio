@@ -110,7 +110,6 @@ def test_case_info_computes_asset_details_once(tmp_path, monkeypatch):
     assert info is not None
     assert calls["n"] == 1
     # 唯一一张 subject_ref 会自动绑定，keyframe 与 assets 看到的是同一份明细
-    assert info["keyframe"]["sheet"] == "i1"
-    assert [row["id"] for row in info["keyframe"]["sheet_candidates"]] == ["i1"]
+    assert [ref["asset"] for ref in info["keyframe"]["refs"]] == ["i1"]
     assert [row["id"] for row in info["assets"]] == ["i1"]
     assert info["gates"]["keyframe"]["ready"] is False

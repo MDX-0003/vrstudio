@@ -151,10 +151,14 @@ class RequestLogMiddleware:
         try:
             await self.app(scope, receive, send_wrapper)
         except Exception:
-            self.log.exception("request.error", extra={"data": {
-                "event": "request.error", "rid": rid,
-                "method": scope.get("method", ""), "path": target[:1000],
-            }})
+            # 带方法与路径记一条：这是控制台上唯一的一条异常记录，uvicorn 那条
+            # 同内容记录被 AsgiExceptionDuplicateFilter 丢掉。
+            self.log.exception(
+                f"request.error {scope.get('method', '')} {target[:300]}",
+                extra={"data": {
+                    "event": "request.error", "rid": rid,
+                    "method": scope.get("method", ""), "path": target[:1000],
+                }})
             raise
 
         ms = (time.perf_counter() - started) * 1000
@@ -193,6 +197,21 @@ def _replace_handlers(logger: logging.Logger, handlers: list[logging.Handler],
     logger.propagate = propagate
 
 
+_ASGI_DUPLICATE = "Exception in ASGI application"
+
+
+class AsgiExceptionDuplicateFilter(logging.Filter):
+    """丢掉 uvicorn 记的同一条 ASGI 异常：请求中间件已经带 rid 与路径记过一遍。
+
+    只按这一句固定文案过滤，uvicorn 的其他异常（启动失败、lifespan 报错）照常
+    保留；万一 uvicorn 换了文案，最坏结果是重复的那条回来，不会吞掉真实错误。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # uvicorn 这条消息带尾随换行（h11_impl 里的 "Exception in ASGI application\n"）
+        return record.getMessage().strip() != _ASGI_DUPLICATE
+
+
 def setup_logging(log_dir: str | Path = "logs/serve",
                   level: str = "INFO", keep_days: int = 14) -> Path:
     """配置服务与前端错误两套 JSONL 日志，返回日志目录。
@@ -228,6 +247,7 @@ def setup_logging(log_dir: str | Path = "logs/serve",
     _replace_handlers(uvicorn_logger, [service, console], numeric, propagate=False)
     uvicorn_error = logging.getLogger("uvicorn.error")
     uvicorn_error.handlers[:] = []
+    uvicorn_error.filters[:] = [AsgiExceptionDuplicateFilter()]
     uvicorn_error.propagate = True
     uvicorn_error.setLevel(numeric)
     logging.getLogger("uvicorn.access").disabled = True

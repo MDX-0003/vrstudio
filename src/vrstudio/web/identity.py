@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from urllib.parse import unquote
 
 from starlette.requests import Request
 
@@ -35,7 +36,8 @@ class NicknameProvider:
         if not uid:
             uid = uuid.uuid4().hex
             new_uid = uid
-        name = (request.cookies.get(NAME_COOKIE) or "").strip()
+        # 昵称按 UTF-8 百分号编码写进 cookie（HTTP 头只允许 ASCII），这里解回来。
+        name = unquote(request.cookies.get(NAME_COOKIE) or "").strip()
         if not name:
             name = DEFAULT_NAME
         return User(uid, name[:MAX_NAME_LENGTH]), new_uid

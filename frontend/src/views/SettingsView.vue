@@ -48,9 +48,6 @@ async function saveNickname(): Promise<void> {
             <el-button type="primary" :loading="saving" @click="saveNickname">保存</el-button>
           </div>
         </el-form-item>
-        <el-form-item label="旧版入口">
-          <el-link href="/" target="_blank">打开旧版控制台</el-link>
-        </el-form-item>
       </el-form>
     </div>
   </div>

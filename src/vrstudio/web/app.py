@@ -27,14 +27,12 @@ from pathlib import Path
 from urllib.parse import quote
 
 import cv2
-import jinja2
 import numpy as np
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import (
     FileResponse,
-    HTMLResponse,
     JSONResponse,
     PlainTextResponse,
     RedirectResponse,
@@ -97,9 +95,6 @@ _FILE_MEDIA_TYPES = {
     ".log": "text/plain; charset=utf-8",
 }
 
-_env = jinja2.Environment(loader=jinja2.FileSystemLoader(_WEB_DIR / "templates"),
-                          autoescape=True)
-
 #: 单人本地用；serve --cases-dir / 未来多用户在此换全局上下文
 _ctx = {"cases_root": None, "meta": None, "locks": None}
 
@@ -137,14 +132,14 @@ def sources_dir() -> Path:
 # SHA-256，加入 case 时按哈希去重，避免同一文件被静默收两遍。
 
 UPLOAD_CHUNK = 8 * 1024 * 1024
-UPLOAD_MAX_DEFAULT = 2 * 1024 ** 3
+UPLOAD_MAX_DEFAULT = 10 * 1024 ** 3
 UPLOAD_TTL_SECONDS = 24 * 3600
 _UPLOAD_ID = re.compile(r"^[0-9a-f]{32}$")
 
 
 def _upload_max_bytes() -> int:
     try:
-        return int(config_mod.load().get("web.upload_max_bytes", UPLOAD_MAX_DEFAULT))
+        return int(config_mod.active().get("web.upload_max_bytes", UPLOAD_MAX_DEFAULT))
     except (TypeError, ValueError):
         return UPLOAD_MAX_DEFAULT
 
@@ -295,25 +290,14 @@ def _log_geometry(request, name: str, event: str, old: dict, new: dict) -> None:
 # ── 页面 ─────────────────────────────────────────────────────────────────
 
 
-def _default_frontend() -> str:
-    value = str(config_mod.load().get("web.default_frontend", "next")).strip().lower()
-    return value if value in ("next", "legacy") else "next"
-
-
 async def index(request):
-    if _default_frontend() == "next":
-        return RedirectResponse("/next/", status_code=307)
-    return HTMLResponse(_env.get_template("cases.html").render())
+    return RedirectResponse("/next/", status_code=307)
 
 
-async def wizard(request):
+async def legacy_case(request):
+    """旧版 `/case/{name}` 已退役：转到新前端的同一 case（保留旧书签）。"""
     name = request.path_params["name"]
-    try:
-        case = case_mod.load(name, _ctx["cases_root"])
-    except CaseError:
-        return JSONResponse({"error": f"没有这个 case：{name}"}, status_code=404)
-    return HTMLResponse(_env.get_template("wizard.html").render(
-        name=case.name, flow=case.flow))
+    return RedirectResponse(f"/next/case/{quote(name, safe='')}", status_code=307)
 
 
 _NEXT_DIR = _WEB_DIR / "static" / "next"
@@ -465,11 +449,11 @@ async def img(request):
 
 
 def _vrgen_exe() -> str:
-    return str(config_mod.load().get("generate.vrgen", "vrgen"))
+    return str(config_mod.active().get("generate.vrgen", "vrgen"))
 
 
 def _workdir() -> Path:
-    conf = config_mod.load()
+    conf = config_mod.active()
     raw = Path(str(conf.get("generate.workdir", "vrgen_runs")))
     return raw if raw.is_absolute() else config_mod.REPO_ROOT / raw
 
@@ -911,15 +895,14 @@ def _keyframe_state(case: case_mod.Case, details: list[dict] | None = None) -> d
 
     图片步的输入全部从这里与原始帧解析，不读 ``[submit]``；视频提交清单
     仍只由生成页的引用条目决定。``details`` 允许调用方传入已算好的素材明细，
-    一次请求里不重复解码整批素材。``sheet`` / ``sheet_candidates`` 是旧版
-    控制台的派生字段，新前端只读 ``refs``。"""
+    一次请求里不重复解码整批素材。"""
     role_help = {
         "subject_ref": "人物三视图：唯一外观依据。",
         "detail_ref": "细节参考：只继承所指细节的外观，不取构图、背景与姿态。",
     }
     base = {"enabled": case.flow in ("patch", "gen"), "error": None,
             "refs": [], "refs_default": False,
-            "sheet": None, "sheet_candidates": [], "first": None, "last": None,
+            "first": None, "last": None,
             "extract": None, "stale": False, "complete": False,
             "role_help": role_help}
     if case.flow not in ("patch", "gen"):
@@ -952,9 +935,6 @@ def _keyframe_state(case: case_mod.Case, details: list[dict] | None = None) -> d
                       ("name", "rel", "path", "exists", "mtime", "size", "open_url")}
                      if row else None),
         })
-    sheets = [d for d in details
-              if d["kind"] == "image" and d["role"] == "subject_ref" and d.get("exists")]
-    primary = next((r for r in refs if r["role"] == "subject_ref"), None)
     first = _pick_row(state.first, {d["id"]: d for d in details
                                     if d["role"] == "first_frame"})
     last = _pick_row(state.last, {d["id"]: d for d in details
@@ -964,10 +944,6 @@ def _keyframe_state(case: case_mod.Case, details: list[dict] | None = None) -> d
     base.update({
         "refs": refs,
         "refs_default": default,
-        "sheet": primary["asset"] if primary and primary["exists"] else None,
-        "sheet_candidates": [{"id": d["id"], "label": d["label"], "path": d["path"],
-                              "rel": d.get("rel"), "open_url": d.get("open_url")}
-                             for d in sheets],
         "first": first, "last": last, "extract": state.extract,
         "stale": stale,
         "complete": bool(first and last and not stale),
@@ -2176,40 +2152,6 @@ async def api_keyframe_refs(request):
     return JSONResponse(await asyncio.to_thread(_info_with_generation, name))
 
 
-async def api_keyframe_sheet(request):
-    """旧版控制台的兼容入口：把一张 subject_ref 图片设为主三视图。"""
-    name = request.path_params["name"]
-    try:
-        case = case_mod.load(name, _ctx["cases_root"])
-    except CaseError:
-        return JSONResponse({"error": "no such case"}, status_code=404)
-    if request.method == "GET":
-        state = _keyframe_state(case)
-        return JSONResponse({"sheet": state["sheet"],
-                             "candidates": state["sheet_candidates"]})
-    body = await request.json()
-    asset_id = str(body.get("asset") or "").strip()
-    if asset_id:
-        try:
-            asset = case.asset(asset_id)
-        except CaseError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-        if asset.kind != "image" or asset.role != "subject_ref":
-            return JSONResponse({"error": "图片步绑定的三视图必须是 subject_ref 图片"},
-                                status_code=400)
-    try:
-        state, refs = _keyframe_refs(case)
-        refs = [ref for ref in refs
-                if ref.role != "subject_ref" and ref.asset != asset_id]
-        if asset_id:
-            refs.insert(0, keyframe_mod.Ref(asset=asset_id, role="subject_ref"))
-        state.refs = refs
-        keyframe_mod.save(case.dir(_ctx["cases_root"]), state)
-    except (keyframe_mod.KeyframeError, OSError) as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    return JSONResponse(await asyncio.to_thread(_info_with_generation, name))
-
-
 async def api_keyframe_prompt(request):
     name = request.path_params["name"]
     if request.method == "GET":
@@ -2731,7 +2673,8 @@ async def api_me(request):
         "display_name": name,
         "authenticated": False,
     })
-    response.set_cookie(NAME_COOKIE, name, max_age=365 * 24 * 3600,
+    # cookie 值只能是 ASCII：昵称按 UTF-8 百分号编码写入，读取时解码。
+    response.set_cookie(NAME_COOKIE, quote(name, safe=""), max_age=365 * 24 * 3600,
                         httponly=True, samesite="lax")
     return response
 
@@ -2867,7 +2810,7 @@ async def api_browse(request):
 
 routes = [
     Route("/", index),
-    Route("/case/{name}", wizard),
+    Route("/case/{name}", legacy_case),
     Route("/img/{name}/{file}", img),
     Route("/file", file_open),
     Route("/img/asset/{name}/{file}", asset_img),
@@ -2892,8 +2835,6 @@ routes = [
     Route("/api/case/{name}/keyframe/run", api_keyframe_run, methods=["POST"]),
     Route("/api/case/{name}/keyframe/rounds", api_keyframe_rounds),
     Route("/api/case/{name}/keyframe/pick", api_keyframe_pick, methods=["POST"]),
-    Route("/api/case/{name}/keyframe/sheet", api_keyframe_sheet,
-          methods=["GET", "PUT"]),
     Route("/api/case/{name}/keyframe/refs", api_keyframe_refs,
           methods=["GET", "PUT"]),
     Route("/api/case/{name}/keyframe/prompt", api_keyframe_prompt,
@@ -2921,8 +2862,8 @@ routes = [
 
 
 class NoStoreMiddleware:
-    """Cache-Control: no-store：本地工具绝不能端出旧 UI——浏览器对
-    dashboard.js 的启发式缓存曾让一个修复整个会话看起来是坏的。"""
+    """Cache-Control: no-store：本地工具绝不能端出旧 UI——浏览器启发式缓存
+    曾让一个修复整个会话看起来是坏的。"""
 
     def __init__(self, app):
         self.app = app
@@ -2945,7 +2886,7 @@ class NoStoreMiddleware:
 #: 否则每次拖框都会让另一页的提示词保存撞 409。
 _REVISION_WRITES = re.compile(
     r"^/api/case/(?P<name>[^/]+)/"
-    r"(?:draft|prompt|params|assets|submit|reset-draft|owner|keyframe/(?:prompt|sheet|refs|pick|handoff))$"
+    r"(?:draft|prompt|params|assets|submit|reset-draft|owner|keyframe/(?:prompt|refs|pick|handoff))$"
 )
 
 #: 几何高频写端点：拖动帧不带 revision 头，照旧放行不推进 revision；
@@ -3050,6 +2991,8 @@ class CaseRevisionMiddleware:
 
 
 def build_app(cases_root: str | Path | None = None) -> Starlette:
+    # 配置在装配应用时定格：错误在这里抛，不会变成每个请求的 500。
+    config_mod.active()
     _ctx["cases_root"] = cases_root
     _ctx["meta"] = case_meta.FileCaseMetaStore(cases_root)
     _ctx["locks"] = FileCaseLockStore(cases_root)
@@ -3062,8 +3005,6 @@ def build_app(cases_root: str | Path | None = None) -> Starlette:
     app.add_middleware(RequestLogMiddleware)
     app.add_middleware(CaseRevisionMiddleware)
     app.add_middleware(IdentityMiddleware)
-    app.mount("/static", StaticFiles(directory=str(_WEB_DIR / "static")),
-              name="static")
     app.mount("/next", NextFrontendFiles(directory=str(_NEXT_DIR), html=True,
                                          check_dir=False), name="next")
     return app

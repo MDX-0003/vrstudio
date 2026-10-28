@@ -492,10 +492,6 @@ def set_asset_role(name: str, asset_id: str, role: str,
     if role in RESERVED_ROLES:
         raise CaseError(f"角色 {role} 由流程产物或关键帧工作台提供，不能给文件素材指定")
     case.asset(asset_id).role = role
-    if case.submit_selected and asset_id in case.submit_selected:
-        roles = dict(case.submit_roles or {})
-        roles[asset_id] = role
-        case.submit_roles = roles
     return save(case, root)
 
 

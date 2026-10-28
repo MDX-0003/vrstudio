@@ -115,44 +115,17 @@ def gen_case(tmp_path) -> str:
 # ── 页面与列表 ────────────────────────────────────────────────────────────
 
 
-def test_index_redirects_to_next_by_default(client):
+def test_index_redirects_to_next(client):
     r = client.get("/", follow_redirects=False)
     assert r.status_code == 307 and r.headers["location"] == "/next/"
 
 
-def test_index_falls_back_to_legacy_by_config(client, monkeypatch):
-    monkeypatch.setattr(web_app, "_default_frontend", lambda: "legacy")
-    r = client.get("/")
-    assert r.status_code == 200 and "vrstudio" in r.text
+def test_legacy_case_url_redirects_to_next(client):
+    r = client.get("/case/p1", follow_redirects=False)
+    assert r.status_code == 307 and r.headers["location"] == "/next/case/p1"
 
 
-def test_wizard_page_renders_flow(client, patch_case):
-    r = client.get("/case/p1")
-    assert r.status_code == 200 and "patch" in r.text and "p1" in r.text
-    # 对比页的 360° 画布与统一播放控制（原生 controls 已移除）
-    assert "cmpCanvas" in r.text and "cmpSeek" in r.text and "controls" not in r.text
-
-
-def test_wizard_page_404_for_unknown(client):
-    assert client.get("/case/nope").status_code == 404
-
-
-def test_fullredraw_wizard_page_renders_partials(client, fullredraw_case):
-    r = client.get("/case/f1")
-    assert r.status_code == 200
-    assert "扩充原视频两侧画面" in r.text and "裁回原尺寸" in r.text
-    assert "生成设置" in r.text and "提交生成" in r.text
-    assert 'id="submitBar"' in r.text and 'id="genMode"' in r.text
-    assert 'id="sessProject"' in r.text
-    assert 'id="resultStrip"' in r.text
-    assert "Session 列表与选用" not in r.text and "logBox" not in r.text
-
-
-def test_gen_wizard_page_has_assets_and_generate(client, gen_case):
-    r = client.get("/case/g1")
-    assert r.status_code == 200
-    assert 'data-flow="gen"' in r.text
-    assert "添加视频或图片" in r.text and "素材" in r.text
+def test_gen_case_info_has_assets_and_generate(client, gen_case):
     info = client.get("/api/case/g1").json()
     assert set(info["gates"]) == {"assets", "generate"}   # gen：素材 → 生成
     assert info["gates"]["assets"]["ok"] is True          # 创建时的源视频已复制为 v1
@@ -479,7 +452,7 @@ def test_rounds_include_result_and_run_json_file_entries(client, tmp_path, monke
     assert files["r2"]["run_json"]["exists"] is False
 
 
-def test_keyframe_pick_and_sheet_candidates_carry_open_url(
+def test_keyframe_pick_and_refs_carry_open_url(
         client, patch_case, tmp_path, monkeypatch):
     _keyframe_ready(tmp_path, monkeypatch)
     _add_image("p1", tmp_path, "first", "first_frame")
@@ -493,8 +466,8 @@ def test_keyframe_pick_and_sheet_candidates_carry_open_url(
     assert first["file"]["exists"] is True
     assert first["file"]["name"].endswith(".png")
     assert first["file"]["open_url"].startswith("/file?root=cases&p=")
-    sheet = info["keyframe"]["sheet_candidates"][0]
-    assert sheet["open_url"].startswith("/file?root=cases&p=")
+    ref = info["keyframe"]["refs"][0]
+    assert ref["file"]["open_url"].startswith("/file?root=cases&p=")
     assert info["keyframe"]["role_help"]["detail_ref"].startswith("细节参考")
 
 
@@ -1490,7 +1463,6 @@ def test_keyframe_refs_endpoint(client, patch_case, tmp_path):
     assert [(ref["asset"], ref["role"], ref["note"])
             for ref in info["keyframe"]["refs"]] == [
         ("i1", "subject_ref", ""), ("i2", "detail_ref", "袖口纹样")]
-    assert info["keyframe"]["sheet"] == "i1"
     assert info["submit_selected"] is None
     assert client.get("/api/case/p1/keyframe/refs").json()["refs"][1]["note"] == "袖口纹样"
 
@@ -1499,16 +1471,6 @@ def test_keyframe_refs_endpoint(client, patch_case, tmp_path):
         {"asset": "i2", "role": "subject_ref"},
     ]})
     assert r.status_code == 400
-
-
-def test_keyframe_sheet_switch_does_not_touch_submit(client, patch_case, tmp_path):
-    _add_image("p1", tmp_path, "a", "subject_ref")
-    _add_image("p1", tmp_path, "b", "subject_ref")
-    case_mod.set_submit_selected("p1", ["i2"], root=tmp_path)
-    r = client.put("/api/case/p1/keyframe/sheet", json={"asset": "i1"})
-    assert r.status_code == 200, r.text
-    assert r.json()["keyframe"]["sheet"] == "i1"
-    assert r.json()["submit_selected"] == ["i2"]
 
 
 def test_keyframe_prompt_uses_vars_file(client, patch_case, tmp_path, monkeypatch):
@@ -1605,8 +1567,8 @@ def test_keyframe_pointer_must_match_a_live_role(client, patch_case, tmp_path, m
     keyframe.save(cdir, keyframe.State(
         refs=[keyframe.Ref("i9", "subject_ref")]))
     info = client.get("/api/case/p1").json()
-    assert info["keyframe"]["sheet"] is None
-    assert len(info["keyframe"]["sheet_candidates"]) == 2
+    assert info["keyframe"]["refs"][0]["asset"] == "i9"
+    assert info["keyframe"]["refs"][0]["exists"] is False
     # 指针指向的素材角色已经变了：按未定稿处理。
     keyframe.save(cdir, keyframe.State(
         refs=[keyframe.Ref("i1", "subject_ref")],
@@ -1638,38 +1600,6 @@ def test_keyframe_gate_states(client, patch_case, tmp_path, monkeypatch):
     info = client.get("/api/case/p1").json()
     gate = info["gates"]["keyframe"]
     assert gate["ok"] is False and "抽取版本" in gate["reason"]
-
-
-def test_gen_page_has_sidebar_and_no_keyframe_step(client, gen_case):
-    text = client.get("/case/g1").text
-    assert "素材库与本次视频提交" in text
-    assert "时长" in text and "genDuration" in text
-    assert "最近成片" in text and "扣费额度" in text
-    assert text.count('id="genMode"') == 1        # 控件只在底栏出现
-    assert text.count('id="sessProject"') == 1
-    assert "pnl-assets" not in text       # 素材步骤已并入生成页侧边栏
-    # gen 的首尾帧入口待“上传两张原始帧”的入口，本轮只接 patch。
-    assert 'id="pnl-keyframe"' not in text
-
-
-def test_fullredraw_page_has_no_keyframe_step(client, fullredraw_case):
-    text = client.get("/case/f1").text
-    assert "素材库与本次视频提交" in text
-    assert 'id="pnl-keyframe"' not in text
-
-
-def test_patch_page_has_keyframe_step(client, patch_case):
-    text = client.get("/case/p1").text
-    assert 'id="pnl-keyframe"' in text
-    assert "首尾帧重绘" in text
-    assert "从当前 clip 抽首尾原始帧" not in text
-    assert "两帧底图" in text
-
-
-def test_patch_page_has_footprint_and_size_control(client, patch_case):
-    text = client.get("/case/p1").text
-    assert 'id="vpFoots"' in text and 'class="vpFoot"' in text
-    assert 'id="vpSize"' in text
 
 
 def test_next_frontend_reports_missing_build(tmp_path, monkeypatch):
@@ -1713,6 +1643,25 @@ def test_identity_roundtrip(client):
 def test_identity_rejects_empty_and_long_names(client):
     assert client.post("/api/me", json={"display_name": "  "}).status_code == 400
     assert client.post("/api/me", json={"display_name": "x" * 41}).status_code == 400
+
+
+def test_identity_accepts_non_ascii_name(client):
+    """中文昵称要能存：cookie 值只能是 ASCII，写入按 UTF-8 百分号编码。
+
+    未编码时 Starlette 在 set_cookie 里抛 UnicodeEncodeError，整个请求变 500。
+    """
+    saved = client.post("/api/me", json={"display_name": "张三"})
+    assert saved.status_code == 200
+    assert saved.json()["display_name"] == "张三"
+    assert client.get("/api/me").json()["display_name"] == "张三"
+
+
+def test_request_path_does_not_reload_config(client, patch_case, monkeypatch):
+    """配置在 build_app 时定格；请求路径再读盘就会让代码与配置在运行中错开。"""
+    monkeypatch.setattr(config_mod, "load",
+                        lambda *args, **kwargs: pytest.fail("请求路径不应重新加载配置"))
+    response = client.get(f"/api/case/{patch_case}")
+    assert response.status_code == 200
 
 
 def test_task_view_and_queue_filter():

@@ -311,17 +311,6 @@ def test_submit_roles_reject_unknown_entries(tmp_path):
                                      roles={"i1": "mask"})
 
 
-def test_set_asset_role_syncs_selected_role(tmp_path):
-    case_mod.create("g", "gen", root=tmp_path)
-    image = tmp_path / "x.png"
-    image.write_bytes(b"x")
-    case_mod.add_assets("g", [(image, "subject_ref")], root=tmp_path)
-    case_mod.set_submit_selected("g", ["i1"], root=tmp_path)
-    case = case_mod.set_asset_role("g", "i1", "motion_ref", root=tmp_path)
-    assert case.submit_roles == {"i1": "motion_ref"}
-    assert case.submit_role("i1") == "motion_ref"
-
-
 def test_remove_asset_removes_submit_role(tmp_path):
     case_mod.create("g", "gen", root=tmp_path)
     image = tmp_path / "x.png"

@@ -317,7 +317,7 @@ onUnmounted(() => {
     >
       <el-icon :size="30"><UploadFilled /></el-icon>
       <p>把视频或图片拖到这里，或点击选择文件</p>
-      <p class="muted">单文件最大 2 GB；分片 8 MB，失败自动重试三次，刷新后可续传。</p>
+      <p class="muted">单文件最大 10 GB；分片 8 MB，失败自动重试三次，刷新后可续传。</p>
       <input
         ref="fileInput"
         type="file"

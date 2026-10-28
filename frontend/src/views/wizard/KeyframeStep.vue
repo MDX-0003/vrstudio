@@ -971,63 +971,6 @@ onUnmounted(() => {
   font-size: var(--text-xs);
 }
 
-.kf-sheet-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: var(--space-2);
-}
-
-.kf-sheet-card {
-  padding: 0;
-  overflow: hidden;
-  border: 2px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
-  text-align: left;
-  cursor: pointer;
-}
-
-.kf-sheet-card.picked {
-  border-color: var(--color-success);
-}
-
-.kf-sheet-card img {
-  display: block;
-  width: 100%;
-  aspect-ratio: 4 / 3;
-  object-fit: contain;
-  background: var(--color-surface-muted);
-}
-
-.kf-sheet-cap {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-1);
-  min-width: 0;
-  padding: var(--space-1) var(--space-2);
-  font-size: 11px;
-}
-
-.kf-sheet-cap .mono {
-  flex: 1 0 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.kf-sheet-foot {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--space-1);
-}
-
-.kf-sheet-foot .kf-drawer-note {
-  margin: 0;
-  text-align: left;
-}
-
 @media (max-width: 1280px) {
   .kf-slots {
     grid-template-columns: repeat(2, minmax(0, 1fr));

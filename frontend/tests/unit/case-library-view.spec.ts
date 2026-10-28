@@ -69,11 +69,21 @@ function info(): CaseInfo {
   } as unknown as CaseInfo
 }
 
-function mountView() {
+function mountView(data: CaseInfo = info()) {
   return mount(CaseLibraryView, {
-    props: { caseName: 'p1', info: info() },
+    props: { caseName: 'p1', info: data },
     global: { plugins: [ElementPlus] },
   })
+}
+
+const SOURCE_FILE = {
+  name: 'pano_source.mp4',
+  rel: 'sources/pano_source.mp4',
+  path: 'E:/repo/sources/pano_source.mp4',
+  exists: true,
+  mtime: null,
+  size: 2684354560,
+  open_url: '/file?root=sources&p=pano_source.mp4',
 }
 
 describe('CaseLibraryView', () => {
@@ -105,6 +115,62 @@ describe('CaseLibraryView', () => {
     await wrapper.vm.$nextTick()
     expect(wrapper.findAll('.library-row')).toHaveLength(2)
     expect(wrapper.text()).toContain('i3_detail.png')
+    wrapper.unmount()
+  })
+
+  it('shows the source video as a read-only flow file', () => {
+    const data = info()
+    data.source_file = SOURCE_FILE as unknown as CaseInfo['source_file']
+    const wrapper = mountView(data)
+    expect(wrapper.find('.library-flow').exists()).toBe(true)
+    expect(wrapper.text()).toContain('流程文件')
+    expect(wrapper.text()).toContain('源视频')
+    expect(wrapper.text()).toContain('pano_source.mp4')
+    expect(wrapper.find('.library-flow .file-row').exists()).toBe(true)
+    // 源视频不进素材表格，也不占素材计数。
+    expect(wrapper.findAll('.library-row')).toHaveLength(4)
+    expect(wrapper.text()).toContain('素材 3')
+    wrapper.unmount()
+  })
+
+  it('shows the flow master (pad/clip) with its submit state', () => {
+    const data = info()
+    data.assets = [
+      { ...asset('pad', 'edit_master', 'seedance_input.mp4', 'video'), source: 'flow', role_fixed: true },
+    ]
+    data.submit_entries = [{ asset: 'pad', role: 'edit_master' }]
+    const wrapper = mountView(data)
+    const flow = wrapper.find('.library-flow')
+    expect(flow.exists()).toBe(true)
+    expect(flow.text()).toContain('母版')
+    expect(flow.text()).toContain('seedance_input.mp4')
+    expect(flow.text()).toContain('已加入本次提交')
+    // 流程母版不参与素材表格与筛选计数，但算进「被引用」。
+    expect(wrapper.findAll('.library-row')).toHaveLength(1) // 只有表头
+    expect(wrapper.text()).toContain('素材 0')
+    expect(wrapper.text()).toContain('流程文件 1')
+    expect(wrapper.text()).toContain('被引用 1')
+    wrapper.unmount()
+  })
+
+  it('marks an unselected flow master as not submitted', () => {
+    const data = info()
+    data.assets = [
+      { ...asset('clip', 'edit_master', 'clip.mp4', 'video'), source: 'flow', role_fixed: true },
+    ]
+    data.submit_entries = []
+    const wrapper = mountView(data)
+    expect(wrapper.find('.library-flow').text()).toContain('未加入本次提交')
+    wrapper.unmount()
+  })
+
+  it('explains an empty library that still has flow files', () => {
+    const data = info()
+    data.assets = []
+    data.source_file = SOURCE_FILE as unknown as CaseInfo['source_file']
+    const wrapper = mountView(data)
+    expect(wrapper.text()).toContain('这个 case 还没有素材文件')
+    expect(wrapper.text()).toContain('不作为生成素材')
     wrapper.unmount()
   })
 })

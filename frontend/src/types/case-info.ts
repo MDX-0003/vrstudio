@@ -191,14 +191,6 @@ export interface KeyframeState {
   refs: KeyframeRef[]
   refs_default: boolean
   role_help: Record<string, string>
-  sheet?: string | null
-  sheet_candidates?: {
-    id: string
-    label: string
-    path: string
-    rel?: string | null
-    open_url?: string | null
-  }[]
   first: KeyframePick | null
   last: KeyframePick | null
   extract: string | null

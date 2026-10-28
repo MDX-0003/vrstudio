@@ -12,6 +12,11 @@ asserts the two agree so they cannot diverge silently.
 Unknown keys are hard errors. A typo'd ``--set recompose.endpoint_lock_pctt=3``
 that silently did nothing would be discovered by looking at the output, not by
 the tool telling you.
+
+``serve`` keeps one config for the whole process: :func:`activate` loads and
+validates it at startup, and the request path only reads :func:`active`. Editing
+a config file therefore cannot put a running process on a config its code does
+not understand — the file and the code change together, at restart.
 """
 
 from __future__ import annotations
@@ -75,7 +80,6 @@ _FALLBACK: dict = {
         "workdir": "vrgen_runs",  # vrgen 台账根，相对仓库根（gitignore）
     },
     "web": {
-        "default_frontend": "next",  # next | legacy
         "proxy_max_w": 4096,         # 预览代理宽度上限（选区全景 + 对比页两路）
     },
     # [aigc] 段不迁 vrstudio：平台参数归 vrgen 仓库（E:\VRAIGC\vrgen），
@@ -224,9 +228,52 @@ def load(
     return Config(data=data, source_path=path)
 
 
-def _number(data: dict, path: str) -> float:
-    node = data
+#: 进程运行期配置：``serve`` 启动时装配一次，请求路径只读。
+_active: Config | None = None
+
+
+def activate(conf: Config | None = None) -> Config:
+    """装配进程运行期配置并返回它。
+
+    不传 ``conf`` 时按当前环境加载并校验，所以配置错误在启动期暴露，而不是
+    等到某个请求里变成 500。装配之后再读 :func:`active` 就不再碰磁盘：配置
+    文件与代码在启动时同时定格，单独编辑配置文件不会让运行中的进程拿到一套
+    与代码不匹配的配置。
+    """
+    global _active
+    _active = load() if conf is None else conf
+    return _active
+
+
+def active() -> Config:
+    """当前进程的配置；尚未装配时按需装配一次（单测直接调用辅助函数的情形）。"""
+    return _active if _active is not None else activate()
+
+
+def _table(data: dict, path: str) -> dict:
+    """取一个配置表；缺表或不是表报 ConfigError，不用裸 KeyError。"""
+    node: object = data
     for part in path.split("."):
+        if not isinstance(node, dict) or part not in node:
+            raise ConfigError(f"missing config table {path!r}")
+        node = node[part]
+    if not isinstance(node, dict):
+        raise ConfigError(f"config key {path!r} must be a table")
+    return node
+
+
+def _value(node: dict, key: str, where: str):
+    """取表里的一个值；缺键报 ConfigError。"""
+    if key not in node:
+        raise ConfigError(f"missing config key {where!r}")
+    return node[key]
+
+
+def _number(data: dict, path: str) -> float:
+    node: object = data
+    for part in path.split("."):
+        if not isinstance(node, dict) or part not in node:
+            raise ConfigError(f"missing config key {path!r}")
         node = node[part]
     try:
         return float(node)
@@ -238,7 +285,15 @@ def _validate(data: dict) -> None:
     if int(data.get("schema", 0)) != 1:
         raise ConfigError(f"unsupported config schema {data.get('schema')!r} (expected 1)")
 
-    names = data["pad"]["pipeline"]["transforms"]
+    pad = _table(data, "pad")
+    mask = _table(data, "mask")
+    recompose = _table(data, "recompose")
+    verify = _table(data, "verify")
+    video = _table(data, "video")
+    generate = _table(data, "generate")
+    web = _table(data, "web")
+
+    names = _value(_table(pad, "pipeline"), "transforms", "pad.pipeline.transforms")
     if not isinstance(names, list) or not names:
         raise ConfigError("pad.pipeline.transforms must be a non-empty list")
 
@@ -249,27 +304,31 @@ def _validate(data: dict) -> None:
     for name in names:
         if name not in allowed_names():
             raise ConfigError(f"unknown transform {name!r}; registered: {allowed_names()}")
-    if data["mask"]["strategy"] not in STRATEGIES:
+    if _value(mask, "strategy", "mask.strategy") not in STRATEGIES:
         raise ConfigError(f"unknown mask.strategy; choose from {STRATEGIES}")
-    if data["recompose"]["blend_weight"] not in WEIGHTS:
+    if _value(recompose, "blend_weight", "recompose.blend_weight") not in WEIGHTS:
         raise ConfigError(f"unknown recompose.blend_weight; choose from {WEIGHTS}")
-    if data["recompose"]["d_star_mode"] not in ("clip_median", "clip_mode", "per_frame"):
+    if _value(recompose, "d_star_mode", "recompose.d_star_mode") not in (
+            "clip_median", "clip_mode", "per_frame"):
         raise ConfigError("recompose.d_star_mode must be clip_median | clip_mode | per_frame")
-    if data["recompose"]["registration"] not in ("circular_translate", "none"):
+    if _value(recompose, "registration", "recompose.registration") not in (
+            "circular_translate", "none"):
         raise ConfigError("recompose.registration must be circular_translate | none")
-    if data["recompose"]["boundary_repair"] not in ("off", "feather"):
+    if _value(recompose, "boundary_repair", "recompose.boundary_repair") not in (
+            "off", "feather"):
         raise ConfigError("recompose.boundary_repair must be off | feather")
-    if data["pad"]["on_aspect_conflict"] not in ("error", "grow_canvas"):
+    if _value(pad, "on_aspect_conflict", "pad.on_aspect_conflict") not in (
+            "error", "grow_canvas"):
         raise ConfigError("pad.on_aspect_conflict must be error | grow_canvas")
-    if data["video"]["audio"] not in ("copy", "none"):
+    if _value(video, "audio", "video.audio") not in ("copy", "none"):
         raise ConfigError("video.audio must be copy | none")
-    if data["video"]["pix_fmt"] != "yuv420p":
+    if _value(video, "pix_fmt", "video.pix_fmt") != "yuv420p":
         raise ConfigError(
             "video.pix_fmt must be yuv420p: the pipeline has a single "
             "browser-playable profile (4:4:4 archives were dropped in decision 19)"
         )
 
-    band = data["verify"]["interior_band"]
+    band = _value(verify, "interior_band", "verify.interior_band")
     if not (isinstance(band, list) and len(band) == 2
             and all(isinstance(v, (int, float)) for v in band)
             and 0.0 <= band[0] < band[1] <= 1.0):
@@ -295,16 +354,12 @@ def _validate(data: dict) -> None:
     if _number(data, "verify.max_wrap_percentile") > 100.0:
         raise ConfigError("verify.max_wrap_percentile must be <= 100")
 
-    gen = data["generate"]
-    if not str(gen["vrgen"]).strip():
+    if not str(_value(generate, "vrgen", "generate.vrgen")).strip():
         raise ConfigError("generate.vrgen must not be empty")
-    if not str(gen["workdir"]).strip():
+    if not str(_value(generate, "workdir", "generate.workdir")).strip():
         raise ConfigError("generate.workdir must not be empty")
 
-    web = data["web"]
-    if web["default_frontend"] not in ("next", "legacy"):
-        raise ConfigError("web.default_frontend must be next | legacy")
-    max_w = web["proxy_max_w"]
+    max_w = _value(web, "proxy_max_w", "web.proxy_max_w")
     if not isinstance(max_w, int) or isinstance(max_w, bool) or not 256 <= max_w <= 8192:
         raise ConfigError(
             f"web.proxy_max_w must be an int in [256, 8192], got {max_w!r}")

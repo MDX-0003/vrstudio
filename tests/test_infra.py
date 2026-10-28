@@ -8,6 +8,7 @@ run and a repo run would silently differ.
 
 from __future__ import annotations
 
+import copy
 import json
 from fractions import Fraction
 
@@ -115,6 +116,27 @@ def test_need_reports_missing_key():
     conf = load()
     with pytest.raises(ConfigError, match="missing config key"):
         conf.need("nope.nope")
+
+
+def test_missing_config_key_is_a_config_error():
+    """代码与默认值不再一致时，缺键要报 ConfigError，不能漏出裸 KeyError。
+
+    2026-10-27 的事故就是旧进程的 ``_validate`` 用下标读一个已被删掉的键：
+    ``KeyError: 'default_frontend'`` 从请求里冒出来，而不是一条配置错误。
+    """
+    data = copy.deepcopy(builtin_defaults())
+    del data["web"]["proxy_max_w"]
+    with pytest.raises(ConfigError, match="missing config key"):
+        config_mod._validate(data)
+
+
+def test_active_config_is_loaded_once(monkeypatch):
+    """装配之后再读 ``active()`` 不再碰磁盘：请求路径不逐次读盘与校验。"""
+    conf = load()
+    config_mod.activate(conf)
+    monkeypatch.setattr(config_mod, "load",
+                        lambda *args, **kwargs: pytest.fail("active() 不应重新加载配置"))
+    assert config_mod.active() is conf
 
 
 # ---------------------------------------------------------- manifest

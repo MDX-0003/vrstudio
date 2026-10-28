@@ -5,6 +5,7 @@ import { Delete, Search, Upload } from '@element-plus/icons-vue'
 import { removeAsset } from '@/api/case'
 import AssetUploadDialog from '@/components/upload/AssetUploadDialog.vue'
 import FileOpenLink from '@/components/common/FileOpenLink.vue'
+import FileRow from '@/components/common/FileRow.vue'
 import { ASSET_ROLE_LABELS } from '@/constants/assetRoles'
 import type { AssetDetail, CaseInfo, FileInfo } from '@/types/case-info'
 
@@ -66,9 +67,55 @@ const assets = computed(() =>
   (props.info.assets ?? []).filter((asset) => asset.source !== 'flow'),
 )
 
+// 流程产物（fullredraw 的 pad、patch 的 clip）以 source === 'flow' 标记，后端按当前
+// 流程的 manifest 现算；前端不判断 flow 的名字，有就显示。
+const flowProducts = computed(() =>
+  (props.info.assets ?? []).filter((asset) => asset.source === 'flow'),
+)
+
 const imageCount = computed(() => assets.value.filter((item) => item.kind === 'image').length)
 const videoCount = computed(() => assets.value.filter((item) => item.kind === 'video').length)
-const usedCount = computed(() => assets.value.filter((item) => usageCount(item)).length)
+const usedCount = computed(() =>
+  [...assets.value, ...flowProducts.value].filter((item) => usageCount(item)).length,
+)
+
+// 源视频与流程产物都不写进 [[assets]]（见 docs/case-model.md 的说明），但它们属于
+// 这个 case 的文件。两者都按后端给的事实派生：源视频看 source_file，流程母版看
+// asset.source === 'flow'，前端不判断 flow 的名字，pad/clip 走同一条路。
+interface FlowRow {
+  key: string
+  tag: string
+  entry: FileInfo
+  note: string
+}
+
+const flowRows = computed<FlowRow[]>(() => {
+  const rows: FlowRow[] = []
+  if (props.info.source_file) {
+    rows.push({
+      key: 'source',
+      tag: '源视频',
+      entry: props.info.source_file,
+      note: '流程起点，不作为生成素材',
+    })
+  }
+  for (const asset of flowProducts.value) {
+    rows.push({
+      key: asset.id,
+      tag: '母版',
+      entry: fileInfo(asset),
+      note: usageCount(asset) ? '已加入本次提交' : '未加入本次提交（在生成页添加）',
+    })
+  }
+  return rows
+})
+
+const emptyText = computed(() => {
+  if (assets.value.length) return '没有符合筛选条件的素材'
+  return flowRows.value.length
+    ? '这个 case 还没有素材文件。上方的源视频与母版是流程文件，不作为生成素材；需要参考图或参考视频时点「上传素材」。'
+    : '这个 case 还没有素材文件，点「上传素材」添加。'
+})
 
 const visibleAssets = computed(() => {
   const query = search.value.trim().toLowerCase()
@@ -144,10 +191,24 @@ function sizeText(size: number | null): string {
       </div>
       <div class="library-head-actions">
         <span class="muted">
-          {{ assets.length }} 个文件 · 图片 {{ imageCount }} · 视频 {{ videoCount }} · 被引用
-          {{ usedCount }}
+          素材 {{ assets.length }} · 图片 {{ imageCount }} · 视频 {{ videoCount }} · 流程文件
+          {{ flowRows.length }} · 被引用 {{ usedCount }}
         </span>
         <el-button type="primary" :icon="Upload" @click="uploadOpen = true">上传素材</el-button>
+      </div>
+    </div>
+
+    <div v-if="flowRows.length" class="library-flow">
+      <div class="library-flow-head">
+        <h3>流程文件</h3>
+        <p class="muted">
+          源视频是流程起点，母版由流程生成（patch 的 clip、fullredraw 的 pad）；两者都不是素材文件，引用由生成页的提交清单决定，这里不能删除或改角色。
+        </p>
+      </div>
+      <div v-for="row in flowRows" :key="row.key" class="library-flow-row">
+        <el-tag size="small" effect="plain" class="library-flow-tag">{{ row.tag }}</el-tag>
+        <FileRow :entry="row.entry" class="library-flow-file" />
+        <span class="muted library-flow-note">{{ row.note }}</span>
       </div>
     </div>
 
@@ -182,7 +243,7 @@ function sizeText(size: number | null): string {
         <span class="right">操作</span>
       </div>
       <div v-if="!visibleAssets.length" class="library-empty">
-        <el-empty description="没有符合筛选条件的素材" :image-size="64" />
+        <el-empty :description="emptyText" :image-size="64" />
       </div>
       <div v-for="asset in visibleAssets" :key="asset.id" class="library-row">
         <div class="library-thumb">
@@ -275,6 +336,45 @@ function sizeText(size: number | null): string {
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
+}
+
+.library-flow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-lg);
+}
+
+.library-flow-head h3 {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.library-flow-head p {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-xs);
+}
+
+.library-flow-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.library-flow-tag {
+  flex: none;
+}
+
+.library-flow-note {
+  flex: none;
+  font-size: var(--text-xs);
+}
+
+.library-flow-file {
+  flex: 1;
+  min-width: 0;
 }
 
 .library-note {
