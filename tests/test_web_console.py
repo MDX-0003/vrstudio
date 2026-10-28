@@ -259,6 +259,9 @@ def test_upload_rejects_bad_type_and_size(client):
     assert r.status_code == 400 and "不支持" in r.json()["error"]
     r = client.post("/api/uploads", json={"name": "ref.png", "size": 0})
     assert r.status_code == 400
+    r = client.post("/api/uploads",
+                    json={"name": "ref.png", "size": web_app.UPLOAD_MAX_BYTES + 1})
+    assert r.status_code == 413 and "超过上限" in r.json()["error"]
     r = client.post("/api/uploads", json={"name": "ref.png", "size": 3})
     assert r.status_code == 200
     upload_id = r.json()["upload_id"]

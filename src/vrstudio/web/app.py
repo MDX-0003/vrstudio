@@ -132,16 +132,11 @@ def sources_dir() -> Path:
 # SHA-256，加入 case 时按哈希去重，避免同一文件被静默收两遍。
 
 UPLOAD_CHUNK = 8 * 1024 * 1024
-UPLOAD_MAX_DEFAULT = 10 * 1024 ** 3
+#: 单个上传文件的字节上限。产品级约束，不走配置：不同机器上传的是同一批素材，
+#: 放宽这个值只会在平台侧被拒，所以不提供覆盖入口。
+UPLOAD_MAX_BYTES = 10 * 1024 ** 3
 UPLOAD_TTL_SECONDS = 24 * 3600
 _UPLOAD_ID = re.compile(r"^[0-9a-f]{32}$")
-
-
-def _upload_max_bytes() -> int:
-    try:
-        return int(config_mod.active().get("web.upload_max_bytes", UPLOAD_MAX_DEFAULT))
-    except (TypeError, ValueError):
-        return UPLOAD_MAX_DEFAULT
 
 
 def _uploads_root() -> Path:
@@ -1647,11 +1642,11 @@ async def api_uploads_create(request):
         size = int(body.get("size"))
     except (TypeError, ValueError):
         return JSONResponse({"error": "缺少文件大小 size"}, status_code=400)
-    max_bytes = _upload_max_bytes()
     if size <= 0:
         return JSONResponse({"error": "文件大小必须大于 0"}, status_code=400)
-    if size > max_bytes:
-        return JSONResponse({"error": f"文件超过上限 {max_bytes} 字节"}, status_code=413)
+    if size > UPLOAD_MAX_BYTES:
+        return JSONResponse({"error": f"文件超过上限 {UPLOAD_MAX_BYTES} 字节"},
+                            status_code=413)
     try:
         _cleanup_uploads()
     except OSError:
@@ -1672,7 +1667,7 @@ async def api_uploads_create(request):
     }
     _save_upload_meta(directory, meta)
     return JSONResponse({"upload_id": upload_id, "chunk_size": UPLOAD_CHUNK,
-                         "max_size": max_bytes})
+                         "max_size": UPLOAD_MAX_BYTES})
 
 
 async def api_upload(request):

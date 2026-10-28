@@ -139,6 +139,19 @@ def test_active_config_is_loaded_once(monkeypatch):
     assert config_mod.active() is conf
 
 
+def test_upload_limit_is_not_configurable(tmp_path):
+    """上传上限是产品级常量，写进配置要报未知键。
+
+    曾经有一个 ``web.upload_max_bytes`` 读取分支，但键不在默认值里，而合并只允许
+    覆盖已有键，于是它永远走内置默认——只能读、不能设的死键。删除读取分支后，
+    这里钉住「它确实不是配置项」。
+    """
+    path = tmp_path / "c.toml"
+    path.write_text("[web]\nupload_max_bytes = 1048576\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="unknown config key"):
+        load(path)
+
+
 # ---------------------------------------------------------- manifest
 def _manifest(tmp_path, frame, **kw):
     path = tmp_path / "src.mp4"
