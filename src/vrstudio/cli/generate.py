@@ -33,7 +33,7 @@ from ..config import REPO_ROOT
 from ..config import load as load_config
 from ..media.videoio import VideoIOError, probe
 from ..procenv import decode_text, utf8_env
-from ..redraw.manifest import Manifest
+from ..redraw.manifest import Manifest, StillManifest
 
 app = typer.Typer(add_completion=False, no_args_is_help=True,
                   help="组装提交清单 → 调 vrgen 生成/注册 → adopt 结果落 case")
@@ -354,6 +354,55 @@ def assemble(case: case_mod.Case, root: str | Path | None = None,
                       canvas_size=canvas, source_size=source)
 
 
+# ── patchimg：图片生成走 vrgen image submit ──────────────────────────────
+
+
+@dataclass(frozen=True)
+class StillSubmission:
+    """patchimg 的图片生成输入：padded 底图 + mask + 可选参考图。"""
+
+    base: Path
+    mask: Path
+    refs: tuple[Candidate, ...]
+    ratio: str
+    template: str = "still360-local"
+
+
+def assemble_still(case: case_mod.Case,
+                   root: str | Path | None = None) -> StillSubmission:
+    """按 ``[submit] selected`` 组装 patchimg 的图片提交；底图与 mask 自动附带。"""
+    if not case.extract_current:
+        raise GenError(
+            f"case {case.name} 还没有 pad 版本——先跑 "
+            f"`vrstudio extract name --case {case.name}`")
+    d = case.dir(root) / "extracts" / case.extract_current
+    base = d / "padded.png"
+    mask = d / "padded_mask.png"
+    if not base.is_file() or not mask.is_file():
+        raise GenError(f"{d} 缺 padded.png/padded_mask.png——重跑 extract")
+    manifest = StillManifest.load(d / "still_pad.json")
+    ratio = (manifest.ratio_label
+             or f"{manifest.canvas.target_aspect[0]}:{manifest.canvas.target_aspect[1]}")
+
+    by_id = {c.id: c for c in candidates(case, root)}
+    refs: list[Candidate] = []
+    for item in case.submit_selected or []:
+        candidate = by_id.get(item)
+        if candidate is None:
+            raise GenError(f"提交集引用了不存在的候选：{item}；请重新勾选")
+        role = case.submit_role(item)
+        if role and role != candidate.role:
+            candidate = replace(candidate, role=role)
+        if candidate.kind != "image":
+            raise GenError(
+                f"patchimg 只接受图片参考：{candidate.id} 是 {candidate.kind}")
+        if candidate.role in NON_CANDIDATE_ROLES:
+            raise GenError(
+                f"patchimg 不接受 {candidate.role} 角色：{candidate.id}")
+        refs.append(candidate)
+    return StillSubmission(base=base, mask=mask, refs=tuple(refs), ratio=ratio)
+
+
 # ── vrgen 子进程 ─────────────────────────────────────────────────────────
 
 
@@ -390,6 +439,45 @@ def _load_case(name: str, cases_dir) -> case_mod.Case:
         raise GenError(str(exc)) from exc
 
 
+def _submit_still(case: case_mod.Case, cases_dir, conf, *,
+                  variables, model_id, resolution, num, session_id,
+                  mode, duration, aspect_ratio, scale, dry_run, check) -> None:
+    """patchimg 的提交：vrgen image submit，底图 + mask + 可选参考图。"""
+    if mode or duration is not None or aspect_ratio or scale:
+        _fail(GenError("patchimg 不接受 --mode/--duration/--aspect-ratio/--scale"))
+    if variables:
+        _fail(GenError("patchimg 不接受 --var：请把变量写进 job 的 prompt-vars.toml"))
+    try:
+        still = assemble_still(case, cases_dir)
+    except GenError as exc:
+        _fail(exc)
+
+    argv = [_vrgen_exe(conf), "image", "submit", "--job", case.name,
+            "--template", still.template,
+            "--image", str(still.base), "--image-role", "edit_master",
+            "--image", str(still.mask), "--image-role", "mask"]
+    for candidate in still.refs:
+        argv += ["--image", str(candidate.path), "--image-role", candidate.role]
+    argv += ["--ratio", still.ratio]
+    if model_id is not None:
+        argv += ["--model-id", str(model_id)]
+    if resolution is not None:
+        argv += ["--resolution", str(resolution)]
+    if num is not None:
+        argv += ["--num", str(num)]
+    if session_id is not None:
+        argv += ["--session-id", str(session_id)]
+    argv += ["--workdir", str(_workdir(conf))]
+    if dry_run:
+        typer.echo("dry-run：将发出")
+        for arg in argv:
+            typer.echo(f"  {arg}")
+        return
+    if check:
+        argv += ["--dry-run"]
+    raise typer.Exit(_stream(argv))
+
+
 @app.command()
 def submit(
     case_name: str = typer.Option(..., "--case", help="case 名（= vrgen job 名）。"),
@@ -399,8 +487,9 @@ def submit(
                                  help="透传 vrgen submit --model-id（← mglc --model-id）。"),
     mode: str = typer.Option(None, "--mode",
                              help="透传 vrgen submit --mode（← mglc --type）。"),
-    resolution: str = typer.Option(None, "--resolution",
-                                   help="输出档位 480p|720p|1080p（← mglc --resolution）。"),
+    resolution: str = typer.Option(
+        None, "--resolution",
+        help="视频档 480p|720p|1080p；patchimg 图片档 1K|2K|4K。"),
     duration: int = typer.Option(None, "--duration",
                                  help="整数秒（← mglc --duration；默认按输入自动）。"),
     num: int = typer.Option(None, "--num",
@@ -422,6 +511,13 @@ def submit(
     """组装提交清单并提交生成（mglc 后端，M1 起可用；--dry-run 现在就能看 argv）。"""
     conf = load_config(overrides=overrides or [])
     case = _load_case(case_name, cases_dir)
+    if case.flow == "patchimg":
+        _submit_still(case, cases_dir, conf, variables=variables,
+                      model_id=model_id, resolution=resolution, num=num,
+                      session_id=session_id, mode=mode, duration=duration,
+                      aspect_ratio=aspect_ratio, scale=scale,
+                      dry_run=dry_run, check=check)
+        return
     try:
         submission = assemble(case, cases_dir, mode=mode)
     except GenError as exc:
@@ -498,12 +594,44 @@ def adopt(
     case_name: str = typer.Option(..., "--case"),
     round_key: str = typer.Option("latest", "--round",
                                   help="轮次 key；缺省取最新可用轮（gate != error）。"),
+    index: int = typer.Option(None, "--index",
+                              help="图片候选下标（patchimg 必填，1..N）。"),
     cases_dir: Path = typer.Option(None, "--cases-dir"),
     overrides: list[str] = typer.Option(None, "--set", help="config 覆盖。"),
 ) -> None:
     """采用一轮结果：拷进 case + 写 [adopt] round + 打印下一步命令。"""
     conf = load_config(overrides=overrides or [])
     case = _load_case(case_name, cases_dir)
+    if case.flow == "patchimg":
+        if not case.extract_current:
+            _fail(GenError("patchimg adopt 前先 extract（[extract] current 未定）"))
+        if index is None:
+            _fail(GenError("patchimg adopt 必须显式 --index（候选要人工挑）"))
+        if int(index) < 1:
+            _fail(GenError("--index 从 1 开始"))
+        out = (case.dir(cases_dir) / "extracts" / case.extract_current
+               / "result.png")
+        argv = [_vrgen_exe(conf), "result", "--job", case.name,
+                "--round", round_key, "--index", str(int(index)),
+                "--out", str(out), "--workdir", str(_workdir(conf))]
+        code, output = _capture(argv)
+        if code != 0:
+            typer.secho(output.strip(), err=True)
+            raise typer.Exit(code)
+        resolved = round_key
+        m = _ROUND_IN_OUTPUT.search(output)
+        if m:
+            resolved = m.group(1)
+        elif round_key == "latest":
+            _fail(GenError(
+                f"vrgen result 没报轮次 key，无法写 adopt 指针：{output.strip()!r}"))
+        case_mod.set_adopt(case.name, resolved, root=cases_dir, index=int(index))
+        typer.echo(f"adopt    {resolved}  index={int(index)}")
+        typer.echo(f"result   {out}")
+        typer.echo("next     vrstudio merge --case " + case.name)
+        return
+    if index is not None:
+        _fail(GenError("--index 只对 patchimg 有意义"))
     if case.flow in ("fullredraw", "gen"):
         out = case.dir(cases_dir) / "result.mp4"
     else:

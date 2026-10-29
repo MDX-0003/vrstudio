@@ -97,6 +97,7 @@ def pad_still(
     mask_png_compression: int = 0,
     restore_interp: str = "lanczos4",
     local: LocalInfo | None = None,
+    ratio_label: str = "",
     tool_version: str = "",
     write_hash: bool = True,
 ) -> StillPad:
@@ -145,6 +146,7 @@ def pad_still(
         restore_interp=restore_interp,
         pipeline=list(pipeline),
         local=local,
+        ratio_label=ratio_label,
         tool_version=tool_version,
     )
     return StillPad(padded=padded, mask=mask, manifest=manifest)

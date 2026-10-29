@@ -19,15 +19,20 @@ import cv2
 import numpy as np
 import typer
 
-from ..patch.sidecar import InnerRect
+from ..patch.sidecar import InnerRect, Viewport
 from ..patch.case import load_sidecar_single_segment
 from ..patch.composite import SegmentMaps, normalize_ai_frame
 from ..patch.framealign import index_map, short_by
+from ..patch.still import composite_local, local_erp_mask
 from ..media.ffmpeg import FfmpegSink, ffmpeg_path, has_audio
+from ..media.imageio import read_image, write_png
 from ..progress import PhaseLog as Log, PhaseRateMeter as RateMeter, format_duration, open_log_file
 from ..patch.restore import resolve_ai_clip
 from ..patch import scalefit
+from ..redraw.manifest import StillManifest
+from ..redraw.still import StillError, stitch_still
 from .. import case as case_mod
+from .. import config as config_mod
 
 app = typer.Typer(add_completion=False, help=__doc__)
 
@@ -135,6 +140,118 @@ class AiFrameSource:
         self.cap.release()
 
 
+def _merge_still(case, cases_dir, *, feather: int, levels: int,
+                 report: Path | None, quiet: bool, progress_every: int) -> None:
+    """patchimg 的贴回：拼接成 2:1，再只把 inner 区域写回源图。"""
+    if not case.extract_current:
+        raise typer.Exit("merge: patchimg 没有 pad 版本——先 extract")
+    d = case.dir(cases_dir) / "extracts" / case.extract_current
+    manifest_path = d / "still_pad.json"
+    result_path = d / "result.png"
+    if not manifest_path.is_file():
+        raise typer.Exit(f"merge: 缺 {manifest_path.name}——重跑 extract")
+    if not result_path.is_file():
+        raise typer.Exit(
+            f"merge: 没有采用的结果（{result_path} 不存在）——先 "
+            f"`vrstudio generate adopt --case {case.name} --index N`")
+    src = case_mod.check_source(case, cases_dir)
+    conf = config_mod.load()
+    manifest = StillManifest.load(manifest_path)
+    if manifest.local is None:
+        raise typer.Exit("merge: still_pad.json 没有 local 选区")
+
+    fh, log_path = open_log_file(f"merge_{case.name}_still")
+    log = Log(every=progress_every, quiet=quiet, fh=fh)
+    typer.echo(f"log -> {log_path}")
+    try:
+        source = read_image(src)
+        generated = read_image(result_path)
+        repair = str(conf.get("recompose.boundary_repair", "off"))
+        repair_px = (max(8, int(round(manifest.canvas.L * float(
+            conf.get("recompose.boundary_repair_pct", 15.0)) / 100.0)))
+            if repair == "feather" else 0)
+        try:
+            stitched = stitch_still(
+                generated, manifest,
+                search_pct=float(conf.get("recompose.search_pct", 25.0)),
+                max_sample_rows=int(conf.get("recompose.max_sample_rows", 256)),
+                min_band_correlation=float(
+                    conf.get("recompose.min_band_correlation", 0.80)),
+                warn_quality=float(conf.get("recompose.warn_quality", 1.15)),
+                restore_interp=str(conf.get("recompose.restore_interp", "lanczos4")),
+                blend_weight=str(conf.get("recompose.blend_weight", "smoothstep")),
+                endpoint_lock_pct=float(conf.get("recompose.endpoint_lock_pct", 2.0)),
+                repair=repair, repair_px=repair_px,
+                interior_band=tuple(conf.get("verify.interior_band", (0.25, 0.75))),
+                max_wrap_percentile=float(conf.get("verify.max_wrap_percentile", 95)),
+                worst_interior_tol=float(conf.get("verify.worst_interior_tol", 1.0)),
+            )
+        except StillError as exc:
+            raise typer.Exit(f"merge: {exc}") from exc
+
+        viewport = Viewport(**manifest.local.viewport)
+        inner = InnerRect(**manifest.local.inner)
+        erp_h, erp_w = source.shape[:2]
+        local = local_erp_mask(viewport, inner, erp_w, erp_h)
+        composed = composite_local(source, stitched.image, local,
+                                   feather_px=feather, levels=levels)
+        if composed.maxdiff_outside != 0:
+            raise typer.Exit(
+                f"merge: local composite changed {composed.maxdiff_outside} "
+                f"outside the inner rect")
+        if composed.changed_inside == 0:
+            log.info("WARNING: the model left the inner rect unchanged")
+
+        write_png(d / "closed.png", stitched.image)
+        write_png(d / "local.png", composed.image)
+        out_dir = case.dir(cases_dir) / "out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / f"{case.extract_current}_still.png"
+        write_png(out, composed.image)
+
+        data = {
+            "case": case.name,
+            "extract": case.extract_current,
+            "registration": {
+                "d_star": stitched.registration.d_star,
+                "correlation": stitched.registration.correlation,
+                "quality": stitched.registration.quality,
+                "mae_min": stitched.registration.mae_min,
+            },
+            "gate": stitched.gate,
+            "seam": stitched.metrics.as_dict(),
+            "verdict": stitched.verdict,
+            "reasons": list(stitched.reasons),
+            "aspect_drift_pct": stitched.aspect_drift_pct,
+            "local": {
+                "maxdiff_outside": composed.maxdiff_outside,
+                "changed_inside": composed.changed_inside,
+                "support_pixels": composed.support_pixels,
+            },
+            "output": str(out),
+        }
+        target = report or (d / "report.json")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                          encoding="utf-8")
+
+        log.phase(f"stitched {stitched.image.shape[1]}x{stitched.image.shape[0]}  "
+                  f"d*={stitched.registration.d_star}  "
+                  f"corr={stitched.registration.correlation:.3f}  "
+                  f"gate={stitched.gate}")
+        log.info(f"seam wrap {stitched.metrics.wrap:.3f} percentile "
+                 f"{stitched.metrics.wrap_percentile:.1f} -> {stitched.verdict}")
+        if abs(stitched.aspect_drift_pct) > 2.0:
+            log.info(f"WARNING: the model's aspect differs from the canvas by "
+                     f"{stitched.aspect_drift_pct:+.1f}%")
+        typer.echo(f"closed   {d / 'closed.png'}")
+        typer.echo(f"local    {out}  changed {composed.changed_inside}/"
+                   f"{composed.support_pixels}  outside maxdiff 0")
+        typer.echo(f"report   {target}")
+    finally:
+        fh.close()
+
+
 @app.command()
 def merge(
     case_name: str = typer.Option(None, "--case",
@@ -172,6 +289,15 @@ def merge(
     quiet: bool = typer.Option(False, "-q"),
 ):
     if case_name:
+        case = case_mod.load(case_name, cases_dir)
+        if case.flow == "patchimg":
+            if input_video or ai or sidecar or output:
+                raise typer.Exit("merge: --case 与 --input/--ai/--sidecar/--output 互斥"
+                                 "（--case 模式全部自动定位）")
+            _merge_still(case, cases_dir, feather=feather, levels=levels,
+                         report=report, quiet=quiet,
+                         progress_every=progress_every)
+            return
         if input_video or ai or sidecar or output:
             raise typer.Exit("merge: --case 与 --input/--ai/--sidecar/--output 互斥"
                              "（--case 模式四者全部自动定位）")

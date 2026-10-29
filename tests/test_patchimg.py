@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 
 import numpy as np
 import pytest
@@ -13,7 +14,9 @@ from vrstudio import case as case_mod
 from vrstudio.case import CaseError
 from vrstudio.cli import case as case_cli
 from vrstudio.cli import extract as extract_cli
-from vrstudio.media.imageio import write_png
+from vrstudio.cli import generate as generate_cli
+from vrstudio.cli import merge as merge_cli
+from vrstudio.media.imageio import read_image, write_png
 from vrstudio.patch.sidecar import InnerRect, Viewport
 from vrstudio.patch.still import LocalMaskError, composite_local, local_erp_mask
 from vrstudio.redraw.manifest import StillManifest
@@ -25,6 +28,17 @@ def _source(tmp_path, name: str = "src.png", width: int = 384, height: int = 192
     path = tmp_path / name
     write_png(path, synthetic_erp(width, height))
     return path
+
+
+def _prepared_case(tmp_path):
+    """create + draft + extract; returns the source path."""
+    src = _source(tmp_path)
+    case_mod.create("p", "patchimg", src, root=tmp_path)
+    case_mod.set_draft("p", root=tmp_path, **case_mod.patchimg_default_draft(384))
+    result = runner.invoke(extract_cli.app, [
+        "name", "--case", "p", "--cases-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    return src
 
 
 def test_create_patchimg_rejects_non_2_to_1(tmp_path):
@@ -160,3 +174,62 @@ def test_local_mask_rejects_an_inner_outside_the_viewport():
     with pytest.raises(LocalMaskError, match="outside"):
         local_erp_mask(viewport, InnerRect(x=400, y=0, width=10, height=10),
                        384, 192)
+
+
+def test_patchimg_submit_dry_run_lists_the_image_argv(tmp_path):
+    _prepared_case(tmp_path)
+    result = runner.invoke(generate_cli.app, [
+        "submit", "--case", "p", "--dry-run", "--cases-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "image" in result.output and "submit" in result.output
+    assert "padded.png" in result.output
+    assert "edit_master" in result.output
+    assert "--image-role" in result.output
+    assert "mask" in result.output
+    assert "21:9" in result.output
+
+
+def test_patchimg_adopt_requires_an_explicit_index(tmp_path):
+    _prepared_case(tmp_path)
+    result = runner.invoke(generate_cli.app, [
+        "adopt", "--case", "p", "--cases-dir", str(tmp_path)])
+    assert result.exit_code != 0
+    assert "--index" in result.output
+
+
+def test_patchimg_adopt_records_the_index(tmp_path, monkeypatch):
+    _prepared_case(tmp_path)
+    monkeypatch.setattr(generate_cli, "_capture",
+                        lambda argv: (0, "round=img-1a2b3c"))
+    result = runner.invoke(generate_cli.app, [
+        "adopt", "--case", "p", "--round", "img-1a2b3c", "--index", "2",
+        "--cases-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+
+    case = case_mod.load("p", tmp_path)
+    assert case.adopt_round == "img-1a2b3c"
+    assert case.adopt_index == 2
+
+
+def test_patchimg_merge_writes_the_erp_png_bit_identically(tmp_path):
+    src = _prepared_case(tmp_path)
+    case = case_mod.load("p", tmp_path)
+    version = case_mod.case_dir("p", tmp_path) / "extracts" / case.extract_current
+    shutil.copyfile(version / "padded.png", version / "result.png")
+
+    result = runner.invoke(merge_cli.app, [
+        "--case", "p", "-q", "--cases-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+
+    out = (case_mod.case_dir("p", tmp_path) / "out"
+           / f"{case.extract_current}_still.png")
+    assert out.is_file()
+    assert np.array_equal(read_image(out), read_image(src))
+
+
+def test_patchimg_merge_requires_an_adopted_result(tmp_path):
+    _prepared_case(tmp_path)
+    result = runner.invoke(merge_cli.app, [
+        "--case", "p", "-q", "--cases-dir", str(tmp_path)])
+    assert result.exit_code != 0
+    assert "adopt" in result.output

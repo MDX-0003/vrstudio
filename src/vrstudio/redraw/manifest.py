@@ -345,6 +345,8 @@ class StillManifest:
     mask: MaskInfo
     restore: RestoreInfo
     local: LocalInfo | None = None
+    #: conventional platform label ("21:9"); Fraction reduces 21/9 to 7/3.
+    ratio_label: str = ""
     schema: int = SCHEMA
     created_utc: str = field(default_factory=_now)
     tool_version: str = ""
@@ -398,6 +400,7 @@ class StillManifest:
                 mask=_mask_info(raw["mask"]),
                 restore=_restore_info(raw["restore"]),
                 local=local,
+                ratio_label=str(raw.get("ratio_label", "")),
             )
         except (KeyError, TypeError) as exc:
             raise ValueError(f"still manifest is missing or malformed: {exc}") from exc
@@ -448,6 +451,7 @@ def from_still_plan(
     restore_interp: str = "lanczos4",
     pipeline: list[str] | None = None,
     local: LocalInfo | None = None,
+    ratio_label: str = "",
     tool_version: str = "",
 ) -> StillManifest:
     W, H = plan.source_size
@@ -487,6 +491,7 @@ def from_still_plan(
             interp=restore_interp,
         ),
         local=local,
+        ratio_label=ratio_label,
         tool_version=tool_version,
         warnings=plan.warnings,
     )

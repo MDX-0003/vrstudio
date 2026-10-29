@@ -25,6 +25,7 @@ from ..patch.case import Case, load_case, set_extract_version
 from ..patch.sidecar import Sidecar, Segment, Viewport, InnerRect, save_sidecar
 from ..patch.extract import extract_viewport_frame, open_writer, make_mask_image
 from ..patch.still import LocalMaskError, local_erp_mask
+from ..redraw.geometry import aspect_label
 from ..redraw.manifest import LocalInfo
 from ..redraw.still import (StillError, map_erp_mask_to_canvas, pad_still,
                             plan_still)
@@ -176,6 +177,7 @@ def _extract_still(case, src: Path, cases_dir, log: Log) -> None:
         mask_png_compression=int(conf.get("mask.png_compression", 0)),
         restore_interp=str(conf.get("recompose.restore_interp", "lanczos4")),
         local=LocalInfo(viewport=dict(case.viewport), inner=dict(case.inner)),
+        ratio_label=aspect_label(plan.target_aspect),
         tool_version=__version__,
     )
 

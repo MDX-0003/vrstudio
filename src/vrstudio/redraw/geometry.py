@@ -152,6 +152,28 @@ def resolve_aspect(text: str, source_size: tuple[int, int]) -> Fraction:
     )
 
 
+#: Platform-facing labels for the standard buckets. ``Fraction(21, 9)`` reduces
+#: to ``7/3``, so a bare ``numerator:denominator`` would print ``7:3`` -- not a
+#: ratio the image model accepts. The mapping keeps the conventional label.
+STANDARD_ASPECT_LABELS: dict[Fraction, str] = {
+    Fraction(1, 1): "1:1",
+    Fraction(5, 4): "5:4",
+    Fraction(4, 3): "4:3",
+    Fraction(3, 2): "3:2",
+    Fraction(16, 9): "16:9",
+    Fraction(2, 1): "2:1",
+    Fraction(21, 9): "21:9",
+    Fraction(3, 1): "3:1",
+    Fraction(4, 1): "4:1",
+}
+
+
+def aspect_label(aspect: Fraction) -> str:
+    """The conventional ``"21:9"`` label, not the reduced ``"7:3"``."""
+    return STANDARD_ASPECT_LABELS.get(aspect,
+                                      f"{aspect.numerator}:{aspect.denominator}")
+
+
 def plan_pad(
     spec: PadSpec,
     on_aspect_conflict: ConflictPolicy = "error",
