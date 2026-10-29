@@ -29,7 +29,8 @@ from ..redraw.geometry import restore_height
 from ..redraw.manifest import Manifest
 from ..progress import Log, RateMeter
 from ..redraw.recompose_core import RecomposeSpec, finalize, recompose, restore_canvas, slice_regions
-from ..redraw.registration import RegistrationResult, circular_translate, to_gray
+from ..redraw.registration import (RegistrationResult, circular_translate,
+                                   gate_registration, to_gray)
 from ..redraw.report import (BlendReport, RecomposeReport, RegistrationReport, RepairReport)
 from ..redraw.verify_core import SeamAccumulator, verdict
 from ..media.videoio import FrameReader, FrameWriter, probe
@@ -61,21 +62,14 @@ def _summarise_registration(ds: list[int], maes: list[float], quals: list[float]
 def _gate(reg: RegistrationReport, conf) -> str:
     """Decide whether the canvas assumption still holds.
 
-    The test is band *correlation*, not residual magnitude. A smooth brightness ramp
-    across the canvas offsets the two bands by a constant — a photometric fact the
-    blend is built to absorb, not evidence that the framing moved. Correlation asks
-    the question that matters ("are these two bands the same scene?"), and a
-    reframed canvas scores near zero on it while a mere gradient still scores ~0.95.
+    The rule lives in :func:`vrstudio.redraw.registration.gate_registration` so the
+    still stitch step uses exactly the same threshold semantics.
     """
-    if not np.isfinite(reg.quality):
-        return "ok"
-    min_corr = float(conf.get("recompose.min_band_correlation", 0.80))
-    warn_quality = float(conf.get("recompose.warn_quality", 1.15))
-    if reg.correlation < min_corr:
-        return "fail"
-    if reg.quality < warn_quality:
-        return "warn"
-    return "ok"
+    return gate_registration(
+        reg,
+        float(conf.get("recompose.min_band_correlation", 0.80)),
+        float(conf.get("recompose.warn_quality", 1.15)),
+    )
 
 
 def main(

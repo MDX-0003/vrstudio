@@ -43,6 +43,25 @@ class RegistrationResult:
     correlation: float   # Pearson r between the aligned bands -- the structural gate
 
 
+def gate_registration(reg, min_band_correlation: float = 0.80,
+                      warn_quality: float = 1.15) -> str:
+    """The canvas-premise gate shared by video recompose and still stitch.
+
+    Correlation asks "are these two bands the same scene?"; a reframed canvas
+    scores near zero while a mere brightness gradient still scores ~0.95. A flat
+    cost curve means ``d*`` may be a coincidental match and is a warning, not a
+    failure. ``reg`` is duck-typed: both :class:`RegistrationResult` and the
+    report dataclass expose ``quality`` and ``correlation``.
+    """
+    if not np.isfinite(reg.quality):
+        return "ok"
+    if reg.correlation < min_band_correlation:
+        return "fail"
+    if reg.quality < warn_quality:
+        return "warn"
+    return "ok"
+
+
 def to_gray(frame: np.ndarray) -> np.ndarray:
     """Luma as float32. Frames are BGR (ffmpeg bgr24), matching the rest of vrstudio."""
     if frame.ndim == 2:
