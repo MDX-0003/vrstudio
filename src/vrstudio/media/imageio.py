@@ -44,6 +44,20 @@ def write_png(path: str | Path, image: np.ndarray, compression: int = 0) -> Path
         raise ImageError(f"expected an (H, W, 3) BGR image, got {image.shape}")
     if image.dtype != np.uint8:
         raise ImageError(f"expected uint8, got {image.dtype}")
+    return _encode(path, image, compression)
+
+
+def write_gray_png(path: str | Path, image: np.ndarray, compression: int = 0) -> Path:
+    """Write an 8-bit single-channel image (mask) as a lossless PNG."""
+    path = Path(path)
+    if image.ndim != 2:
+        raise ImageError(f"expected a 2-D mask, got {image.shape}")
+    if image.dtype != np.uint8:
+        raise ImageError(f"expected uint8, got {image.dtype}")
+    return _encode(path, image, compression)
+
+
+def _encode(path: Path, image: np.ndarray, compression: int) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     ok, buf = cv2.imencode(".png", image,
                            [cv2.IMWRITE_PNG_COMPRESSION, int(compression)])

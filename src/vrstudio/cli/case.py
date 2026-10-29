@@ -7,6 +7,7 @@ case.toml 保持人可编辑（唯一真源在明面上）；改选区要么 web
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -15,6 +16,7 @@ import typer
 from .. import case as case_mod
 from .. import config as config_mod
 from ..case import CaseError
+from ..media.imageio import ImageError, read_image
 from ..media.videoio import VideoIOError, probe
 from ..procenv import decode_text, utf8_env
 
@@ -57,12 +59,21 @@ def save_mode(name: str, mode: str) -> None:
         raise CaseError(f"模式没保存：{detail}")
 
 
-def seed_patch_draft(name: str, source: Path, cases_dir: Path | None) -> None:
-    """patch 建立后写默认草稿（与 web 抽屉共用 ``case_mod.patch_default_draft``）。
+def seed_patch_draft(name: str, source: Path, cases_dir: Path | None,
+                     *, flow: str = "patch") -> None:
+    """建立后写默认草稿（与 web 抽屉共用 case 模型的默认值）。
 
-    probe 失败不拦创建：只是没有默认值，web pick / 手改 toml 照常可用。
+    probe/读图失败不拦创建：只是没有默认值，web pick / 手改 toml 照常可用。
     单独成函数是为了测试可以替换它。
     """
+    if flow == "patchimg":
+        try:
+            image = read_image(source)
+        except ImageError:
+            return
+        case_mod.set_draft(name, root=cases_dir,
+                           **case_mod.patchimg_default_draft(image.shape[1]))
+        return
     try:
         info = probe(source)
     except VideoIOError:
@@ -74,10 +85,10 @@ def seed_patch_draft(name: str, source: Path, cases_dir: Path | None) -> None:
 @app.command("new")
 def new(
     name: str = typer.Argument(..., help="case 名（= cases/ 下的目录名 = vrgen 的 job 名）。"),
-    flow: str = typer.Option(..., "--flow", help="patch | fullredraw | gen"),
+    flow: str = typer.Option(..., "--flow", help="patch | patchimg | fullredraw | gen"),
     source: Path = typer.Option(
         None, "--source", exists=True, dir_okay=False,
-        help="源视频。patch/fullredraw 必填；gen 可选（复制为 v1/编辑母版）。"),
+        help="源文件。patch/fullredraw 要视频；patchimg 要 2:1 ERP 图片；gen 可选。"),
     mode: str = typer.Option(None, "--mode",
                              help="gen 必填：videoEdit | allMediaRef | videoExtend。"),
     cases_dir: Path = typer.Option(None, "--cases-dir", help="覆盖 cases 根（测试用）。"),
@@ -95,8 +106,8 @@ def new(
         _fail(CaseError(f"flow={flow} 必须给 --source"))
     try:
         case = case_mod.create(name, flow, source, root=cases_dir)
-        if flow == "patch":
-            seed_patch_draft(case.name, source, cases_dir)
+        if flow in ("patch", "patchimg"):
+            seed_patch_draft(case.name, source, cases_dir, flow=flow)
         if flow == "gen":
             save_mode(case.name, mode)
     except CaseError as exc:
@@ -113,8 +124,38 @@ def new(
     elif flow == "patch":
         typer.echo("下一步：web pick 选区（已写默认草稿），"
                    "或手改 case.toml 的 [viewport]/[inner]/[frames]")
+    elif flow == "patchimg":
+        typer.echo("下一步：vrstudio case draft --case " + case.name
+                   + " --file <draft.json> 定视口与 inner，然后 vrstudio extract name --case "
+                   + case.name)
     else:
         typer.echo("下一步：vrstudio pad --in <源> --out <case>/seedance_input.mp4")
+
+
+@app.command("draft")
+def draft(
+    name: str = typer.Option(..., "--case", help="case 名"),
+    file: Path = typer.Option(..., "--file", exists=True, dir_okay=False,
+                              help='JSON：{"viewport": {...}, "inner": {...}}'),
+    cases_dir: Path = typer.Option(None, "--cases-dir"),
+) -> None:
+    """CLI 写 pick 草稿（与 web pick 共用 case_mod.set_draft）。"""
+    try:
+        raw = json.loads(file.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("顶层必须是对象")
+        case = case_mod.set_draft(name, viewport=raw.get("viewport"),
+                                  inner=raw.get("inner"), frames=raw.get("frames"),
+                                  root=cases_dir)
+    except CaseError as exc:
+        _fail(exc)
+    except (OSError, ValueError) as exc:
+        _fail(CaseError(str(exc)))
+    parts = [f"viewport={'✓' if case.viewport else '—'}",
+             f"inner={'✓' if case.inner else '—'}"]
+    if case.flow == "patch":
+        parts.append(f"frames={'✓' if case.frames else '—'}")
+    typer.echo(f"draft    {case.name}  " + "  ".join(parts))
 
 
 @app.command("list")
@@ -159,13 +200,18 @@ def show(
         typer.echo(f"source   {case.source_path}")
         if case.sha256:
             typer.echo(f"sha256   {case.sha256[:16]}…")
-    if case.flow == "patch":
-        for section, value in (("viewport", case.viewport), ("inner", case.inner),
-                               ("frames", case.frames)):
+    if case.flow in ("patch", "patchimg"):
+        sections = [("viewport", case.viewport), ("inner", case.inner)]
+        if case.flow == "patch":
+            sections.append(("frames", case.frames))
+        for section, value in sections:
             if value:
                 items = "  ".join(f"{k}={v}" for k, v in value.items())
                 typer.echo(f"{section:<8} {items}")
             else:
                 typer.echo(f"{section:<8} (未定——web pick 或手填)")
         typer.echo(f"extract  {case.extract_current or '(未抽取)'}")
-    typer.echo(f"adopt    {case.adopt_round or '(未采用)'}")
+    adopt = case.adopt_round or "(未采用)"
+    if case.adopt_index is not None:
+        adopt += f"  index={case.adopt_index}"
+    typer.echo(f"adopt    {adopt}")

@@ -150,6 +150,29 @@ def pad_still(
     return StillPad(padded=padded, mask=mask, manifest=manifest)
 
 
+def map_erp_mask_to_canvas(
+    erp_mask: np.ndarray,
+    plan: PadPlan,
+    pipeline: tuple[str, ...] | list[str] = ("pre_roll", "pad_h"),
+) -> np.ndarray:
+    """Map an ERP-space mask through the same chain as the image.
+
+    ``patchimg`` builds its local edit mask in ERP space; running it through
+    ``pre_roll`` + ``pad_h`` guarantees the black region lands on exactly the
+    same canvas pixels as the padded image, including the wrap and the roll.
+    """
+    if erp_mask.ndim != 2 or erp_mask.shape != (plan.H, plan.W):
+        raise StillError(
+            f"ERP mask is {erp_mask.shape}, plan source is {(plan.H, plan.W)}")
+    chain = build_chain(list(pipeline))
+    mapped = apply_chain(np.ascontiguousarray(erp_mask), chain,
+                         TransformContext(plan=plan))
+    if mapped.shape != (plan.H, plan.Wc):
+        raise StillError(
+            f"canvas mask is {mapped.shape}, canvas is {(plan.H, plan.Wc)}")
+    return np.ascontiguousarray(mapped)
+
+
 def stitch_still(
     generated: np.ndarray,
     manifest: StillManifest,

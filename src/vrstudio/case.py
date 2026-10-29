@@ -20,15 +20,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import REPO_ROOT
+from .media.imageio import read_image
 from .roles import RESERVED_ROLES, ROLES, check_kinds
 
 SCHEMA = 1
-FLOWS = ("patch", "fullredraw", "gen")
+FLOWS = ("patch", "patchimg", "fullredraw", "gen")
 
 #: 与 vrgen 的 job 名同一套约束：case 名是 cases/ 下的目录名。
 _CASE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 _PATCH_SECTIONS = ("viewport", "inner", "frames", "extract")
+_PATCHIMG_SECTIONS = ("viewport", "inner", "extract")
 
 #: 素材种类受控词表。角色词表在 roles.py（来自 roles.json 契约快照）。
 KINDS = ("video", "image")
@@ -103,6 +105,7 @@ class Case:
     submit_roles: dict[str, str] | None = None
     # ── adopt 指针：vrgen 台账里被采用的轮次 ──
     adopt_round: str | None = None
+    adopt_index: int | None = None
 
     def dir(self, root: str | Path | None = None) -> Path:
         return case_dir(self.name, root)
@@ -165,13 +168,26 @@ def create(name: str, flow: str, source: str | Path | None = None,
             return add_assets(name, [(source, "edit_master")], root=root)
         return case
     if source is None:
-        raise CaseError(f"flow={flow} 必须指定源视频")
+        wanted = "图片" if flow == "patchimg" else "源视频"
+        raise CaseError(f"flow={flow} 必须指定{wanted}")
     src = Path(source)
     if not src.is_file():
-        raise CaseError(f"源视频不存在：{src}")
-    # patch 的 merge 要重读源视频贴回，源变了就静默错片——创建时就把身份钉死；
-    # fullredraw 在 pad 之后源不再被读（manifest 已含源身份），哈希可选。
-    sha = file_sha256(src) if (compute_hash and flow == "patch") else None
+        raise CaseError(f"源文件不存在：{src}")
+    kind = _kind_of(src)
+    if flow == "patchimg":
+        if kind != "image":
+            raise CaseError(f"patchimg 的 --source 必须是图片：{src.name}")
+        image = read_image(src)
+        height, width = image.shape[:2]
+        if height <= 0 or abs(width / height - 2.0) > 0.001:
+            raise CaseError(
+                f"patchimg 的源图必须是 2:1 ERP：{src.name} 是 {width}x{height}"
+                f"（比例 {width / height:.4f}）")
+    elif kind != "video":
+        raise CaseError(f"flow={flow} 的 --source 必须是视频：{src.name}")
+    # patch/patchimg 后续要重读源文件贴回，源变了就静默错片——创建时就把身份
+    # 钉死；fullredraw 在 pad 之后源不再被读（manifest 已含源身份），哈希可选。
+    sha = file_sha256(src) if (compute_hash and flow in ("patch", "patchimg")) else None
     case = Case(name=name, flow=flow, source_path=str(src), sha256=sha)
     return save(case, root)
 
@@ -209,11 +225,13 @@ def load(name: str, root: str | Path | None = None) -> Case:
         submit_selected=selected,
         submit_roles=roles,
         adopt_round=raw.get("adopt", {}).get("round"),
+        adopt_index=raw.get("adopt", {}).get("index"),
     )
-    if flow != "patch":
-        for section in _PATCH_SECTIONS:
-            if raw.get(section) is not None:
-                raise CaseError(f"{path}: flow={flow} 不该有 [{section}]（patch 专属段）")
+    allowed = (_PATCH_SECTIONS if flow == "patch"
+               else _PATCHIMG_SECTIONS if flow == "patchimg" else ())
+    for section in _PATCH_SECTIONS:
+        if raw.get(section) is not None and section not in allowed:
+            raise CaseError(f"{path}: flow={flow} 不该有 [{section}]（patch 专属段）")
     if flow != "gen" and raw.get("gen") is not None:
         raise CaseError(f"{path}: [gen] 只属于 flow=gen")
     if flow != "gen" and not case.source_path:
@@ -243,9 +261,11 @@ def save(case: Case, root: str | Path | None = None) -> Case:
         lines += ["", "[submit.roles]"]
         lines += [f"{_s(key)} = {_s(value)}"
                   for key, value in case.submit_roles.items()]
-    if case.flow == "patch":
-        for section, value in (("viewport", case.viewport), ("inner", case.inner),
-                               ("frames", case.frames)):
+    if case.flow in ("patch", "patchimg"):
+        sections = [("viewport", case.viewport), ("inner", case.inner)]
+        if case.flow == "patch":
+            sections.append(("frames", case.frames))
+        for section, value in sections:
             if value:
                 lines += ["", f"[{section}]"]
                 lines += [_kv(k, v) for k, v in value.items()]
@@ -253,6 +273,8 @@ def save(case: Case, root: str | Path | None = None) -> Case:
             lines += ["", "[extract]", f"current = {_s(case.extract_current)}"]
     if case.adopt_round:
         lines += ["", "[adopt]", f"round = {_s(case.adopt_round)}"]
+        if case.adopt_index is not None:
+            lines.append(f"index = {int(case.adopt_index)}")
     path = case_toml(case.name, root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -285,7 +307,10 @@ def _parse_assets(raw, path: Path) -> list[Asset]:
 
 
 def _flow_asset_ids(flow: str) -> set[str]:
-    """流程产物在 ``[submit] selected`` 里的固定 id（不进 ``[[assets]]``）。"""
+    """流程产物在 ``[submit] selected`` 里的固定 id（不进 ``[[assets]]``）。
+
+    patchimg 的 padded 图由装配器自动附带，不作为可勾选候选，因此返回空集。
+    """
     if flow == "patch":
         return {"clip"}
     if flow == "fullredraw":
@@ -533,9 +558,12 @@ def _safe_stem(stem: str) -> str:
 # ── 草稿与采用指针 ───────────────────────────────────────────────────────
 
 
-def set_adopt(name: str, round_key: str, root: str | Path | None = None) -> Case:
+def set_adopt(name: str, round_key: str, root: str | Path | None = None, *,
+              index: int | None = None) -> Case:
+    """写 adopt 指针；``index`` 只对 patchimg 有意义（图片候选下标）。"""
     case = load(name, root)
     case.adopt_round = round_key
+    case.adopt_index = index
     return save(case, root)
 
 
@@ -599,15 +627,30 @@ def patch_default_draft(source_width: int, source_frames: int) -> dict:
     }
 
 
+def patchimg_default_draft(source_width: int) -> dict:
+    """patchimg 建立时的默认草稿：视口与 inner，没有时间段。"""
+    vpw = min(1920, max(1, int(source_width)))
+    vph = int(vpw * 9 / 16)
+    return {
+        "viewport": {"yaw_deg": 0.0, "pitch_deg": 0.0, "fov_h_deg": 59.0,
+                     "width": vpw, "height": vph},
+        "inner": {"x": vpw // 4, "y": vph // 4, "width": vpw // 2, "height": vph // 2},
+    }
+
+
 def set_draft(name: str, *, viewport: dict | None = None, inner: dict | None = None,
               frames: dict | None = None, root: str | Path | None = None) -> Case:
     """pick 草稿写入（web pick / CLI 都是调用方；唯一权威在 case 模型）。
 
     只更新传入的段，未传的段保持原样——pick 是迭代动作，逐字段收敛。
+    patchimg 没有时间轴，传 ``frames`` 直接拒绝。
     """
     case = load(name, root)
-    if case.flow != "patch":
+    if case.flow not in ("patch", "patchimg"):
         raise CaseError(f"case {name} 是 {case.flow} 流，没有 pick 草稿")
+    if case.flow == "patchimg" and frames is not None:
+        raise CaseError(
+            f"case {name} 是 patchimg 流，没有 [frames]；局部区域由 viewport/inner 定义")
     if viewport is not None:
         case.viewport = dict(viewport)
     if inner is not None:
@@ -619,17 +662,21 @@ def set_draft(name: str, *, viewport: dict | None = None, inner: dict | None = N
 
 def draft_ready(case: Case) -> str | None:
     """草稿是否齐到可以 extract：缺哪段返回哪段名，齐了返回 None。"""
-    if case.flow != "patch":
+    if case.flow == "patch":
+        required = ("viewport", "inner", "frames")
+    elif case.flow == "patchimg":
+        required = ("viewport", "inner")
+    else:
         return None
-    for section in ("viewport", "inner", "frames"):
-        if not getattr(case, section if section != "frames" else "frames"):
+    for section in required:
+        if not getattr(case, section):
             return section
     return None
 
 
 def set_extract_current(name: str, version: str, root: str | Path | None = None) -> Case:
     case = load(name, root)
-    if case.flow != "patch":
+    if case.flow not in ("patch", "patchimg"):
         raise CaseError(f"case {name} 是 {case.flow} 流，没有 extracts/ 版本")
     case.extract_current = version
     return save(case, root)
@@ -646,15 +693,15 @@ def _stored_path(raw: str) -> Path:
 
 
 def check_source(case: Case, root: str | Path | None = None) -> Path:
-    """patch / fullredraw 流的守卫：生成或合并前确认源视频还是创建时的那份。"""
+    """patch / patchimg / fullredraw 流的守卫：确认源文件还是创建时的那份。"""
     if not case.source_path:
-        raise CaseError(f"case {case.name} 没有源视频")
+        raise CaseError(f"case {case.name} 没有源文件")
     src = _stored_path(case.source_path)
     if not src.is_file():
-        raise CaseError(f"源视频不在了：{src}（case.toml 记录的路径）")
+        raise CaseError(f"源文件不在了：{src}（case.toml 记录的路径）")
     if case.sha256 and file_sha256(src) != case.sha256:
         raise CaseError(
-            f"源视频内容与 case 创建时不同（sha256 不匹配）：{src}。"
+            f"源文件内容与 case 创建时不同（sha256 不匹配）：{src}。"
             f"换源 = 新 case；这份几何契约只对创建时那份源有效。"
         )
     return src

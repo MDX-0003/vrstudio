@@ -24,8 +24,13 @@ import typer
 from ..patch.case import Case, load_case, set_extract_version
 from ..patch.sidecar import Sidecar, Segment, Viewport, InnerRect, save_sidecar
 from ..patch.extract import extract_viewport_frame, open_writer, make_mask_image
+from ..patch.still import LocalMaskError, local_erp_mask
+from ..redraw.manifest import LocalInfo
+from ..redraw.still import (StillError, map_erp_mask_to_canvas, pad_still,
+                            plan_still)
 from ..progress import PhaseLog as Log, PhaseRateMeter as RateMeter, open_log_file
-from .. import case as case_mod
+from .. import __version__, case as case_mod, config as config_mod
+from ..media.imageio import ImageError, read_image, write_gray_png, write_png
 
 app = typer.Typer(add_completion=False, help=__doc__)
 
@@ -141,26 +146,80 @@ def from_case(
         fh.close()
 
 
+def _extract_still(case, src: Path, cases_dir, log: Log) -> None:
+    """patchimg 的 pad 步骤：2:1 ERP -> 21:9 冗余画布 + 局部 mask + still_pad.json。"""
+    conf = config_mod.load()
+    image = read_image(src)
+    erp_h, erp_w = image.shape[:2]
+    if erp_h <= 0 or abs(erp_w / erp_h - 2.0) > 0.001:
+        raise typer.Exit(f"patchimg source is not 2:1 ERP: {erp_w}x{erp_h}")
+
+    plan = plan_still(
+        (erp_w, erp_h),
+        target_aspect=str(conf.get("pad.target_aspect", "21:9")),
+        even_dimensions=bool(conf.get("pad.even_dimensions", True)),
+        on_aspect_conflict=str(conf.get("pad.on_aspect_conflict", "error")),
+        pre_roll=conf.get("pad.pre_roll", "auto"),
+    )
+    pipeline = list(conf.get("pad.pipeline.transforms", ["pre_roll", "pad_h"]))
+    viewport = Viewport(**case.viewport)
+    inner = InnerRect(**case.inner)
+    local = local_erp_mask(viewport, inner, erp_w, erp_h)
+    canvas_mask = map_erp_mask_to_canvas(local.erp_mask, plan, pipeline)
+    padded = pad_still(
+        image, plan, source_path=src,
+        pipeline=pipeline,
+        mask=canvas_mask,
+        mask_path="padded_mask.png",
+        mask_strategy="local",
+        mask_feather_px=int(conf.get("mask.feather_px", 0)),
+        mask_png_compression=int(conf.get("mask.png_compression", 0)),
+        restore_interp=str(conf.get("recompose.restore_interp", "lanczos4")),
+        local=LocalInfo(viewport=dict(case.viewport), inner=dict(case.inner)),
+        tool_version=__version__,
+    )
+
+    version = time.strftime("%Y%m%d-%H%M%S")
+    vdir = case.dir(cases_dir) / "extracts" / version
+    vdir.mkdir(parents=True, exist_ok=True)
+    compression = int(conf.get("mask.png_compression", 0))
+    write_png(vdir / "padded.png", padded.padded, compression=compression)
+    write_gray_png(vdir / "padded_mask.png", padded.mask, compression=compression)
+    padded.manifest.save(vdir / "still_pad.json")
+    case_mod.set_extract_current(case.name, version, root=cases_dir)
+
+    derived = case.dir(cases_dir) / "derived"
+    derived.mkdir(parents=True, exist_ok=True)
+    for name in ("padded.png", "padded_mask.png", "still_pad.json"):
+        shutil.copyfile(vdir / name, derived / name)
+
+    log.phase(f"still extract version: {version}")
+    log.info(f"canvas {plan.Wc}x{plan.H}  P={plan.P}  L={plan.L}  "
+             f"local {inner.width}x{inner.height} at {inner.x},{inner.y}")
+
+
 @app.command("name")
 def from_case_name(
     case_name: str = typer.Option(..., "--case", help="统一 case 名（cases/ 下目录）"),
     cases_dir: Path = typer.Option(None, help="default: <repo>/cases"),
 ):
-    """Extract by unified case name: 草稿（viewport/inner/frames）冻结进 extracts/<版本>。
+    """Extract by unified case name: 草稿冻结进 extracts/<版本>。
 
-    与 ``case`` 命令（vrpatch 老式 case.toml）的区别只在入口：源路径/哈希守卫/
-    草稿都来自统一 case 模型（src/vrstudio/case.py），extracts 版本目录结构与
-    clip.json 契约两者完全一致。
+    patch 冻结成 clip.json + clip.mp4 + clip_mask.png；patchimg 冻结成
+    still_pad.json + padded.png + padded_mask.png。两者共用源路径/哈希守卫
+    与 extracts 版本目录。
     """
     case = case_mod.load(case_name, cases_dir)
-    if case.flow != "patch":
-        typer.secho(f"extract: case {case_name} 是 {case.flow} 流（extract 是 patch 专属步骤）",
+    if case.flow not in ("patch", "patchimg"):
+        typer.secho(f"extract: case {case_name} 是 {case.flow} 流"
+                    f"（extract 是 patch/patchimg 专属步骤）",
                     fg=typer.colors.RED, err=True)
         raise typer.Exit(2)
     missing = case_mod.draft_ready(case)
     if missing:
+        need = "viewport/inner" if case.flow == "patchimg" else "viewport/inner/frames"
         typer.secho(f"extract: pick 草稿未定（缺 [{missing}]）——先在 web pick 或"
-                    f" case.toml 里补齐 viewport/inner/frames", fg=typer.colors.RED, err=True)
+                    f" case.toml 里补齐 {need}", fg=typer.colors.RED, err=True)
         raise typer.Exit(2)
     src = case_mod.check_source(case, cases_dir)
 
@@ -168,6 +227,14 @@ def from_case_name(
     log = Log(fh=fh)
     try:
         log.phase(f"case: {case.name} (source sha256 verified)")
+        if case.flow == "patchimg":
+            try:
+                _extract_still(case, src, cases_dir, log)
+            except (ImageError, StillError, LocalMaskError, TypeError) as exc:
+                typer.secho(f"extract: {exc}", fg=typer.colors.RED, err=True)
+                raise typer.Exit(2) from exc
+            log.phase(f"log -> {log_path}")
+            return
         cap = cv2.VideoCapture(str(src))
         if not cap.isOpened():
             raise typer.Exit(f"cannot open video: {src}")
