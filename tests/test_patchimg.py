@@ -166,6 +166,7 @@ def test_local_mask_and_composite_keep_pixels_outside_inner(erp):
     assert result.maxdiff_outside == 0
     assert np.array_equal(result.image[~support], erp[~support])
     assert result.changed_inside > 0
+    assert result.changed_inside <= result.support_pixels
 
 
 def test_local_mask_rejects_an_inner_outside_the_viewport():
@@ -174,6 +175,20 @@ def test_local_mask_rejects_an_inner_outside_the_viewport():
     with pytest.raises(LocalMaskError, match="outside"):
         local_erp_mask(viewport, InnerRect(x=400, y=0, width=10, height=10),
                        384, 192)
+
+
+def test_patchimg_extract_rejects_a_region_on_the_redundant_band(tmp_path):
+    src = _source(tmp_path)
+    case_mod.create("p", "patchimg", src, root=tmp_path)
+    case_mod.set_draft("p", root=tmp_path,
+                       viewport={"yaw_deg": 160.0, "pitch_deg": -5.0,
+                                 "fov_h_deg": 70.0, "width": 1920, "height": 1080},
+                       inner={"x": 480, "y": 270, "width": 960, "height": 540})
+
+    result = runner.invoke(extract_cli.app, [
+        "name", "--case", "p", "--cases-dir", str(tmp_path)])
+    assert result.exit_code != 0
+    assert "冗余带" in result.output
 
 
 def test_patchimg_submit_dry_run_lists_the_image_argv(tmp_path):
@@ -187,6 +202,24 @@ def test_patchimg_submit_dry_run_lists_the_image_argv(tmp_path):
     assert "--image-role" in result.output
     assert "mask" in result.output
     assert "21:9" in result.output
+
+
+def test_patchimg_submit_downscales_a_large_padded_canvas(tmp_path):
+    _prepared_case(tmp_path)
+    result = runner.invoke(generate_cli.app, [
+        "submit", "--case", "p", "--dry-run",
+        "--set", "generate.image_upload_max_side=200",
+        "--cases-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "upload.png" in result.output
+    assert "upload_mask.png" in result.output
+
+    case = case_mod.load("p", tmp_path)
+    version = case_mod.case_dir("p", tmp_path) / "extracts" / case.extract_current
+    upload = read_image(version / "upload.png")
+    assert max(upload.shape[:2]) == 200
+    mask = read_image(version / "upload_mask.png")
+    assert mask.shape[:2] == upload.shape[:2]
 
 
 def test_patchimg_adopt_requires_an_explicit_index(tmp_path):

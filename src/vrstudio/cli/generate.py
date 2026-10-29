@@ -25,12 +25,14 @@ import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+import cv2
 import typer
 
 from .. import case as case_mod
 from ..case import CaseError
 from ..config import REPO_ROOT
 from ..config import load as load_config
+from ..media.imageio import read_image, write_gray_png, write_png
 from ..media.videoio import VideoIOError, probe
 from ..procenv import decode_text, utf8_env
 from ..redraw.manifest import Manifest, StillManifest
@@ -368,8 +370,42 @@ class StillSubmission:
     template: str = "still360-local"
 
 
+def _upload_inputs(base: Path, mask: Path, max_side: int) -> tuple[Path, Path]:
+    """Downscale the submission copies; the canonical pad stays untouched.
+
+    The image platform returns 403 on very large uploads (observed with a 117 MB
+    9558x4096 PNG), while its output is 4K. The canonical ``padded.png`` keeps
+    the canvas resolution for stitch; only the copies handed to the model are
+    bounded here.
+    """
+    if max_side <= 0:
+        return base, mask
+    image = read_image(base)
+    height, width = image.shape[:2]
+    if max(width, height) <= max_side:
+        return base, mask
+    scale = max_side / float(max(width, height))
+    new_w = max(2, int(round(width * scale)))
+    new_h = max(2, int(round(height * scale)))
+    small = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    upload = base.with_name("upload.png")
+    write_png(upload, small, compression=6)
+
+    mask_image = read_image(mask)[:, :, 0]
+    if mask_image.shape != (height, width):
+        raise GenError(
+            f"mask {mask_image.shape[1]}x{mask_image.shape[0]} does not match "
+            f"padded {width}x{height}")
+    mask_small = cv2.resize(mask_image, (new_w, new_h),
+                            interpolation=cv2.INTER_NEAREST)
+    upload_mask = mask.with_name("upload_mask.png")
+    write_gray_png(upload_mask, mask_small, compression=6)
+    return upload, upload_mask
+
+
 def assemble_still(case: case_mod.Case,
-                   root: str | Path | None = None) -> StillSubmission:
+                   root: str | Path | None = None, *,
+                   upload_max_side: int = 4096) -> StillSubmission:
     """按 ``[submit] selected`` 组装 patchimg 的图片提交；底图与 mask 自动附带。"""
     if not case.extract_current:
         raise GenError(
@@ -380,6 +416,7 @@ def assemble_still(case: case_mod.Case,
     mask = d / "padded_mask.png"
     if not base.is_file() or not mask.is_file():
         raise GenError(f"{d} 缺 padded.png/padded_mask.png——重跑 extract")
+    base, mask = _upload_inputs(base, mask, int(upload_max_side))
     manifest = StillManifest.load(d / "still_pad.json")
     ratio = (manifest.ratio_label
              or f"{manifest.canvas.target_aspect[0]}:{manifest.canvas.target_aspect[1]}")
@@ -448,7 +485,9 @@ def _submit_still(case: case_mod.Case, cases_dir, conf, *,
     if variables:
         _fail(GenError("patchimg 不接受 --var：请把变量写进 job 的 prompt-vars.toml"))
     try:
-        still = assemble_still(case, cases_dir)
+        still = assemble_still(
+            case, cases_dir,
+            upload_max_side=int(conf.get("generate.image_upload_max_side", 4096)))
     except GenError as exc:
         _fail(exc)
 

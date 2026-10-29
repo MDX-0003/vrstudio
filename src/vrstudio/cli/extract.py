@@ -166,6 +166,14 @@ def _extract_still(case, src: Path, cases_dir, log: Log) -> None:
     viewport = Viewport(**case.viewport)
     inner = InnerRect(**case.inner)
     local = local_erp_mask(viewport, inner, erp_w, erp_h)
+    bx0, _, _, _ = local.bbox
+    ys, xs = np.where(local.support)
+    sx0, sx1 = bx0 + int(xs.min()), bx0 + int(xs.max()) + 1
+    clean_lo, clean_hi = plan.P, plan.W - 2 * plan.P
+    if sx0 < clean_lo or sx1 > clean_hi:
+        raise LocalMaskError(
+            f"局部选区落在左右冗余带上（源 x {sx0}..{sx1}，干净主内容 "
+            f"{clean_lo}..{clean_hi}）；把视口移离接缝或缩小 inner")
     canvas_mask = map_erp_mask_to_canvas(local.erp_mask, plan, pipeline)
     padded = pad_still(
         image, plan, source_path=src,

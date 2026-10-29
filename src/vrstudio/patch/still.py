@@ -111,7 +111,8 @@ def composite_local(source_erp: np.ndarray, stitched_erp: np.ndarray,
     outside = np.ones(source_erp.shape[:2], dtype=bool)
     outside[y0:y1, x0:x1] = ~support
     maxdiff_outside = int(diff[outside].max()) if outside.any() else 0
-    changed_inside = int((diff[y0:y1, x0:x1][support] > 0).sum())
+    patch_diff = diff[y0:y1, x0:x1]
+    changed_inside = int((patch_diff[support] > 0).any(axis=1).sum())
     return LocalComposite(
         image=out,
         maxdiff_outside=maxdiff_outside,
