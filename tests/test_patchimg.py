@@ -1,10 +1,10 @@
-"""patchimg: 2:1 ERP image -> padded canvas -> local mask -> still_pad.json."""
+"""patchimg: 2:1 ERP image -> 16:9 viewport crop -> inner mask -> still.json."""
 
 from __future__ import annotations
 
 import json
-import shutil
 
+import cv2
 import numpy as np
 import pytest
 from typer.testing import CliRunner
@@ -16,10 +16,9 @@ from vrstudio.cli import case as case_cli
 from vrstudio.cli import extract as extract_cli
 from vrstudio.cli import generate as generate_cli
 from vrstudio.cli import merge as merge_cli
-from vrstudio.media.imageio import read_image, write_png
-from vrstudio.patch.sidecar import InnerRect, Viewport
-from vrstudio.patch.still import LocalMaskError, composite_local, local_erp_mask
-from vrstudio.redraw.manifest import StillManifest
+from vrstudio.media.imageio import read_image, write_gray_png, write_png
+from vrstudio.patch.composite import SegmentMaps
+from vrstudio.patch.sidecar import InnerRect, Viewport, load_still
 
 runner = CliRunner()
 
@@ -30,15 +29,43 @@ def _source(tmp_path, name: str = "src.png", width: int = 384, height: int = 192
     return path
 
 
+def _extract(tmp_path):
+    result = runner.invoke(extract_cli.app, [
+        "name", "--case", "p", "--cases-dir", str(tmp_path)])
+    return result
+
+
 def _prepared_case(tmp_path):
     """create + draft + extract; returns the source path."""
     src = _source(tmp_path)
     case_mod.create("p", "patchimg", src, root=tmp_path)
     case_mod.set_draft("p", root=tmp_path, **case_mod.patchimg_default_draft(384))
-    result = runner.invoke(extract_cli.app, [
-        "name", "--case", "p", "--cases-dir", str(tmp_path)])
+    result = _extract(tmp_path)
     assert result.exit_code == 0, result.output
     return src
+
+
+def _version_dir(tmp_path):
+    case = case_mod.load("p", tmp_path)
+    return case_mod.case_dir("p", tmp_path) / "extracts" / case.extract_current
+
+
+def _adopted_result(version, inner, colour=(0, 0, 255)):
+    """模型的返回：视口图原样，inner 区域涂成一种颜色。"""
+    clip = read_image(version / "clip.png")
+    x, y, w, h = inner["x"], inner["y"], inner["width"], inner["height"]
+    clip[y:y + h, x:x + w] = colour
+    write_png(version / "result.png", clip)
+
+
+def _support(source, viewport, inner, feather=16):
+    """inner 在 ERP 上覆盖的像素，展开成整幅 bool。"""
+    maps = SegmentMaps.from_geometry(viewport, inner, source.shape[1],
+                                     source.shape[0], feather_px=feather)
+    full = np.zeros(source.shape[:2], dtype=bool)
+    x0, y0, x1, y1 = maps.inner_bbox
+    full[y0:y1, x0:x1] = maps.inner_support
+    return full
 
 
 def test_create_patchimg_rejects_non_2_to_1(tmp_path):
@@ -124,102 +151,96 @@ def test_case_draft_cli_writes_viewport_and_inner(tmp_path):
     assert case.inner["width"] == 160
 
 
-def test_patchimg_extract_writes_the_still_artifacts(tmp_path):
-    src = _source(tmp_path)
-    result = runner.invoke(case_cli.app, [
-        "new", "p", "--flow", "patchimg", "--source", str(src),
-        "--cases-dir", str(tmp_path)])
-    assert result.exit_code == 0, result.output
+def test_patchimg_extract_writes_the_viewport_artifacts(tmp_path):
+    _prepared_case(tmp_path)
+    version = _version_dir(tmp_path)
 
-    result = runner.invoke(extract_cli.app, [
-        "name", "--case", "p", "--cases-dir", str(tmp_path)])
-    assert result.exit_code == 0, result.output
-
-    case = case_mod.load("p", tmp_path)
-    assert case.extract_current
-    version = case_mod.case_dir("p", tmp_path) / "extracts" / case.extract_current
-    for name in ("padded.png", "padded_mask.png", "still_pad.json"):
+    for name in ("clip.png", "clip_mask.png", "still.json"):
         assert (version / name).is_file(), name
-    assert (case_mod.case_dir("p", tmp_path) / "derived" / "still_pad.json").is_file()
+    assert not (version / "padded.png").exists()
+    assert not (version / "still_pad.json").exists()
+    derived = case_mod.case_dir("p", tmp_path) / "derived"
+    for name in ("clip.png", "clip_mask.png", "still.json"):
+        assert (derived / name).is_file(), name
 
-    manifest = StillManifest.load(version / "still_pad.json")
-    assert manifest.local is not None
-    assert manifest.local.viewport["width"] == 384
-    assert manifest.local.inner["width"] == 192
-    assert manifest.mask.strategy == "local"
-    assert manifest.canvas.size == (448, 192)
+    geo = load_still(version / "still.json")
+    assert (geo.erp_width, geo.erp_height) == (384, 192)
+    assert (geo.viewport.width, geo.viewport.height) == (384, 216)
+    assert (geo.inner.x, geo.inner.y, geo.inner.width, geo.inner.height) == \
+        (96, 54, 192, 108)
 
-
-def test_local_mask_and_composite_keep_pixels_outside_inner(erp):
-    viewport = Viewport(yaw_deg=0.0, pitch_deg=0.0, fov_h_deg=59.0,
-                        width=384, height=216)
-    inner = InnerRect(x=96, y=54, width=96, height=54)
-    local = local_erp_mask(viewport, inner, 384, 192)
-    assert local.support.any()
-
-    stitched = np.zeros_like(erp)
-    result = composite_local(erp, stitched, local, feather_px=16)
-
-    x0, y0, x1, y1 = local.bbox
-    support = np.zeros(erp.shape[:2], dtype=bool)
-    support[y0:y1, x0:x1] = local.support
-    assert result.maxdiff_outside == 0
-    assert np.array_equal(result.image[~support], erp[~support])
-    assert result.changed_inside > 0
-    assert result.changed_inside <= result.support_pixels
+    clip = read_image(version / "clip.png")
+    assert clip.shape[:2] == (geo.viewport.height, geo.viewport.width)
 
 
-def test_local_mask_rejects_an_inner_outside_the_viewport():
-    viewport = Viewport(yaw_deg=0.0, pitch_deg=0.0, fov_h_deg=59.0,
-                        width=384, height=216)
-    with pytest.raises(LocalMaskError, match="outside"):
-        local_erp_mask(viewport, InnerRect(x=400, y=0, width=10, height=10),
-                       384, 192)
+def test_patchimg_extract_mask_is_black_inside_inner(tmp_path):
+    _prepared_case(tmp_path)
+    case = case_mod.load("p", tmp_path)
+    mask = read_image(_version_dir(tmp_path) / "clip_mask.png")[:, :, 0]
+    inner = case.inner
+
+    assert mask.dtype == np.uint8
+    assert mask[inner["y"]:inner["y"] + inner["height"],
+                inner["x"]:inner["x"] + inner["width"]].max() == 0
+    outside = mask.copy()
+    outside[inner["y"]:inner["y"] + inner["height"],
+            inner["x"]:inner["x"] + inner["width"]] = 0
+    assert outside.max() == 255
 
 
-def test_patchimg_extract_rejects_a_region_on_the_redundant_band(tmp_path):
+def test_patchimg_extract_rejects_a_non_16_9_viewport(tmp_path):
     src = _source(tmp_path)
     case_mod.create("p", "patchimg", src, root=tmp_path)
     case_mod.set_draft("p", root=tmp_path,
-                       viewport={"yaw_deg": 160.0, "pitch_deg": -5.0,
-                                 "fov_h_deg": 70.0, "width": 1920, "height": 1080},
-                       inner={"x": 480, "y": 270, "width": 960, "height": 540})
+                       viewport={"yaw_deg": 0.0, "pitch_deg": 0.0,
+                                 "fov_h_deg": 59.0, "width": 320, "height": 200},
+                       inner={"x": 80, "y": 50, "width": 160, "height": 100})
 
-    result = runner.invoke(extract_cli.app, [
-        "name", "--case", "p", "--cases-dir", str(tmp_path)])
-    assert result.exit_code != 0
-    assert "冗余带" in result.output
+    result = _extract(tmp_path)
+    assert result.exit_code == 2
+    assert "16:9" in result.output
+
+
+def test_patchimg_extract_rejects_an_inner_outside_the_viewport(tmp_path):
+    src = _source(tmp_path)
+    case_mod.create("p", "patchimg", src, root=tmp_path)
+    case_mod.set_draft("p", root=tmp_path,
+                       viewport={"yaw_deg": 0.0, "pitch_deg": 0.0,
+                                 "fov_h_deg": 59.0, "width": 384, "height": 216},
+                       inner={"x": 300, "y": 0, "width": 200, "height": 100})
+
+    result = _extract(tmp_path)
+    assert result.exit_code == 2
+    assert "越出" in result.output
 
 
 def test_patchimg_submit_dry_run_lists_the_image_argv(tmp_path):
     _prepared_case(tmp_path)
     result = runner.invoke(generate_cli.app, [
-        "submit", "--case", "p", "--dry-run", "--cases-dir", str(tmp_path)])
+        "submit", "--case", "p", "--dry-run", "--num", "4",
+        "--resolution", "4K", "--cases-dir", str(tmp_path)])
     assert result.exit_code == 0, result.output
     assert "image" in result.output and "submit" in result.output
-    assert "padded.png" in result.output
+    assert "clip.png" in result.output
+    assert "clip_mask.png" in result.output
     assert "edit_master" in result.output
     assert "--image-role" in result.output
     assert "mask" in result.output
-    assert "21:9" in result.output
+    assert "16:9" in result.output
+    assert "upload.png" not in result.output
 
 
-def test_patchimg_submit_downscales_a_large_padded_canvas(tmp_path):
-    _prepared_case(tmp_path)
-    result = runner.invoke(generate_cli.app, [
-        "submit", "--case", "p", "--dry-run",
-        "--set", "generate.image_upload_max_side=200",
-        "--cases-dir", str(tmp_path)])
-    assert result.exit_code == 0, result.output
-    assert "upload.png" in result.output
-    assert "upload_mask.png" in result.output
+def test_upload_inputs_bounds_the_long_side(tmp_path):
+    """img2video 的关键帧提交（WP3）复用这个上限；patchimg 不再经过它。"""
+    base = tmp_path / "padded.png"
+    mask = tmp_path / "padded_mask.png"
+    write_png(base, np.full((360, 640, 3), 128, np.uint8))
+    write_gray_png(mask, np.full((360, 640), 255, np.uint8))
 
-    case = case_mod.load("p", tmp_path)
-    version = case_mod.case_dir("p", tmp_path) / "extracts" / case.extract_current
-    upload = read_image(version / "upload.png")
-    assert max(upload.shape[:2]) == 200
-    mask = read_image(version / "upload_mask.png")
-    assert mask.shape[:2] == upload.shape[:2]
+    upload, upload_mask = generate_cli._upload_inputs(base, mask, 200)
+    assert upload.name == "upload.png"
+    assert max(read_image(upload).shape[:2]) == 200
+    assert read_image(upload_mask).shape[:2] == read_image(upload).shape[:2]
 
 
 def test_patchimg_adopt_requires_an_explicit_index(tmp_path):
@@ -247,8 +268,7 @@ def test_patchimg_adopt_records_the_index(tmp_path, monkeypatch):
 def test_patchimg_merge_writes_the_erp_png_bit_identically(tmp_path):
     src = _prepared_case(tmp_path)
     case = case_mod.load("p", tmp_path)
-    version = case_mod.case_dir("p", tmp_path) / "extracts" / case.extract_current
-    shutil.copyfile(version / "padded.png", version / "result.png")
+    _adopted_result(_version_dir(tmp_path), case.inner)
 
     result = runner.invoke(merge_cli.app, [
         "--case", "p", "-q", "--cases-dir", str(tmp_path)])
@@ -257,7 +277,12 @@ def test_patchimg_merge_writes_the_erp_png_bit_identically(tmp_path):
     out = (case_mod.case_dir("p", tmp_path) / "out"
            / f"{case.extract_current}_still.png")
     assert out.is_file()
-    assert np.array_equal(read_image(out), read_image(src))
+    merged = read_image(out)
+    source = read_image(src)
+    support = _support(source, Viewport(**case.viewport), InnerRect(**case.inner))
+
+    assert np.array_equal(merged[~support], source[~support])
+    assert np.any(merged[support] != source[support])
 
 
 def test_patchimg_merge_requires_an_adopted_result(tmp_path):
@@ -266,3 +291,57 @@ def test_patchimg_merge_requires_an_adopted_result(tmp_path):
         "--case", "p", "-q", "--cases-dir", str(tmp_path)])
     assert result.exit_code != 0
     assert "adopt" in result.output
+
+
+def test_patchimg_merge_rejects_an_aspect_mismatch(tmp_path):
+    _prepared_case(tmp_path)
+    case = case_mod.load("p", tmp_path)
+    version = _version_dir(tmp_path)
+    clip = read_image(version / "clip.png")
+    write_png(version / "result.png",
+              cv2.resize(clip, (200, 100), interpolation=cv2.INTER_AREA))
+
+    result = runner.invoke(merge_cli.app, [
+        "--case", "p", "-q", "--cases-dir", str(tmp_path)])
+    assert result.exit_code != 0
+    assert "--allow-crop" in result.output
+
+    result = runner.invoke(merge_cli.app, [
+        "--case", "p", "-q", "--allow-crop", "--cases-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+
+
+def test_patchimg_merge_pastes_a_viewport_across_the_erp_seam(tmp_path):
+    src = _source(tmp_path)
+    case_mod.create("p", "patchimg", src, root=tmp_path)
+    case_mod.set_draft("p", root=tmp_path,
+                       viewport={"yaw_deg": 180.0, "pitch_deg": 0.0,
+                                 "fov_h_deg": 70.0, "width": 384, "height": 216},
+                       inner={"x": 96, "y": 54, "width": 192, "height": 108})
+    result = _extract(tmp_path)
+    assert result.exit_code == 0, result.output
+
+    case = case_mod.load("p", tmp_path)
+    _adopted_result(_version_dir(tmp_path), case.inner)
+    result = runner.invoke(merge_cli.app, [
+        "--case", "p", "-q", "--cases-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+
+    merged = read_image(case_mod.case_dir("p", tmp_path) / "out"
+                        / f"{case.extract_current}_still.png")
+    source = read_image(src)
+    support = _support(source, Viewport(**case.viewport), InnerRect(**case.inner))
+
+    # 跨接缝视口的 inner 落在 ERP 的两端，中间一段不受影响。
+    assert support[:, :5].any()
+    assert support[:, -5:].any()
+    assert not support[:, 150:250].any()
+    # 选区外逐位不变；远离视口的 ERP 中缝那一列也原样保留。
+    assert np.array_equal(merged[~support], source[~support])
+    assert np.array_equal(merged[:, 192], source[:, 192])
+    assert np.any(merged[support] != source[support])
+
+    # 视口中缝两列来自 ERP 的两端：环绕采样拼好了，就没有跳变。
+    clip = read_image(_version_dir(tmp_path) / "clip.png").astype(np.int16)
+    jump = np.abs(np.diff(clip, axis=1)).mean(axis=(0, 2))
+    assert jump[191] < 5 * np.median(jump)

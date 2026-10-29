@@ -33,16 +33,41 @@ class SegmentMaps:
 
     def __init__(self, segment, erp_w, erp_h, feather_px=16):
         self.segment = segment
+        self._build(segment.viewport, segment.inner, erp_w, erp_h, feather_px)
+
+    @classmethod
+    def from_geometry(cls, viewport, inner, erp_w, erp_h, feather_px=16):
+        """Build the maps from bare geometry, without inventing a Segment.
+
+        `flow = patchimg` is a single frame: it has a still.json with viewport
+        and inner but no time range, so faking a Segment just to reach the
+        constructor would put a fake frame range into the geometry path.
+        """
+        maps = cls.__new__(cls)
+        maps.segment = None
+        maps._build(viewport, inner, erp_w, erp_h, feather_px)
+        return maps
+
+    def _build(self, viewport, inner, erp_w, erp_h, feather_px):
+        self.viewport = viewport
+        self.inner = inner
         self.erp_w = erp_w
         self.erp_h = erp_h
-        vp = segment.viewport
-        self.view_map = build_view_map(vp, erp_w, erp_h)
-        self.paste_map = build_paste_map(vp, vp.width, vp.height, erp_w, erp_h)
-        self.mask = make_inner_mask((vp.height, vp.width), segment.inner,
+        self.view_map = build_view_map(viewport, erp_w, erp_h)
+        self.paste_map = build_paste_map(viewport, viewport.width, viewport.height,
+                                         erp_w, erp_h)
+        self.mask = make_inner_mask((viewport.height, viewport.width), inner,
                                     feather_px)
         self.cover = self.paste_map[2]
         self.x0 = self.paste_map[3]
         self.y0 = self.paste_map[4]
+        # inner 在 ERP 上真正覆盖的像素（bbox 形状），贴回只写这些像素。
+        u, v = self.paste_map[0], self.paste_map[1]
+        self.inner_support = (self.cover
+                              & (u >= inner.x) & (u < inner.x + inner.width)
+                              & (v >= inner.y) & (v < inner.y + inner.height))
+        self.inner_bbox = (self.x0, self.y0,
+                           self.x0 + u.shape[1], self.y0 + v.shape[0])
 
     def composite_frame(self, erp_frame, ai_frame, levels=5):
         """Blend one AI frame into one ERP frame; returns a new uint8 ERP frame.
@@ -65,6 +90,21 @@ class SegmentMaps:
         sub[self.cover] = patch[self.cover]
         out[self.y0:self.y0 + patch.shape[0],
             self.x0:self.x0 + patch.shape[1]] = np.clip(sub, 0, 255).astype(np.uint8)
+        return out
+
+    def paste_inner(self, erp_frame, ai_frame, levels=5):
+        """composite_frame, then write only `inner` back: outside is bit-equal.
+
+        The blend feathers the inner boundary, and the inverse projection
+        resamples, so the footprint ring would pick up sub-pixel differences if
+        it were written back. Copying only `inner_support` from the composited
+        frame makes the pixel guarantee structural instead of a tolerance.
+        """
+        composited = self.composite_frame(erp_frame, ai_frame, levels)
+        x0, y0, x1, y1 = self.inner_bbox
+        out = erp_frame.copy()
+        support = self.inner_support
+        out[y0:y1, x0:x1][support] = composited[y0:y1, x0:x1][support]
         return out
 
 

@@ -18,19 +18,14 @@ import time
 from pathlib import Path
 
 import cv2
-import numpy as np
 import typer
 
 from ..patch.case import Case, load_case, set_extract_version
-from ..patch.sidecar import Sidecar, Segment, Viewport, InnerRect, save_sidecar
+from ..patch.sidecar import (Sidecar, Segment, Viewport, InnerRect, save_sidecar,
+                             StillGeometry, save_still)
 from ..patch.extract import extract_viewport_frame, open_writer, make_mask_image
-from ..patch.still import LocalMaskError, local_erp_mask
-from ..redraw.geometry import aspect_label
-from ..redraw.manifest import LocalInfo
-from ..redraw.still import (StillError, map_erp_mask_to_canvas, pad_still,
-                            plan_still)
 from ..progress import PhaseLog as Log, PhaseRateMeter as RateMeter, open_log_file
-from .. import __version__, case as case_mod, config as config_mod
+from .. import case as case_mod
 from ..media.imageio import ImageError, read_image, write_gray_png, write_png
 
 app = typer.Typer(add_completion=False, help=__doc__)
@@ -148,64 +143,39 @@ def from_case(
 
 
 def _extract_still(case, src: Path, cases_dir, log: Log) -> None:
-    """patchimg 的 pad 步骤：2:1 ERP -> 21:9 冗余画布 + 局部 mask + still_pad.json。"""
-    conf = config_mod.load()
+    """patchimg 的视口裁剪：2:1 ERP -> 16:9 视口图 + inner mask + still.json。
+
+    模型只重绘这张透视视口图。视口跨 ERP 接缝时由 ``build_view_map`` 的环绕
+    采样先拼成连续图像，因此不需要全幅冗余画布，也没有上传降采样。
+    """
     image = read_image(src)
     erp_h, erp_w = image.shape[:2]
-    if erp_h <= 0 or abs(erp_w / erp_h - 2.0) > 0.001:
-        raise typer.Exit(f"patchimg source is not 2:1 ERP: {erp_w}x{erp_h}")
-
-    plan = plan_still(
-        (erp_w, erp_h),
-        target_aspect=str(conf.get("pad.target_aspect", "21:9")),
-        even_dimensions=bool(conf.get("pad.even_dimensions", True)),
-        on_aspect_conflict=str(conf.get("pad.on_aspect_conflict", "error")),
-        pre_roll=conf.get("pad.pre_roll", "auto"),
-    )
-    pipeline = list(conf.get("pad.pipeline.transforms", ["pre_roll", "pad_h"]))
     viewport = Viewport(**case.viewport)
     inner = InnerRect(**case.inner)
-    local = local_erp_mask(viewport, inner, erp_w, erp_h)
-    bx0, _, _, _ = local.bbox
-    ys, xs = np.where(local.support)
-    sx0, sx1 = bx0 + int(xs.min()), bx0 + int(xs.max()) + 1
-    clean_lo, clean_hi = plan.P, plan.W - 2 * plan.P
-    if sx0 < clean_lo or sx1 > clean_hi:
-        raise LocalMaskError(
-            f"局部选区落在左右冗余带上（源 x {sx0}..{sx1}，干净主内容 "
-            f"{clean_lo}..{clean_hi}）；把视口移离接缝或缩小 inner")
-    canvas_mask = map_erp_mask_to_canvas(local.erp_mask, plan, pipeline)
-    padded = pad_still(
-        image, plan, source_path=src,
-        pipeline=pipeline,
-        mask=canvas_mask,
-        mask_path="padded_mask.png",
-        mask_strategy="local",
-        mask_feather_px=int(conf.get("mask.feather_px", 0)),
-        mask_png_compression=int(conf.get("mask.png_compression", 0)),
-        restore_interp=str(conf.get("recompose.restore_interp", "lanczos4")),
-        local=LocalInfo(viewport=dict(case.viewport), inner=dict(case.inner)),
-        ratio_label=aspect_label(plan.target_aspect),
-        tool_version=__version__,
-    )
+    geo = StillGeometry(erp_width=erp_w, erp_height=erp_h,
+                        viewport=viewport, inner=inner)
+
+    clip = extract_viewport_frame(image, viewport)
+    mask = make_mask_image(viewport, inner)
 
     version = time.strftime("%Y%m%d-%H%M%S")
     vdir = case.dir(cases_dir) / "extracts" / version
     vdir.mkdir(parents=True, exist_ok=True)
-    compression = int(conf.get("mask.png_compression", 0))
-    write_png(vdir / "padded.png", padded.padded, compression=compression)
-    write_gray_png(vdir / "padded_mask.png", padded.mask, compression=compression)
-    padded.manifest.save(vdir / "still_pad.json")
+    write_png(vdir / "clip.png", clip)
+    write_gray_png(vdir / "clip_mask.png", mask)
+    save_still(geo, vdir / "still.json")
     case_mod.set_extract_current(case.name, version, root=cases_dir)
 
     derived = case.dir(cases_dir) / "derived"
     derived.mkdir(parents=True, exist_ok=True)
-    for name in ("padded.png", "padded_mask.png", "still_pad.json"):
+    for name in ("clip.png", "clip_mask.png", "still.json"):
         shutil.copyfile(vdir / name, derived / name)
 
     log.phase(f"still extract version: {version}")
-    log.info(f"canvas {plan.Wc}x{plan.H}  P={plan.P}  L={plan.L}  "
-             f"local {inner.width}x{inner.height} at {inner.x},{inner.y}")
+    log.info(f"viewport {viewport.width}x{viewport.height}  yaw {viewport.yaw_deg} "
+             f"pitch {viewport.pitch_deg}  fov {viewport.fov_h_deg}")
+    log.info(f"inner {inner.width}x{inner.height} at {inner.x},{inner.y}  "
+             f"(black=regenerate, white=anchor)")
 
 
 @app.command("name")
@@ -216,8 +186,8 @@ def from_case_name(
     """Extract by unified case name: 草稿冻结进 extracts/<版本>。
 
     patch 冻结成 clip.json + clip.mp4 + clip_mask.png；patchimg 冻结成
-    still_pad.json + padded.png + padded_mask.png。两者共用源路径/哈希守卫
-    与 extracts 版本目录。
+    still.json + clip.png + clip_mask.png（视口局部，与视频 patch 同构）。
+    两者共用源路径/哈希守卫与 extracts 版本目录。
     """
     case = case_mod.load(case_name, cases_dir)
     if case.flow not in ("patch", "patchimg"):
@@ -240,7 +210,7 @@ def from_case_name(
         if case.flow == "patchimg":
             try:
                 _extract_still(case, src, cases_dir, log)
-            except (ImageError, StillError, LocalMaskError, TypeError) as exc:
+            except (ImageError, ValueError, TypeError) as exc:
                 typer.secho(f"extract: {exc}", fg=typer.colors.RED, err=True)
                 raise typer.Exit(2) from exc
             log.phase(f"log -> {log_path}")

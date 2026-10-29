@@ -78,7 +78,7 @@ _FALLBACK: dict = {
     "generate": {
         "vrgen": "vrgen",        # vrgen CLI 的可执行文件（跨仓库 CLI 契约，绝对路径最稳）
         "workdir": "vrgen_runs",  # vrgen 台账根，相对仓库根（gitignore）
-        "image_upload_max_side": 4096,  # patchimg 上传副本长边上限（平台拒绝超大 PNG）
+        "image_upload_max_side": 4096,  # img2video 关键帧上传副本长边上限（平台拒绝超大 PNG）
     },
     "web": {
         "proxy_max_w": 4096,         # 预览代理宽度上限（选区全景 + 对比页两路）
