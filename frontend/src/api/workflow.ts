@@ -1,4 +1,11 @@
-import type { CaseInfo, FrameRange, Footprint, Inner, Viewport } from '@/types/case-info'
+import type {
+  CaseInfo,
+  Coverage,
+  FrameRange,
+  Footprint,
+  Inner,
+  Viewport,
+} from '@/types/case-info'
 import { getJson, postJson } from './client'
 import { casePath } from './path'
 
@@ -7,6 +14,8 @@ export interface GeometryPayload {
   inner: Inner
   previews: { vp?: string }
   viewport_footprint: Footprint[]
+  coverage?: Coverage | null
+  fov_range?: [number, number]
   nudged?: { yaw: number; pitch: number }
 }
 
@@ -20,6 +29,10 @@ export function setViewportSize(
   height: number,
 ): Promise<GeometryPayload> {
   return postJson<GeometryPayload>(`${casePath(name)}/viewport-size`, { width, height })
+}
+
+export function setFov(name: string, value: number): Promise<GeometryPayload> {
+  return postJson<GeometryPayload>(`${casePath(name)}/fov`, { value })
 }
 
 export function setInner(

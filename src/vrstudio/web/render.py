@@ -33,6 +33,8 @@ VIEWPORT_PREVIEW_W = 960  # 视口预览宽度上限
 MEDIUM_W = 4096        # 源帧的工作副本宽度上限
 FRAME_JPEG_Q = 85      # 逐帧视口缓存质量
 ERP_MEDIUM_LRU = 8     # 内存里保留的解码 ERP 帧数（8 * ~25MB ≈ 200MB）
+FOV_MIN_DEG = 20.0     # 选择页 fov 滑杆下限
+FOV_MAX_DEG = 120.0    # 单透视视口的可用上限（>110° 边缘拉伸迅速变大）
 
 
 def _read_frame(video: str, index: int) -> np.ndarray:
@@ -124,6 +126,26 @@ class PreviewStore:
         self.case.viewport = vp
         self.save_geometry()
         self.key = self._new_key()
+
+    def set_fov(self, value: float) -> float:
+        """改变水平视场角；inner 的像素框不动，覆盖角度随 fov 变大。
+
+        这是“扩大重绘区域”的唯一入口：换视口尺寸只改采样密度，不扩大角度。
+        返回值是写盘后的实际角度（保留一位小数）。
+        """
+        try:
+            fov = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("fov 必须是数字") from exc
+        if not FOV_MIN_DEG <= fov <= FOV_MAX_DEG:
+            raise ValueError(
+                f"fov 必须在 {FOV_MIN_DEG:g}–{FOV_MAX_DEG:g}° 之间，收到 {fov:g}")
+        vp = self._vp()
+        vp["fov_h_deg"] = round(fov, 1)
+        self.case.viewport = vp
+        self.save_geometry()
+        self.key = self._new_key()
+        return float(vp["fov_h_deg"])
 
     def set_inner(self, x: int, y: int, w: int, h: int) -> None:
         self.case.inner = {"x": int(x), "y": int(y), "width": int(w), "height": int(h)}

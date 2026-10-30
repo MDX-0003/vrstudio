@@ -36,7 +36,7 @@ from ..media.imageio import read_image, write_gray_png, write_png
 from ..media.videoio import VideoIOError, probe
 from ..patch.sidecar import STILL_RATIO_LABEL, load_still
 from ..procenv import decode_text, utf8_env
-from ..redraw.manifest import Manifest
+from ..redraw.manifest import Manifest, StillManifest
 
 app = typer.Typer(add_completion=False, no_args_is_help=True,
                   help="组装提交清单 → 调 vrgen 生成/注册 → adopt 结果落 case")
@@ -55,7 +55,7 @@ _ROUND_IN_OUTPUT = re.compile(r"round=([A-Za-z0-9._-]+)")
 
 
 def template_for(flow: str, mode: str | None) -> str:
-    if flow == "gen" or (flow == "patch" and mode == "firstLastFrame"):
+    if flow == "gen" or (flow == "patch" and mode in ("firstLastFrame", "allMediaRef")):
         return "gen-multi"
     return TEMPLATE_BY_FLOW[flow]
 
@@ -371,16 +371,16 @@ class StillSubmission:
     template: str = "still360-local"
 
 
-def _upload_inputs(base: Path, mask: Path, max_side: int) -> tuple[Path, Path]:
+def _upload_inputs(base: Path, mask: Path | None,
+                   max_side: int) -> tuple[Path, Path | None]:
     """Downscale the submission copies; the canonical image stays untouched.
 
     The image platform returns 403 on very large uploads (observed with a 117 MB
     9558x4096 PNG), while its output is 4K. This bounds the copies handed to the
     model; the canonical image keeps its resolution for the paste-back or stitch.
 
-    Not on the patchimg path: its input is a 16:9 viewport crop (1920x1080 or
-    3840x2160). It is kept for img2video's full-frame keyframe submission, whose
-    21:9 padded canvas can exceed the upload limit.
+    ``mask`` is optional: fullRedrawImg sends only the full canvas and its detail
+    crops, patchimg sends a viewport crop with its inner mask.
     """
     if max_side <= 0:
         return base, mask
@@ -394,6 +394,8 @@ def _upload_inputs(base: Path, mask: Path, max_side: int) -> tuple[Path, Path]:
     small = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
     upload = base.with_name("upload.png")
     write_png(upload, small, compression=6)
+    if mask is None:
+        return upload, None
 
     mask_image = read_image(mask)[:, :, 0]
     if mask_image.shape != (height, width):
@@ -424,6 +426,31 @@ def assemble_still(case: case_mod.Case,
     except (OSError, ValueError, TypeError) as exc:
         raise GenError(f"{d}/still.json 不合法：{exc}") from exc
 
+    return StillSubmission(base=base, mask=mask,
+                           refs=tuple(_selected_refs(case, root)),
+                           ratio=STILL_RATIO_LABEL)
+
+
+@dataclass(frozen=True)
+class FullSubmission:
+    """fullRedrawImg 的图片生成输入：21:9 基图 + mask + 氛围参考图。
+
+    ``canvas_size``/``source_size`` 只用来展开模板里的冗余带列号占位符；模型
+    侧画布以实际上传副本为准，这里给的是本地几何。
+    """
+
+    base: Path
+    mask: Path
+    refs: tuple[Candidate, ...]
+    ratio: str
+    canvas_size: tuple[int, int]
+    source_size: tuple[int, int]
+    template: str = "fullRedrawImg"
+
+
+def _selected_refs(case: case_mod.Case,
+                   root: str | Path | None) -> list[Candidate]:
+    """``[submit] selected`` 里的图片参考；patchimg 与 fullRedrawImg 共用。"""
     by_id = {c.id: c for c in candidates(case, root)}
     refs: list[Candidate] = []
     for item in case.submit_selected or []:
@@ -435,13 +462,48 @@ def assemble_still(case: case_mod.Case,
             candidate = replace(candidate, role=role)
         if candidate.kind != "image":
             raise GenError(
-                f"patchimg 只接受图片参考：{candidate.id} 是 {candidate.kind}")
+                f"{case.flow} 只接受图片参考：{candidate.id} 是 {candidate.kind}")
         if candidate.role in NON_CANDIDATE_ROLES:
             raise GenError(
-                f"patchimg 不接受 {candidate.role} 角色：{candidate.id}")
+                f"{case.flow} 不接受 {candidate.role} 角色：{candidate.id}")
         refs.append(candidate)
-    return StillSubmission(base=base, mask=mask, refs=tuple(refs),
-                           ratio=STILL_RATIO_LABEL)
+    return refs
+
+
+def assemble_full(case: case_mod.Case, root: str | Path | None = None, *,
+                  max_refs: int = 13,
+                  upload_max_side: int = 4096) -> FullSubmission:
+    """按 ``[submit] selected`` 组装 fullRedrawImg 的图片提交。
+
+    顺序固定为 基图 → mask → 用户参考图。mask 是 ``redundant_white``：两条冗余
+    带白、主内容黑；它把接缝锚点冻在源图像素上，`stitch_still` 的配准因此稳定。
+    代价是横跨接缝的那条带不参与重绘，这是"保证无接缝"选择的已知成本。
+    """
+    if not case.extract_current:
+        raise GenError(
+            f"case {case.name} 还没有 extract 版本——先跑 "
+            f"`vrstudio extract name --case {case.name}`")
+    d = case.dir(root) / "extracts" / case.extract_current
+    base = d / "padded.png"
+    mask = d / "padded_mask.png"
+    if not base.is_file() or not mask.is_file():
+        raise GenError(f"{d} 缺 padded.png/padded_mask.png——重跑 extract")
+    try:
+        manifest = StillManifest.load(d / "still_pad.json")
+    except (OSError, ValueError, TypeError) as exc:
+        raise GenError(f"{d}/still_pad.json 不合法：{exc}") from exc
+
+    base, mask = _upload_inputs(base, mask, int(upload_max_side))
+    refs = _selected_refs(case, root)
+    total = 2 + len(refs)
+    if total > max_refs:
+        raise GenError(
+            f"fullRedrawImg 一次提交 {total} 张参考图（基图 + mask + "
+            f"{len(refs)} 张氛围参考），超过图片模型的 {max_refs} 张上限")
+    ratio = manifest.ratio_label or "21:9"
+    return FullSubmission(base=base, mask=mask, refs=tuple(refs), ratio=ratio,
+                          canvas_size=tuple(manifest.canvas.size),
+                          source_size=tuple(manifest.source.size))
 
 
 # ── vrgen 子进程 ─────────────────────────────────────────────────────────
@@ -519,6 +581,50 @@ def _submit_still(case: case_mod.Case, cases_dir, conf, *,
     raise typer.Exit(_stream(argv))
 
 
+def _submit_full(case: case_mod.Case, cases_dir, conf, *,
+                 variables, model_id, resolution, num, session_id,
+                 mode, duration, aspect_ratio, scale, dry_run, check) -> None:
+    """fullRedrawImg 的提交：基图 + mask + 氛围参考图。"""
+    if mode or duration is not None or aspect_ratio or scale:
+        _fail(GenError("fullRedrawImg 不接受 --mode/--duration/--aspect-ratio/--scale"))
+    if variables:
+        _fail(GenError("fullRedrawImg 不接受 --var：请把变量写进 job 的 prompt-vars.toml"))
+    try:
+        full = assemble_full(
+            case, cases_dir,
+            max_refs=int(conf.get("generate.image_max_refs", 13)),
+            upload_max_side=int(conf.get("generate.image_upload_max_side", 4096)))
+    except GenError as exc:
+        _fail(exc)
+
+    argv = [_vrgen_exe(conf), "image", "submit", "--job", case.name,
+            "--template", full.template,
+            "--image", str(full.base), "--image-role", "edit_master",
+            "--image", str(full.mask), "--image-role", "mask"]
+    for candidate in full.refs:
+        argv += ["--image", str(candidate.path), "--image-role", candidate.role]
+    argv += ["--canvas", f"{full.canvas_size[0]}x{full.canvas_size[1]}",
+             "--source", f"{full.source_size[0]}x{full.source_size[1]}"]
+    argv += ["--ratio", full.ratio]
+    if model_id is not None:
+        argv += ["--model-id", str(model_id)]
+    if resolution is not None:
+        argv += ["--resolution", str(resolution)]
+    if num is not None:
+        argv += ["--num", str(num)]
+    if session_id is not None:
+        argv += ["--session-id", str(session_id)]
+    argv += ["--workdir", str(_workdir(conf))]
+    if dry_run:
+        typer.echo("dry-run：将发出")
+        for arg in argv:
+            typer.echo(f"  {arg}")
+        return
+    if check:
+        argv += ["--dry-run"]
+    raise typer.Exit(_stream(argv))
+
+
 @app.command()
 def submit(
     case_name: str = typer.Option(..., "--case", help="case 名（= vrgen job 名）。"),
@@ -558,6 +664,13 @@ def submit(
                       session_id=session_id, mode=mode, duration=duration,
                       aspect_ratio=aspect_ratio, scale=scale,
                       dry_run=dry_run, check=check)
+        return
+    if case.flow == "fullRedrawImg":
+        _submit_full(case, cases_dir, conf, variables=variables,
+                     model_id=model_id, resolution=resolution, num=num,
+                     session_id=session_id, mode=mode, duration=duration,
+                     aspect_ratio=aspect_ratio, scale=scale,
+                     dry_run=dry_run, check=check)
         return
     try:
         submission = assemble(case, cases_dir, mode=mode)
@@ -643,11 +756,11 @@ def adopt(
     """采用一轮结果：拷进 case + 写 [adopt] round + 打印下一步命令。"""
     conf = load_config(overrides=overrides or [])
     case = _load_case(case_name, cases_dir)
-    if case.flow == "patchimg":
+    if case.flow in ("patchimg", "fullRedrawImg"):
         if not case.extract_current:
-            _fail(GenError("patchimg adopt 前先 extract（[extract] current 未定）"))
+            _fail(GenError(f"{case.flow} adopt 前先 extract（[extract] current 未定）"))
         if index is None:
-            _fail(GenError("patchimg adopt 必须显式 --index（候选要人工挑）"))
+            _fail(GenError(f"{case.flow} adopt 必须显式 --index（候选要人工挑）"))
         if int(index) < 1:
             _fail(GenError("--index 从 1 开始"))
         out = (case.dir(cases_dir) / "extracts" / case.extract_current
@@ -672,7 +785,7 @@ def adopt(
         typer.echo("next     vrstudio merge --case " + case.name)
         return
     if index is not None:
-        _fail(GenError("--index 只对 patchimg 有意义"))
+        _fail(GenError("--index 只对 patchimg/fullRedrawImg 有意义"))
     if case.flow in ("fullredraw", "gen"):
         out = case.dir(cases_dir) / "result.mp4"
     else:

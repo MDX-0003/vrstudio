@@ -669,7 +669,48 @@ def test_case_info_exposes_viewport_options(client, patch_case):
     info = client.get("/api/case/p1").json()
     options = info["viewport_options"]
     assert any(o["width"] == 1920 and o["height"] == 1080 for o in options)
+    assert any(o["width"] == 3840 and o["height"] == 2160 for o in options)
     assert isinstance(info["viewport_footprint"], list)
+    assert info["fov_range"] == [20.0, 120.0]
+    assert "coverage" in info
+
+
+def test_viewport_size_accepts_4k(client, patch_case, tmp_path):
+    r = client.post("/api/case/p1/viewport-size",
+                    json={"width": 3840, "height": 2160})
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert (data["viewport"]["width"], data["viewport"]["height"]) == (3840, 2160)
+    # 320×180 → 3840×2160 是 12 倍；inner 按比例缩放。
+    inner = data["inner"]
+    assert (inner["x"], inner["y"], inner["width"], inner["height"]) == (
+        960, 480, 1920, 1200)
+
+
+def test_fov_changes_angle_without_rescaling_inner(client, patch_case, tmp_path):
+    before = client.get("/api/case/p1").json()
+    r = client.post("/api/case/p1/fov", json={"value": 110})
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["viewport"]["fov_h_deg"] == 110.0
+    assert data["inner"] == INNER                     # fov 不缩放 inner
+    assert data["previews"]["vp"] != before["previews"]["vp"]
+    assert data["fov_range"] == [20.0, 120.0]
+    assert case_mod.load("p1", tmp_path).viewport["fov_h_deg"] == 110.0
+
+
+def test_fov_rejects_out_of_range_and_bad_values(client, patch_case):
+    r = client.post("/api/case/p1/fov", json={"value": 150})
+    assert r.status_code == 400
+    assert "20" in r.json()["error"] and "120" in r.json()["error"]
+
+    r = client.post("/api/case/p1/fov", json={"value": "wide"})
+    assert r.status_code == 400
+    assert "必须是数字" in r.json()["error"]
+
+    r = client.post("/api/case/p1/fov", json={})
+    assert r.status_code == 400
+    assert "缺 value" in r.json()["error"]
 
 
 def test_footprint_payload_normalizes_to_fractions():
@@ -684,6 +725,21 @@ def test_footprint_payload_normalizes_to_fractions():
     assert 0.0 <= rect["x"] < 1.0 and 0.0 <= rect["y"] < 1.0
     assert 0.0 < rect["w"] <= 1.0 and 0.0 < rect["h"] <= 1.0
     assert rect["x"] + rect["w"] <= 1.0 and rect["y"] + rect["h"] <= 1.0
+
+
+def test_coverage_payload_reports_footprint_and_density():
+    store = types.SimpleNamespace(
+        case=types.SimpleNamespace(
+            viewport={"width": 1920, "height": 1080, "fov_h_deg": 59.0,
+                      "yaw_deg": 0.0, "pitch_deg": 0.0},
+            inner={"x": 0, "y": 0, "width": 1728, "height": 972}),
+        source_size=(8192, 4096))
+    cov = web_app._coverage_payload(store)
+    assert cov["fov_deg"] == 59.0
+    assert 1340 <= cov["footprint"][0] <= 1346
+    assert cov["density"]["1080p"] == 1.43
+    assert cov["density"]["4K"] == 2.86
+    assert cov["inner_deg"] == 53.1
 
 
 def test_reset_draft_restores_from_version(client, patch_case, tmp_path):

@@ -24,13 +24,15 @@ from .media.imageio import read_image
 from .roles import RESERVED_ROLES, ROLES, check_kinds
 
 SCHEMA = 1
-FLOWS = ("patch", "patchimg", "fullredraw", "gen")
+FLOWS = ("patch", "patchimg", "fullRedrawImg", "fullredraw", "gen")
 
 #: 与 vrgen 的 job 名同一套约束：case 名是 cases/ 下的目录名。
 _CASE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 _PATCH_SECTIONS = ("viewport", "inner", "frames", "extract")
 _PATCHIMG_SECTIONS = ("viewport", "inner", "extract")
+#: fullRedrawImg 没有选区草稿：整幅 21:9 画布与关键区块都由 extract 决定。
+_FULLREDRAW_IMG_SECTIONS = ("extract",)
 
 #: 素材种类受控词表。角色词表在 roles.py（来自 roles.json 契约快照）。
 KINDS = ("video", "image")
@@ -168,26 +170,27 @@ def create(name: str, flow: str, source: str | Path | None = None,
             return add_assets(name, [(source, "edit_master")], root=root)
         return case
     if source is None:
-        wanted = "图片" if flow == "patchimg" else "源视频"
+        wanted = "图片" if flow in ("patchimg", "fullRedrawImg") else "源视频"
         raise CaseError(f"flow={flow} 必须指定{wanted}")
     src = Path(source)
     if not src.is_file():
         raise CaseError(f"源文件不存在：{src}")
     kind = _kind_of(src)
-    if flow == "patchimg":
+    if flow in ("patchimg", "fullRedrawImg"):
         if kind != "image":
-            raise CaseError(f"patchimg 的 --source 必须是图片：{src.name}")
+            raise CaseError(f"{flow} 的 --source 必须是图片：{src.name}")
         image = read_image(src)
         height, width = image.shape[:2]
         if height <= 0 or abs(width / height - 2.0) > 0.001:
             raise CaseError(
-                f"patchimg 的源图必须是 2:1 ERP：{src.name} 是 {width}x{height}"
+                f"{flow} 的源图必须是 2:1 ERP：{src.name} 是 {width}x{height}"
                 f"（比例 {width / height:.4f}）")
     elif kind != "video":
         raise CaseError(f"flow={flow} 的 --source 必须是视频：{src.name}")
-    # patch/patchimg 后续要重读源文件贴回，源变了就静默错片——创建时就把身份
-    # 钉死；fullredraw 在 pad 之后源不再被读（manifest 已含源身份），哈希可选。
-    sha = file_sha256(src) if (compute_hash and flow in ("patch", "patchimg")) else None
+    # patch/patchimg/fullRedrawImg 后续要重读源文件（贴回或 pad），源变了就静默错片——
+    # 创建时就把身份钉死；fullredraw 在 pad 之后源不再被读（manifest 已含源身份），哈希可选。
+    sha = file_sha256(src) if (compute_hash and flow in
+                               ("patch", "patchimg", "fullRedrawImg")) else None
     case = Case(name=name, flow=flow, source_path=str(src), sha256=sha)
     return save(case, root)
 
@@ -228,7 +231,8 @@ def load(name: str, root: str | Path | None = None) -> Case:
         adopt_index=raw.get("adopt", {}).get("index"),
     )
     allowed = (_PATCH_SECTIONS if flow == "patch"
-               else _PATCHIMG_SECTIONS if flow == "patchimg" else ())
+               else _PATCHIMG_SECTIONS if flow == "patchimg"
+               else _FULLREDRAW_IMG_SECTIONS if flow == "fullRedrawImg" else ())
     for section in _PATCH_SECTIONS:
         if raw.get(section) is not None and section not in allowed:
             raise CaseError(f"{path}: flow={flow} 不该有 [{section}]（patch 专属段）")
@@ -269,8 +273,8 @@ def save(case: Case, root: str | Path | None = None) -> Case:
             if value:
                 lines += ["", f"[{section}]"]
                 lines += [_kv(k, v) for k, v in value.items()]
-        if case.extract_current:
-            lines += ["", "[extract]", f"current = {_s(case.extract_current)}"]
+    if case.flow in ("patch", "patchimg", "fullRedrawImg") and case.extract_current:
+        lines += ["", "[extract]", f"current = {_s(case.extract_current)}"]
     if case.adopt_round:
         lines += ["", "[adopt]", f"round = {_s(case.adopt_round)}"]
         if case.adopt_index is not None:
@@ -676,7 +680,7 @@ def draft_ready(case: Case) -> str | None:
 
 def set_extract_current(name: str, version: str, root: str | Path | None = None) -> Case:
     case = load(name, root)
-    if case.flow not in ("patch", "patchimg"):
+    if case.flow not in ("patch", "patchimg", "fullRedrawImg"):
         raise CaseError(f"case {name} 是 {case.flow} 流，没有 extracts/ 版本")
     case.extract_current = version
     return save(case, root)

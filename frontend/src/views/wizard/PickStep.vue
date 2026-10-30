@@ -8,6 +8,7 @@ import {
   nudgeViewport,
   resetDraft,
   saveDraft,
+  setFov,
   setInner,
   setViewport,
   setViewportSize,
@@ -17,6 +18,7 @@ import FileRow from '@/components/common/FileRow.vue'
 import { useInnerDrag } from '@/composables/useInnerDrag'
 import type {
   CaseInfo,
+  Coverage,
   Footprint,
   FrameRange,
   Inner,
@@ -34,6 +36,9 @@ const viewport = ref<Viewport | null>(props.info.viewport)
 const inner = ref<Inner | null>(props.info.inner)
 const footprint = ref<Footprint[]>([...props.info.viewport_footprint])
 const viewportOptions = ref<ViewportOption[]>([...props.info.viewport_options])
+const coverage = ref<Coverage | null>(props.info.coverage ?? null)
+const fov = ref<number>(props.info.viewport?.fov_h_deg ?? 59)
+const fovRange = ref<[number, number]>(props.info.fov_range ?? [20, 120])
 const frames = ref<FrameRange>(
   props.info.frames ?? { start: 0, end: Math.max(0, (props.info.frame_count ?? 1) - 1) },
 )
@@ -85,6 +90,14 @@ const pitchText = computed(() => viewport.value?.pitch_deg.toFixed(2) ?? '—')
 const viewportLabel = computed(() =>
   viewport.value ? `${viewport.value.width}×${viewport.value.height}` : '—',
 )
+const coverageText = computed(() => {
+  if (!coverage.value) return ''
+  const [w, h] = coverage.value.footprint
+  const d1080 = coverage.value.density['1080p'].toFixed(2)
+  const d4k = coverage.value.density['4K'].toFixed(2)
+  return `ERP ${w}×${h} · 1080p ${d1080}× / 4K ${d4k}× · inner ${coverage.value.inner_deg.toFixed(1)}°`
+})
+const fovWarning = computed(() => fov.value > 110)
 
 const drag = useInnerDrag(
   () => vpImage.value,
@@ -108,6 +121,9 @@ function applyGeometry(payload: GeometryPayload): void {
   viewport.value = payload.viewport
   inner.value = payload.inner
   footprint.value = payload.viewport_footprint
+  if (payload.coverage !== undefined) coverage.value = payload.coverage
+  if (payload.fov_range) fovRange.value = payload.fov_range
+  fov.value = payload.viewport.fov_h_deg
   vpVersion.value = Date.now()
   emit('geometry', payload)
 }
@@ -154,6 +170,17 @@ async function onChangeSize(value: unknown): Promise<void> {
     applyGeometry(await setViewportSize(props.caseName, option.width, option.height))
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : '切换视口尺寸失败')
+  }
+}
+
+async function onFovChange(value: number | number[]): Promise<void> {
+  const next = Number(Array.isArray(value) ? value[0] : value)
+  if (!Number.isFinite(next)) return
+  try {
+    applyGeometry(await setFov(props.caseName, next))
+  } catch (err) {
+    fov.value = viewport.value?.fov_h_deg ?? next
+    ElMessage.error(err instanceof Error ? err.message : '设置视场角失败')
   }
 }
 
@@ -292,6 +319,9 @@ watch(
     inner.value = info.inner
     footprint.value = [...info.viewport_footprint]
     viewportOptions.value = [...info.viewport_options]
+    fov.value = info.viewport?.fov_h_deg ?? fov.value
+    fovRange.value = info.fov_range ?? fovRange.value
+    coverage.value = info.coverage ?? null
     if (info.frames) {
       frames.value = info.frames
       startFrame.value = info.frames.start
@@ -404,6 +434,24 @@ onUnmounted(() => {
             </el-select>
           </label>
           <span class="muted">在预览图上拖框，松手保存</span>
+        </div>
+
+        <div class="fov-row">
+          <span class="fov-label">视场角</span>
+          <el-slider
+            v-model="fov"
+            class="fov-slider"
+            :min="fovRange[0]"
+            :max="fovRange[1]"
+            :step="0.5"
+            :show-tooltip="false"
+            @change="onFovChange"
+          />
+          <span class="mono fov-value">{{ fov.toFixed(1) }}°</span>
+        </div>
+        <div class="coverage-line">
+          <span v-if="coverage" class="mono">{{ coverageText }}</span>
+          <span v-if="fovWarning" class="warn">超过 110°，边缘拉伸明显</span>
         </div>
 
         <div class="vp-wrap" :class="{ dragging: drag.dragging.value }">
@@ -585,6 +633,42 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
+}
+
+.fov-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.fov-label {
+  min-width: 48px;
+  color: var(--color-text-muted);
+}
+
+.fov-slider {
+  flex: 1;
+  min-width: 120px;
+}
+
+.fov-value {
+  min-width: 52px;
+  text-align: right;
+}
+
+.coverage-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+
+.coverage-line .warn {
+  color: var(--color-danger);
 }
 
 .vp-wrap {

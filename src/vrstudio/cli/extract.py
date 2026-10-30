@@ -24,8 +24,10 @@ from ..patch.case import Case, load_case, set_extract_version
 from ..patch.sidecar import (Sidecar, Segment, Viewport, InnerRect, save_sidecar,
                              StillGeometry, save_still)
 from ..patch.extract import extract_viewport_frame, open_writer, make_mask_image
+from ..redraw.geometry import aspect_label
+from ..redraw.still import StillError, pad_still, plan_still
 from ..progress import PhaseLog as Log, PhaseRateMeter as RateMeter, open_log_file
-from .. import case as case_mod
+from .. import __version__, case as case_mod, config as config_mod
 from ..media.imageio import ImageError, read_image, write_gray_png, write_png
 
 app = typer.Typer(add_completion=False, help=__doc__)
@@ -178,6 +180,46 @@ def _extract_still(case, src: Path, cases_dir, log: Log) -> None:
              f"(black=regenerate, white=anchor)")
 
 
+def _extract_full_redraw_img(case, src: Path, cases_dir, log: Log, conf) -> None:
+    """fullRedrawImg：2:1 ERP -> 21:9 冗余画布 + mask + still_pad.json。
+
+    整幅交给图片模型重绘；冗余带留作 recompose 的配准锚点，mask 白区就是它们。
+    没有视口、没有关键区块，几何完全由 pad 决定。
+    """
+    image = read_image(src)
+    erp_h, erp_w = image.shape[:2]
+    plan = plan_still(
+        (erp_w, erp_h),
+        target_aspect=str(conf.get("pad.target_aspect", "21:9")),
+        even_dimensions=bool(conf.get("pad.even_dimensions", True)),
+        on_aspect_conflict=str(conf.get("pad.on_aspect_conflict", "error")),
+        pre_roll=conf.get("pad.pre_roll", "auto"),
+    )
+    pipeline = list(conf.get("pad.pipeline.transforms", ["pre_roll", "pad_h"]))
+    padded = pad_still(
+        image, plan, source_path=src,
+        pipeline=pipeline,
+        mask_strategy=str(conf.get("mask.strategy", "redundant_white")),
+        mask_feather_px=int(conf.get("mask.feather_px", 0)),
+        mask_png_compression=int(conf.get("mask.png_compression", 0)),
+        restore_interp=str(conf.get("recompose.restore_interp", "lanczos4")),
+        ratio_label=aspect_label(plan.target_aspect),
+        tool_version=__version__,
+    )
+
+    version = time.strftime("%Y%m%d-%H%M%S")
+    vdir = case.dir(cases_dir) / "extracts" / version
+    vdir.mkdir(parents=True, exist_ok=True)
+    compression = int(conf.get("mask.png_compression", 0))
+    write_png(vdir / "padded.png", padded.padded, compression=compression)
+    write_gray_png(vdir / "padded_mask.png", padded.mask, compression=compression)
+    padded.manifest.save(vdir / "still_pad.json")
+    case_mod.set_extract_current(case.name, version, root=cases_dir)
+
+    log.phase(f"fullRedrawImg extract version: {version}")
+    log.info(f"canvas {plan.Wc}x{plan.H}  P={plan.P}  L={plan.L}")
+
+
 @app.command("name")
 def from_case_name(
     case_name: str = typer.Option(..., "--case", help="统一 case 名（cases/ 下目录）"),
@@ -186,13 +228,14 @@ def from_case_name(
     """Extract by unified case name: 草稿冻结进 extracts/<版本>。
 
     patch 冻结成 clip.json + clip.mp4 + clip_mask.png；patchimg 冻结成
-    still.json + clip.png + clip_mask.png（视口局部，与视频 patch 同构）。
-    两者共用源路径/哈希守卫与 extracts 版本目录。
+    still.json + clip.png + clip_mask.png（视口局部）；fullRedrawImg 冻结成
+    still_pad.json + padded.png + padded_mask.png（整幅画布）。三者共用源路径/
+    哈希守卫与 extracts 版本目录。
     """
     case = case_mod.load(case_name, cases_dir)
-    if case.flow not in ("patch", "patchimg"):
+    if case.flow not in ("patch", "patchimg", "fullRedrawImg"):
         typer.secho(f"extract: case {case_name} 是 {case.flow} 流"
-                    f"（extract 是 patch/patchimg 专属步骤）",
+                    f"（extract 是 patch/patchimg/fullRedrawImg 专属步骤）",
                     fg=typer.colors.RED, err=True)
         raise typer.Exit(2)
     missing = case_mod.draft_ready(case)
@@ -211,6 +254,15 @@ def from_case_name(
             try:
                 _extract_still(case, src, cases_dir, log)
             except (ImageError, ValueError, TypeError) as exc:
+                typer.secho(f"extract: {exc}", fg=typer.colors.RED, err=True)
+                raise typer.Exit(2) from exc
+            log.phase(f"log -> {log_path}")
+            return
+        if case.flow == "fullRedrawImg":
+            try:
+                _extract_full_redraw_img(case, src, cases_dir, log,
+                                         config_mod.load())
+            except (ImageError, StillError, ValueError, TypeError) as exc:
                 typer.secho(f"extract: {exc}", fg=typer.colors.RED, err=True)
                 raise typer.Exit(2) from exc
             log.phase(f"log -> {log_path}")

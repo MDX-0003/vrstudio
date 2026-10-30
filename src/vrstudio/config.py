@@ -78,7 +78,8 @@ _FALLBACK: dict = {
     "generate": {
         "vrgen": "vrgen",        # vrgen CLI 的可执行文件（跨仓库 CLI 契约，绝对路径最稳）
         "workdir": "vrgen_runs",  # vrgen 台账根，相对仓库根（gitignore）
-        "image_upload_max_side": 4096,  # img2video 关键帧上传副本长边上限（平台拒绝超大 PNG）
+        "image_upload_max_side": 4096,  # 全幅提交的上传副本长边上限（平台拒绝超大 PNG）
+        "image_max_refs": 13,    # 图片模型单次参考图上限（mglc 模型 44 的 maxReferenceCount）
     },
     "web": {
         "proxy_max_w": 4096,         # 预览代理宽度上限（选区全景 + 对比页两路）
@@ -359,6 +360,11 @@ def _validate(data: dict) -> None:
         raise ConfigError("generate.vrgen must not be empty")
     if not str(_value(generate, "workdir", "generate.workdir")).strip():
         raise ConfigError("generate.workdir must not be empty")
+
+    max_refs = _value(generate, "image_max_refs", "generate.image_max_refs")
+    if not isinstance(max_refs, int) or isinstance(max_refs, bool) or max_refs < 1:
+        raise ConfigError(
+            f"generate.image_max_refs must be a positive int, got {max_refs!r}")
 
     max_w = _value(web, "proxy_max_w", "web.proxy_max_w")
     if not isinstance(max_w, int) or isinstance(max_w, bool) or not 256 <= max_w <= 8192:

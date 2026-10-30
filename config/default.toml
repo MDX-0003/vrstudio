@@ -85,11 +85,15 @@ write_hash    = true
 vrgen    = "vrgen"
 # vrgen 的台账根（runs/<job>/<轮次>/），相对仓库根。gitignore，不进 git。
 workdir  = "vrgen_runs"
-# img2video 关键帧提交给图片模型的副本长边上限（px）。平台上传接口对超大 PNG
-# 返回 403，而图片模型输出只有 4K；全幅 21:9 画布缩到 4K 再传，canonical pad
-# 与最终 ERP 仍保持源分辨率。0 表示不缩放。patchimg 的视口图不走这条，
-# 它的输入本来就是 16:9 裁剪。
+# 全幅提交给图片模型的副本长边上限（px）。平台上传接口对超大 PNG 返回 403，
+# 而图片模型输出只有 4K；21:9 画布缩到 4K 再传，canonical pad 与最终 ERP 仍
+# 保持源分辨率。0 表示不缩放。patchimg 的视口图不走这条，它的输入本来就是
+# 16:9 裁剪。
 image_upload_max_side = 4096
+# 图片模型单次参考图的张数上限。mglc 的模型详情（`mglc model --type image
+# --model-id 44`）报 maxReferenceCount = 13；换模型时按同一字段改这里，装配器
+# 在提交前按它断言，超量直接本地报错，不花额度。
+image_max_refs = 13
 
 # ── web 控制台 ──────────────────────────────────────────────────────────
 [web]

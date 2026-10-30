@@ -28,7 +28,10 @@ from ..media.imageio import read_image, write_png
 from ..progress import PhaseLog as Log, PhaseRateMeter as RateMeter, format_duration, open_log_file
 from ..patch.restore import resolve_ai_clip
 from ..patch import scalefit
+from ..redraw.manifest import StillManifest
+from ..redraw.still import StillError, stitch_still
 from .. import case as case_mod
+from .. import config as config_mod
 
 app = typer.Typer(add_completion=False, help=__doc__)
 
@@ -239,6 +242,107 @@ def _merge_still(case, cases_dir, *, feather: int, levels: int,
         fh.close()
 
 
+def _merge_full(case, cases_dir, *, report: Path | None, quiet: bool,
+                progress_every: int) -> None:
+    """fullRedrawImg 的收口：把 4K 21:9 结果 stitch 回 2:1 的源图尺寸。
+
+    与 fullredraw 的视频 recompose 同一条单帧核心；模型裁画布或重构图时
+    ``stitch_still`` 按冗余带相关性拒绝出片。
+    """
+    if not case.extract_current:
+        raise typer.Exit("merge: fullRedrawImg 还没有 extract 版本——先 extract")
+    d = case.dir(cases_dir) / "extracts" / case.extract_current
+    manifest_path = d / "still_pad.json"
+    result_path = d / "result.png"
+    if not manifest_path.is_file():
+        raise typer.Exit(f"merge: 缺 {manifest_path.name}——重跑 extract")
+    if not result_path.is_file():
+        raise typer.Exit(
+            f"merge: 没有采用的结果（{result_path} 不存在）——先 "
+            f"`vrstudio generate adopt --case {case.name} --index N`")
+    src = case_mod.check_source(case, cases_dir)
+    conf = config_mod.load()
+    try:
+        manifest = StillManifest.load(manifest_path)
+    except (OSError, ValueError, TypeError) as exc:
+        raise typer.Exit(f"merge: {manifest_path.name} 不合法：{exc}") from exc
+
+    fh, log_path = open_log_file(f"merge_{case.name}_full")
+    log = Log(every=progress_every, quiet=quiet, fh=fh)
+    typer.echo(f"log -> {log_path}")
+    try:
+        generated = read_image(result_path)
+        repair = str(conf.get("recompose.boundary_repair", "off"))
+        repair_px = (max(8, int(round(manifest.canvas.L * float(
+            conf.get("recompose.boundary_repair_pct", 15.0)) / 100.0)))
+            if repair == "feather" else 0)
+        try:
+            stitched = stitch_still(
+                generated, manifest,
+                search_pct=float(conf.get("recompose.search_pct", 25.0)),
+                max_sample_rows=int(conf.get("recompose.max_sample_rows", 256)),
+                min_band_correlation=float(
+                    conf.get("recompose.min_band_correlation", 0.80)),
+                warn_quality=float(conf.get("recompose.warn_quality", 1.15)),
+                restore_interp=str(conf.get("recompose.restore_interp", "lanczos4")),
+                blend_weight=str(conf.get("recompose.blend_weight", "smoothstep")),
+                endpoint_lock_pct=float(conf.get("recompose.endpoint_lock_pct", 2.0)),
+                repair=repair, repair_px=repair_px,
+                interior_band=tuple(conf.get("verify.interior_band", (0.25, 0.75))),
+                max_wrap_percentile=float(conf.get("verify.max_wrap_percentile", 95)),
+                worst_interior_tol=float(conf.get("verify.worst_interior_tol", 1.0)),
+            )
+        except StillError as exc:
+            raise typer.Exit(f"merge: {exc}") from exc
+
+        width, height = manifest.source.size
+        if stitched.image.shape[:2] != (int(height), int(width)):
+            raise typer.Exit(
+                f"merge: stitch 输出 {stitched.image.shape[1]}x"
+                f"{stitched.image.shape[0]} 与源图 {width}x{height} 不一致")
+
+        out_dir = case.dir(cases_dir) / "out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / f"{case.extract_current}_still.png"
+        write_png(out, stitched.image)
+
+        data = {
+            "case": case.name,
+            "extract": case.extract_current,
+            "source": [int(width), int(height)],
+            "canvas": list(manifest.canvas.size),
+            "registration": {
+                "d_star": stitched.registration.d_star,
+                "correlation": stitched.registration.correlation,
+                "quality": stitched.registration.quality,
+                "mae_min": stitched.registration.mae_min,
+            },
+            "gate": stitched.gate,
+            "seam": stitched.metrics.as_dict(),
+            "verdict": stitched.verdict,
+            "reasons": list(stitched.reasons),
+            "aspect_drift_pct": stitched.aspect_drift_pct,
+            "output": str(out),
+        }
+        target = report or (d / "report.json")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                          encoding="utf-8")
+
+        log.phase(f"stitched {width}x{height}  d*={stitched.registration.d_star}"
+                  f"  corr={stitched.registration.correlation:.3f}"
+                  f"  gate={stitched.gate}")
+        log.info(f"seam wrap {stitched.metrics.wrap:.3f} percentile "
+                 f"{stitched.metrics.wrap_percentile:.1f} -> {stitched.verdict}")
+        if abs(stitched.aspect_drift_pct) > 2.0:
+            log.info(f"WARNING: the model's aspect differs from the canvas by "
+                     f"{stitched.aspect_drift_pct:+.1f}%")
+        typer.echo(f"still    {out}")
+        typer.echo(f"report   {target}")
+    finally:
+        fh.close()
+
+
 @app.command()
 def merge(
     case_name: str = typer.Option(None, "--case",
@@ -284,6 +388,13 @@ def merge(
             _merge_still(case, cases_dir, feather=feather, levels=levels,
                          report=report, quiet=quiet,
                          progress_every=progress_every, allow_crop=allow_crop)
+            return
+        if case.flow == "fullRedrawImg":
+            if input_video or ai or sidecar or output:
+                raise typer.Exit("merge: --case 与 --input/--ai/--sidecar/--output 互斥"
+                                 "（--case 模式全部自动定位）")
+            _merge_full(case, cases_dir, report=report, quiet=quiet,
+                        progress_every=progress_every)
             return
         if input_video or ai or sidecar or output:
             raise typer.Exit("merge: --case 与 --input/--ai/--sidecar/--output 互斥"

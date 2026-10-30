@@ -159,6 +159,29 @@ def _viewport_erp_bounds(rect_w, rect_h, yaw, pitch, fov, erp_w, erp_h):
     return x0, y0, x1, y1
 
 
+def viewport_erp_size(rect_w, rect_h, yaw_deg, pitch_deg, fov_h_deg,
+                      erp_w, erp_h):
+    """Viewport footprint size on the ERP, in pixels, without padding.
+
+    Display and arithmetic only: the pick page shows "coverage" and output
+    density from this. A viewport that crosses the longitude seam reports the
+    full canvas width (its footprint is split into two parts, so the visible
+    width is the whole panorama). The projection itself stays here; callers
+    must not re-derive it from fov alone.
+    """
+    if min(rect_w, rect_h, fov_h_deg, erp_w, erp_h) <= 0:
+        return 0, 0
+    px, py = _viewport_erp_samples(
+        rect_w, rect_h, np.radians(yaw_deg), np.radians(pitch_deg),
+        np.radians(fov_h_deg), erp_w, erp_h)
+    if px.max() - px.min() > erp_w / 2.0:
+        width = erp_w
+    else:
+        width = int(np.ceil(px.max() - px.min()))
+    height = int(np.ceil(py.max() - py.min()))
+    return max(1, width), max(1, height)
+
+
 def viewport_erp_rects(rect_w, rect_h, yaw_deg, pitch_deg, fov_h_deg,
                        erp_w, erp_h):
     """Viewport footprint on the ERP as 1–2 pixel rects (x0, y0, x1, y1).

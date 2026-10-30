@@ -128,6 +128,9 @@ def new(
         typer.echo("下一步：vrstudio case draft --case " + case.name
                    + " --file <draft.json> 定视口与 inner，然后 vrstudio extract name --case "
                    + case.name)
+    elif flow == "fullRedrawImg":
+        typer.echo("下一步：vrstudio extract name --case " + case.name
+                   + "（pad 成 21:9 + 冗余带 mask）")
     else:
         typer.echo("下一步：vrstudio pad --in <源> --out <case>/seedance_input.mp4")
 
@@ -210,6 +213,7 @@ def show(
                 typer.echo(f"{section:<8} {items}")
             else:
                 typer.echo(f"{section:<8} (未定——web pick 或手填)")
+    if case.flow in ("patch", "patchimg", "fullRedrawImg"):
         typer.echo(f"extract  {case.extract_current or '(未抽取)'}")
     adopt = case.adopt_round or "(未采用)"
     if case.adopt_index is not None:

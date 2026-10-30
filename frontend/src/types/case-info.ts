@@ -147,6 +147,13 @@ export interface Footprint {
   h: number
 }
 
+export interface Coverage {
+  fov_deg: number
+  footprint: [number, number]
+  inner_deg: number
+  density: { '1080p': number; '4K': number }
+}
+
 export interface FileInfo {
   name: string
   path: string
@@ -265,6 +272,8 @@ export interface CaseInfo {
   previews: { vp?: string }
   viewport_options: ViewportOption[]
   viewport_footprint: Footprint[]
+  coverage: Coverage | null
+  fov_range: [number, number]
   prompt: PromptPayload
   generation_params: GenerationParams
   rounds: RoundsPayload

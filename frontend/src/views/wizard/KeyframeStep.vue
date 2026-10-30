@@ -34,6 +34,12 @@ const emit = defineEmits<{
 }>()
 
 type Step = 'first' | 'last'
+
+/** 4K 视口的首尾帧默认出 4K；1080p 视口仍默认 2K，控制额度。 */
+function defaultKeyframeResolution(info: CaseInfo): string {
+  return (info.viewport?.width ?? 0) >= 3840 ? '4K' : '2K'
+}
+
 const step = ref<Step>('first')
 const prompt = ref<PromptPayload | null>(null)
 const promptVars = ref<PromptVariable[]>([])
@@ -50,7 +56,7 @@ const pickerOpen = ref(false)
 const taskOpen = ref(false)
 const olderOpen = ref(false)
 const modelId = ref<number | null>(null)
-const resolution = ref('2K')
+const resolution = ref(defaultKeyframeResolution(props.info))
 const num = ref(4)
 const noteDraft = ref<Record<string, string>>({})
 let startedAt = 0
@@ -484,6 +490,12 @@ onUnmounted(() => {
               <FileOpenLink :file="rawFrame" :label="`打开${rawLabel}`" class="card-open" />
             </div>
             <div class="kf-slot-file mono">{{ rawFrame?.name || '—' }}</div>
+            <div v-if="rawFrame?.width" class="kf-slot-file mono">
+              {{ rawFrame.width }}×{{ rawFrame.height }}
+              <template v-if="rawFrame.size">
+                · {{ (rawFrame.size / 1048576).toFixed(1) }} MB
+              </template>
+            </div>
           </figure>
 
           <figure class="kf-slot">

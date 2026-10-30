@@ -54,7 +54,7 @@ from ..cli.generate import (
     template_for,
 )
 from ..media.videoio import VideoIOError
-from ..patch.projection import viewport_erp_rects
+from ..patch.projection import viewport_erp_rects, viewport_erp_size
 from ..procenv import decode_text, utf8_env
 from ..redraw.manifest import Manifest
 from . import case_meta
@@ -77,7 +77,7 @@ from .proxy import (
     proxy_state,
     proxy_width,
 )
-from .render import PreviewStore
+from .render import FOV_MAX_DEG, FOV_MIN_DEG, PreviewStore
 from .tasks import QUEUE, vrstudio_argv
 
 _WEB_DIR = Path(__file__).parent
@@ -225,6 +225,7 @@ def _drop_store(name: str) -> None:
 #: 选区视口的分辨率预设。新增档位只改这张表，前端下拉与后端校验自动跟随。
 PATCH_VIEWPORT_OPTIONS = (
     {"label": "1920×1080", "width": 1920, "height": 1080, "aspect": "16:9"},
+    {"label": "3840×2160", "width": 3840, "height": 2160, "aspect": "16:9"},
 )
 
 
@@ -258,6 +259,37 @@ def _footprint_payload(store: PreviewStore) -> list[dict]:
             for x0, y0, x1, y1 in rects]
 
 
+def _coverage_payload(store: PreviewStore) -> dict | None:
+    """视口覆盖角度、ERP footprint、inner 角宽与 1080p/4K 密度。
+
+    纯展示算术：footprint 由 ``patch.projection.viewport_erp_size`` 给，密度是
+    输出宽度除以 footprint 宽度。视口跨经线时 footprint 取整幅宽度。
+    """
+    vp = store.case.viewport or {}
+    inner = store.case.inner or {}
+    try:
+        width = int(vp["width"])
+        height = int(vp["height"])
+        fov = float(vp["fov_h_deg"])
+        yaw = float(vp["yaw_deg"])
+        pitch = float(vp["pitch_deg"])
+        inner_w = int(inner.get("width") or 0)
+    except (KeyError, TypeError, ValueError):
+        return None
+    erp_w, erp_h = store.source_size
+    footprint_w, footprint_h = viewport_erp_size(
+        width, height, yaw, pitch, fov, erp_w, erp_h)
+    if footprint_w <= 0 or footprint_h <= 0:
+        return None
+    return {
+        "fov_deg": round(fov, 1),
+        "footprint": [footprint_w, footprint_h],
+        "inner_deg": round(fov * inner_w / width, 1) if width else 0.0,
+        "density": {"1080p": round(1920 / footprint_w, 2),
+                    "4K": round(3840 / footprint_w, 2)},
+    }
+
+
 def _geometry_payload(store: PreviewStore, name: str, **extra) -> dict:
     """几何交互（点全景、摇杆、拖框）的轻量应答。
 
@@ -269,6 +301,8 @@ def _geometry_payload(store: PreviewStore, name: str, **extra) -> dict:
         "inner": dict(store.case.inner or {}),
         "previews": {"vp": f"/img/{name}/vp.png?k={store.key}"},
         "viewport_footprint": _footprint_payload(store),
+        "coverage": _coverage_payload(store),
+        "fov_range": [FOV_MIN_DEG, FOV_MAX_DEG],
     }
     payload.update(extra)
     return payload
@@ -1325,6 +1359,8 @@ def _case_info(name: str) -> dict | None:
         "previews": {"vp": f"/img/{case.name}/vp.png?k={store.key}"} if store else {},
         "viewport_options": _viewport_options(case) if case.flow == "patch" else [],
         "viewport_footprint": _footprint_payload(store) if store else [],
+        "coverage": _coverage_payload(store) if store else None,
+        "fov_range": [FOV_MIN_DEG, FOV_MAX_DEG],
         "rounds": _rounds(case.name),
         "meta": _meta().read(case.name).as_dict(),
     }
@@ -2456,6 +2492,35 @@ async def api_viewport_size(request):
     return JSONResponse(_geometry_payload(store, name))
 
 
+async def api_fov(request):
+    """设置视口水平视场角；这是扩大重绘覆盖范围的入口。
+
+    只改 fov，不缩放 inner：inner 的像素框保持不动，覆盖角度随 fov 变大。
+    """
+    name = request.path_params["name"]
+    store = get_store(name)
+    if store is None:
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    if store.case.flow != "patch":
+        return JSONResponse({"error": "只有 patch 有 fov 草稿"}, status_code=400)
+    body = await request.json()
+    raw = body.get("value")
+    if raw is None:
+        return JSONResponse({"error": "缺 value"}, status_code=400)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "value 必须是数字"}, status_code=400)
+    old = dict(store.case.viewport or {})
+    try:
+        applied = await asyncio.to_thread(store.set_fov, value)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    _remember_store(name, store)
+    _log_geometry(request, name, "fov", old, dict(store.case.viewport or {}))
+    return JSONResponse(_geometry_payload(store, name, fov=applied))
+
+
 async def api_inner(request):
     name = request.path_params["name"]
     store = get_store(name)
@@ -2842,6 +2907,7 @@ routes = [
     Route("/api/modes", api_modes),
     Route("/api/case/{name}/viewport", api_viewport, methods=["POST"]),
     Route("/api/case/{name}/viewport-size", api_viewport_size, methods=["POST"]),
+    Route("/api/case/{name}/fov", api_fov, methods=["POST"]),
     Route("/api/case/{name}/inner", api_inner, methods=["POST"]),
     Route("/api/case/{name}/nudge", api_nudge, methods=["POST"]),
     Route("/api/case/{name}/reset-draft", api_reset_draft, methods=["POST"]),

@@ -3,7 +3,7 @@
 import numpy as np
 from vrstudio.patch.projection import (
     erp_to_rect, rect_to_erp, camera_rotation, focal_from_fov,
-    viewport_erp_rects, _direction_to_erp_px,
+    viewport_erp_rects, viewport_erp_size, _direction_to_erp_px,
 )
 
 
@@ -50,6 +50,26 @@ def test_viewport_footprint_splits_at_seam():
     assert len(rects) == 2
     assert any(rect[0] == 0 for rect in rects)
     assert any(rect[2] == 360 for rect in rects)
+
+
+def test_viewport_erp_size_matches_the_yaw_span():
+    # 赤道上 ERP 宽度与 fov 成正比；90° 在 360 宽的 ERP 上约 90 像素。
+    w, h = viewport_erp_size(160, 90, 0.0, 0.0, 90.0, 360, 180)
+    assert 88 <= w <= 92
+    assert 55 <= h <= 65
+
+
+def test_viewport_erp_size_reports_full_width_across_the_seam():
+    w, h = viewport_erp_size(160, 90, 180.0, 0.0, 59.0, 360, 180)
+    assert w == 360 and h > 0
+
+
+def test_viewport_erp_size_at_8k_dance_viewport():
+    # dance_move 的当前视口：1920x1080、fov 59、yaw 0、8192x4096。
+    # 赤道水平约 1343 px，垂直约 803 px。
+    w, h = viewport_erp_size(1920, 1080, 0.0, 0.0, 59.0, 8192, 4096)
+    assert 1340 <= w <= 1346
+    assert 800 <= h <= 807
 
 
 def test_smooth_roundtrip():
