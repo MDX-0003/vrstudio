@@ -876,6 +876,24 @@ def test_params_save_passes_mode_and_aspect(client, fullredraw_case, monkeypatch
     assert "--aspect-ratio" in argv and "16:9" in argv
 
 
+def test_params_save_passes_model_id(client, fullredraw_case, monkeypatch):
+    calls = []
+
+    def fake(argv):
+        calls.append(argv)
+        return {"model_id": 22, "mode": "firstLastFrame", "resolution": "4K"}
+
+    monkeypatch.setattr(web_app, "_vrgen_json", fake)
+    r = client.post("/api/case/f1/params",
+                    json={"model_id": 22, "mode": "firstLastFrame",
+                          "resolution": "4K", "aspect_ratio": "16:9"})
+    assert r.status_code == 200, r.text
+    argv = calls[0]
+    assert "--model-id" in argv and "22" in argv
+    assert "--resolution" in argv and "4K" in argv
+    assert "--mode" in argv and "firstLastFrame" in argv
+
+
 def test_case_info_prompt_survives_missing_vrgen(client, patch_case):
     info = client.get("/api/case/p1").json()
     assert "error" in info["prompt"]          # vrgen 缺席 → 提示文案，不是 500

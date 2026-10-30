@@ -41,6 +41,7 @@ export function savePromptVar(name: string, key: string, value: string): Promise
 }
 
 export interface SaveParamsPayload {
+  model_id?: number
   mode?: string
   aspect_ratio?: string
   resolution?: string

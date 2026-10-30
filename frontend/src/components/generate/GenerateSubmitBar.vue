@@ -32,10 +32,13 @@ defineProps<{
   running: boolean
   activeKind: 'dry_run' | 'submit' | 'adopt' | null
   runBlockReason: string
+  showPresets: boolean
 }>()
 
 const emit = defineEmits<{
   'refresh-sessions': []
+  'preset-4k': []
+  'preset-1080p': []
   'dry-run': []
   submit: []
 }>()
@@ -122,6 +125,24 @@ function scaleLabel(option: InputOption): string {
             />
           </el-select>
         </label>
+        <div v-if="showPresets" class="preset-actions">
+          <el-button
+            size="small"
+            :loading="paramsSaving"
+            title="Seedance 2.0 · firstLastFrame / allMediaRef · 4K"
+            @click="emit('preset-4k')"
+          >
+            切到 4K
+          </el-button>
+          <el-button
+            size="small"
+            :loading="paramsSaving"
+            title="Seedance 2.5 · videoEdit · 1080p"
+            @click="emit('preset-1080p')"
+          >
+            切回 1080p
+          </el-button>
+        </div>
         <span v-if="paramsError" class="session-error">{{ paramsError }}</span>
       </div>
       <div class="submit-row">
@@ -287,6 +308,11 @@ function scaleLabel(option: InputOption): string {
 
 .w-duration {
   width: 150px;
+}
+
+.preset-actions {
+  display: flex;
+  gap: var(--space-1);
 }
 
 .w-project {

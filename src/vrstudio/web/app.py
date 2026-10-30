@@ -2399,7 +2399,7 @@ async def api_params(request):
     resolution = str(body.get("resolution") or "")
     scale = str(body.get("scale") or "")
     if not any(body.get(k) is not None for k in
-               ("resolution", "scale", "mode", "aspect_ratio",
+               ("model_id", "resolution", "scale", "mode", "aspect_ratio",
                 "session_id", "project_id", "episode")):
         return JSONResponse({"error": "没有要保存的参数"}, status_code=400)
     argv = ["params", "save", "--job", name]
@@ -2407,7 +2407,8 @@ async def api_params(request):
         argv += ["--resolution", resolution]
     if scale:
         argv += ["--scale", scale]
-    for field, flag in (("mode", "--mode"),
+    for field, flag in (("model_id", "--model-id"),
+                        ("mode", "--mode"),
                         ("aspect_ratio", "--aspect-ratio"),
                         ("session_id", "--session-id"),
                         ("project_id", "--project-id"),

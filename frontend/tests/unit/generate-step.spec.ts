@@ -20,6 +20,7 @@ vi.mock('@/api/tasks', () => ({
 }))
 
 import GenerateStep from '@/views/wizard/GenerateStep.vue'
+import { saveParams } from '@/api/case'
 import type { AssetDetail, CaseInfo } from '@/types/case-info'
 
 function asset(id: string, role: string, name: string): AssetDetail {
@@ -191,6 +192,22 @@ describe('GenerateStep', () => {
     const wrapper = await mountStep()
     const submit = wrapper.findAll('button').find((item) => item.text().includes('提交生成'))
     expect(submit?.attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
+  it('switches to the 4K preset with model 22', async () => {
+    vi.mocked(saveParams).mockResolvedValue(info())
+    const wrapper = await mountStep()
+    const button = wrapper.findAll('button').find((item) => item.text().includes('切到 4K'))
+    expect(button).toBeTruthy()
+    await button!.trigger('click')
+    await flushPromises()
+    expect(saveParams).toHaveBeenCalledWith('p1', {
+      model_id: 22,
+      mode: 'firstLastFrame',
+      resolution: '4K',
+      aspect_ratio: '16:9',
+    })
     wrapper.unmount()
   })
 })

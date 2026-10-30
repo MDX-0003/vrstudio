@@ -447,6 +447,56 @@ function scheduleParamsSave(): void {
   paramsSaveQueue.schedule(caseName.value, 'params', paramsBody())
 }
 
+type GenerationPreset = '4k' | '1080p'
+
+/** 两条 4K 路线共用的模型预设；4K 需要 Seedance 2.0（22），1080p 对照用 2.5（37）。 */
+async function applyPreset(preset: GenerationPreset): Promise<void> {
+  if (!caseName.value || paramsSaving.value) return
+  const name = caseName.value
+  const viewportWidth = props.info.viewport?.width ?? 0
+  if (preset === '4k' && viewportWidth < 3840) {
+    ElMessage.warning('当前视口不是 3840×2160；4K 路线建议先在 Pick 页切到 4K 视口')
+  }
+  if (preset === '1080p' && viewportWidth >= 3840) {
+    ElMessage.warning('视口是 4K，1080p 输出会在贴回时被放大；只作对照用')
+  }
+  if (paramsSaveQueue.has(name)) {
+    const queued = await paramsSaveQueue.flush(name)
+    if (!queued) paramsSaveQueue.cancel(name)
+  }
+  const payload: SaveParamsPayload =
+    preset === '4k'
+      ? {
+          model_id: 22,
+          // 已经在 4K 可用的两种模式里就保持，否则回到首尾帧。
+          mode: ['firstLastFrame', 'allMediaRef'].includes(mode.value)
+            ? mode.value
+            : 'firstLastFrame',
+          resolution: '4K',
+          aspect_ratio: '16:9',
+        }
+      : { model_id: 37, mode: 'videoEdit', resolution: '1080p', aspect_ratio: 'auto' }
+  paramsSaving.value = true
+  try {
+    const data = await saveParams(name, payload)
+    if (name !== caseName.value) return
+    if (data.generation_params) {
+      generationParams.value = data.generation_params
+      paramsError.value = data.generation_params.error ?? ''
+    }
+    emit('updated', data)
+    ElMessage.success(
+      preset === '4k' ? '已切到 4K（Seedance 2.0）' : '已切回 1080p（Seedance 2.5）',
+    )
+  } catch (err) {
+    const message = err instanceof Error ? err.message : '切换生成预设失败'
+    paramsError.value = message
+    ElMessage.error(message)
+  } finally {
+    paramsSaving.value = false
+  }
+}
+
 watch(ratioOptions, (options) => {
   if (!options.includes(ratio.value)) ratio.value = options[0] ?? 'auto'
 })
@@ -803,7 +853,10 @@ function statusTone(): string {
     :running="running"
     :active-kind="activeKind"
     :run-block-reason="runBlockReason"
+    :show-presets="info.flow === 'patch'"
     @refresh-sessions="refreshSessions"
+    @preset-4k="applyPreset('4k')"
+    @preset-1080p="applyPreset('1080p')"
     @dry-run="dryRun"
     @submit="submit"
   />
