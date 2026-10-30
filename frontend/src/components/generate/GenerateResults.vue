@@ -9,17 +9,20 @@ import type { TaskView } from '@/types/task'
 
 const props = defineProps<{
   recentOutput: OutputFile | null
-  canAdopt: boolean
-  adopting: boolean
-  latestUsableRound: RoundSummary | null
+  adoptedRound: string
+  adoptingRound: string | null
   visibleRoundRows: RoundSummary[]
   roundsCount: number
   roundsHint: string
   activeTask: TaskView | null
 }>()
 
-const emit = defineEmits<{ adopt: [] }>()
+const emit = defineEmits<{ adopt: [round: RoundSummary] }>()
 const showTaskTail = ref(false)
+
+function isAdopted(round: RoundSummary): boolean {
+  return round.round === props.adoptedRound
+}
 
 watch(
   () => props.activeTask?.id,
@@ -67,26 +70,8 @@ function formatRoundTime(value: string): string {
         <span>还没有合并成片</span>
       </div>
       <div v-if="recentOutput" class="output-meta mono">{{ recentOutput.file }}</div>
-      <div class="output-actions">
-        <el-button
-          type="primary"
-          plain
-          size="small"
-          :disabled="!canAdopt || adopting"
-          :loading="adopting"
-          @click="emit('adopt')"
-        >
-          选用成片
-        </el-button>
-        <span class="muted">
-          {{
-            canAdopt
-              ? `最新可用轮次：${latestUsableRound?.round}`
-              : recentOutput
-                ? '当前成片已是采用结果'
-                : '已采用最新轮次，合并后在这里看成片'
-          }}
-        </span>
+      <div class="adopt-hint mono">
+        {{ adoptedRound ? `当前采用轮次：${adoptedRound}` : '尚未采用任何轮次' }}
       </div>
     </div>
   </div>
@@ -104,7 +89,24 @@ function formatRoundTime(value: string): string {
       </div>
       <div v-for="round in visibleRoundRows" :key="round.round" class="candidate">
         <div class="candidate-head">
-          <span class="round-name">{{ formatRoundTime(round.updated) }}</span>
+          <div class="candidate-title">
+            <span class="round-name">{{ formatRoundTime(round.updated) }}</span>
+            <span class="round-id mono">{{ round.round }}</span>
+          </div>
+          <el-tag v-if="isAdopted(round)" type="success" size="small" effect="light">
+            已采用
+          </el-tag>
+          <el-button
+            v-else-if="round.result === 'yes'"
+            type="primary"
+            plain
+            size="small"
+            :loading="adoptingRound === round.round"
+            :disabled="adoptingRound !== null"
+            @click="emit('adopt', round)"
+          >
+            选用
+          </el-button>
         </div>
         <div class="round-tags">
           <el-tag size="small" effect="light" :type="roundResultType(round)">
@@ -207,14 +209,12 @@ function formatRoundTime(value: string): string {
   word-break: break-all;
 }
 
-.output-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
+.adopt-hint {
   max-width: 560px;
-  margin-top: var(--space-3);
+  margin-top: var(--space-2);
+  color: var(--color-text-muted);
   font-size: var(--text-xs);
+  word-break: break-all;
 }
 
 .candidate-list {
@@ -238,7 +238,23 @@ function formatRoundTime(value: string): string {
   font-weight: 600;
 }
 
+.candidate-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
 .round-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.round-id {
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  font-weight: 400;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

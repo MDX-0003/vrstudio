@@ -83,30 +83,16 @@ const promptSaveQueue = useCaseSaveQueue<string>(
 
 const recentOutput = computed(() => {
   const outputs = props.info.outputs ?? []
-  if (!outputs.length) return null
-  const adopted = String(props.info.adopt_round ?? '')
-    .split(/[\\/]/)
-    .pop()
-  return outputs.find((item) => item.version === adopted) ?? outputs[outputs.length - 1]
+  return outputs.length ? outputs[outputs.length - 1] : null
 })
 const rounds = computed<RoundSummary[]>(() => props.info.rounds?.rounds ?? [])
 const visibleRoundRows = computed(() => visibleRounds(rounds.value))
 const roundsHint = computed(() => props.info.rounds?.hint ?? '')
 
-const latestUsableRound = computed<RoundSummary | null>(() => {
-  const rows = [...rounds.value]
-    .filter((round) => round.result === 'yes')
-    .sort((a, b) => String(b.updated).localeCompare(String(a.updated)))
-  return rows[0] ?? null
-})
 const adoptedRoundName = computed(() =>
   String(props.info.adopt_round ?? '')
     .split(/[\\/]/)
-    .pop(),
-)
-const canAdopt = computed(
-  () =>
-    Boolean(latestUsableRound.value) && latestUsableRound.value?.round !== adoptedRoundName.value,
+    .pop() ?? '',
 )
 
 const generationParams = ref<GenerationParams | null>(null)
@@ -130,7 +116,7 @@ const status = ref<RunStatus>('未预演')
 const statusDetail = ref('')
 const previewPassedSig = ref<string | null>(null)
 const activeTask = ref<TaskView | null>(null)
-const adopting = ref(false)
+const adoptingRound = ref<string | null>(null)
 const activeKind = ref<'dry_run' | 'submit' | 'adopt' | null>(null)
 const activeStartedAt = ref(0)
 
@@ -644,13 +630,13 @@ function syncRunStatus(): void {
     }
   } else if (activeKind.value === 'adopt') {
     if (task.status === 'done') {
-      adopting.value = false
+      adoptingRound.value = null
       activeKind.value = null
       ElMessage.success('已采用成片')
       void refreshCase()
     }
     if (task.status === 'failed') {
-      adopting.value = false
+      adoptingRound.value = null
       activeKind.value = null
       ElMessage.error(task.error || '采用成片失败')
     }
@@ -699,17 +685,16 @@ function submit(): void {
   void execute('submit')
 }
 
-async function adoptResult(): Promise<void> {
-  const round = latestUsableRound.value
-  if (!round || adopting.value) return
-  adopting.value = true
+async function adoptResult(round: RoundSummary): Promise<void> {
+  if (!round || adoptingRound.value) return
+  adoptingRound.value = round.round
   activeKind.value = 'adopt'
   activeStartedAt.value = Date.now()
   try {
     await runOperation(caseName.value, 'adopt', { round: round.round_dir })
     void refreshTasks()
   } catch (err) {
-    adopting.value = false
+    adoptingRound.value = null
     activeKind.value = null
     ElMessage.error(err instanceof Error ? err.message : '采用成片失败')
   }
@@ -813,9 +798,8 @@ function statusTone(): string {
     <aside class="gen-side">
       <GenerateResults
         :recent-output="recentOutput"
-        :can-adopt="canAdopt"
-        :adopting="adopting"
-        :latest-usable-round="latestUsableRound"
+        :adopted-round="adoptedRoundName"
+        :adopting-round="adoptingRound"
         :visible-round-rows="visibleRoundRows"
         :rounds-count="rounds.length"
         :rounds-hint="roundsHint"

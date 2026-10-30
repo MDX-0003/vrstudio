@@ -9,16 +9,26 @@ const LinkStub = defineComponent({
   template: '<a :href="href" :target="target"><slot /></a>',
 })
 
+const ButtonStub = defineComponent({
+  props: { disabled: Boolean, loading: Boolean },
+  emits: ['click'],
+  template: '<button :disabled="disabled || loading" @click="$emit(\'click\')"><slot /></button>',
+})
+
+const TagStub = defineComponent({
+  template: '<span class="tag-stub"><slot /></span>',
+})
+
 const stubs = {
   'el-link': LinkStub,
   'el-icon': true,
-  'el-tag': true,
+  'el-tag': TagStub,
   'el-empty': true,
   'el-alert': true,
-  'el-button': true,
+  'el-button': ButtonStub,
 }
 
-function round(): RoundSummary {
+function round(overrides: Partial<RoundSummary> = {}): RoundSummary {
   return {
     mark: '*',
     round: 'gen-1',
@@ -28,6 +38,7 @@ function round(): RoundSummary {
     result: 'yes',
     updated: '2026-10-26T01:00:00Z',
     round_dir: 'E:/repo/vrgen_runs/p1/gen-1',
+    ...overrides,
     files: {
       result: {
         name: 'result.mp4',
@@ -51,20 +62,24 @@ function round(): RoundSummary {
   }
 }
 
-function mountResults(rows: RoundSummary[]) {
+function mountResults(rows: RoundSummary[], props: Record<string, unknown> = {}) {
   return mount(GenerateResults, {
     props: {
       recentOutput: null,
-      canAdopt: false,
-      adopting: false,
-      latestUsableRound: null,
+      adoptedRound: '',
+      adoptingRound: null,
       visibleRoundRows: rows,
       roundsCount: rows.length,
       roundsHint: '',
       activeTask: null,
+      ...props,
     },
     global: { stubs },
   })
+}
+
+function adoptButtons(wrapper: ReturnType<typeof mountResults>) {
+  return wrapper.findAll('button').filter((item) => item.text().includes('选用'))
 }
 
 describe('GenerateResults 生成记录文件行', () => {
@@ -85,6 +100,62 @@ describe('GenerateResults 生成记录文件行', () => {
     delete row.files
     const wrapper = mountResults([row])
     expect(wrapper.find('.round-files').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})
+
+describe('GenerateResults 按轮次选用', () => {
+  it('emits adopt with the round payload when its 选用 is clicked', async () => {
+    const wrapper = mountResults([round({ round: 'gen-1' }), round({ round: 'gen-2' })])
+    const buttons = adoptButtons(wrapper)
+    expect(buttons).toHaveLength(2)
+    await buttons[0].trigger('click')
+    expect(wrapper.emitted('adopt')).toHaveLength(1)
+    expect(wrapper.emitted('adopt')![0][0]).toMatchObject({
+      round: 'gen-1',
+      round_dir: 'E:/repo/vrgen_runs/p1/gen-1',
+    })
+    wrapper.unmount()
+  })
+
+  it('shows the adopted tag instead of a button on the adopted round', () => {
+    const wrapper = mountResults(
+      [round({ round: 'gen-1' }), round({ round: 'gen-2' })],
+      { adoptedRound: 'gen-2' },
+    )
+    expect(adoptButtons(wrapper)).toHaveLength(1)
+    expect(adoptButtons(wrapper)[0].text()).toContain('选用')
+    const heads = wrapper.findAll('.candidate-head')
+    expect(heads[1].text()).toContain('已采用')
+    expect(wrapper.text()).toContain('当前采用轮次：gen-2')
+    wrapper.unmount()
+  })
+
+  it('shows no adopt button for rounds without a usable result', () => {
+    const wrapper = mountResults([
+      round({ round: 'gen-1', result: 'no', stage: 'failed' }),
+      round({ round: 'gen-2' }),
+    ])
+    expect(adoptButtons(wrapper)).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('disables every adopt button while one round is being adopted', () => {
+    const wrapper = mountResults(
+      [round({ round: 'gen-1' }), round({ round: 'gen-2' })],
+      { adoptingRound: 'gen-2' },
+    )
+    const buttons = adoptButtons(wrapper)
+    expect(buttons).toHaveLength(2)
+    for (const button of buttons) {
+      expect(button.attributes('disabled')).toBeDefined()
+    }
+    wrapper.unmount()
+  })
+
+  it('states when no round has been adopted', () => {
+    const wrapper = mountResults([round()], { adoptedRound: '' })
+    expect(wrapper.text()).toContain('尚未采用任何轮次')
     wrapper.unmount()
   })
 })

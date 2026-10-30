@@ -20,7 +20,8 @@ vi.mock('@/api/tasks', () => ({
 }))
 
 import GenerateStep from '@/views/wizard/GenerateStep.vue'
-import { saveParams } from '@/api/case'
+import { runOperation, saveParams } from '@/api/case'
+import type { RoundSummary } from '@/types/case-info'
 import type { AssetDetail, CaseInfo } from '@/types/case-info'
 
 function asset(id: string, role: string, name: string): AssetDetail {
@@ -51,13 +52,17 @@ const ButtonStub = defineComponent({
   template: '<button :disabled="disabled"><slot /></button>',
 })
 
+const TagStub = defineComponent({
+  template: '<span class="tag-stub"><slot /></span>',
+})
+
 const stubs = {
   'el-button': ButtonStub,
   'el-select': true,
   'el-option': true,
   'el-checkbox': true,
   'el-empty': true,
-  'el-tag': true,
+  'el-tag': TagStub,
   'el-alert': true,
   'el-icon': true,
   'el-dialog': true,
@@ -160,13 +165,26 @@ function info(): CaseInfo {
   } as unknown as CaseInfo
 }
 
-async function mountStep() {
+async function mountStep(infoData: CaseInfo = info()) {
   const wrapper = mount(GenerateStep, {
-    props: { caseName: 'p1', info: info() },
+    props: { caseName: 'p1', info: infoData },
     global: { stubs },
   })
   await flushPromises()
   return wrapper
+}
+
+function videoRound(name: string, updated: string): RoundSummary {
+  return {
+    mark: '*',
+    round: name,
+    backend: 'mglc',
+    stage: 'checked',
+    gate: 'ok',
+    result: 'yes',
+    updated,
+    round_dir: `E:/repo/vrgen_runs/p1/${name}`,
+  }
 }
 
 describe('GenerateStep', () => {
@@ -208,6 +226,41 @@ describe('GenerateStep', () => {
       resolution: '4K',
       aspect_ratio: '16:9',
     })
+    wrapper.unmount()
+  })
+
+  it('adopts the clicked round by its round_dir', async () => {
+    const data = info()
+    data.rounds = {
+      rounds: [
+        videoRound('gen-a', '2026-10-30T04:30:39Z'),
+        videoRound('gen-b', '2026-10-30T06:37:05Z'),
+      ],
+      hint: '',
+    }
+    const wrapper = await mountStep(data)
+    const buttons = wrapper
+      .findAll('button')
+      .filter((item) => item.text().includes('选用'))
+    expect(buttons).toHaveLength(2)
+    await buttons[0].trigger('click')
+    await flushPromises()
+    expect(runOperation).toHaveBeenCalledWith('p1', 'adopt', {
+      round: 'E:/repo/vrgen_runs/p1/gen-a',
+    })
+    wrapper.unmount()
+  })
+
+  it('marks the adopted round instead of offering its button', async () => {
+    const data = info()
+    data.rounds = { rounds: [videoRound('gen-a', '2026-10-30T04:30:39Z')], hint: '' }
+    data.adopt_round = 'gen-a'
+    const wrapper = await mountStep(data)
+    expect(
+      wrapper.findAll('button').filter((item) => item.text().includes('选用')),
+    ).toHaveLength(0)
+    expect(wrapper.text()).toContain('已采用')
+    expect(wrapper.text()).toContain('当前采用轮次：gen-a')
     wrapper.unmount()
   })
 })
