@@ -20,6 +20,7 @@ MIGRATED_COMMANDS = {
     "extract", "merge", "restore",                                   # ← vrpatch
     "case", "generate",                                              # ★ M3 新增
     "serve",                                                         # ★ M4 新增
+    "relight",                                                       # ★ 决策 48
 }
 
 STUB_COMMANDS: set[str] = set()

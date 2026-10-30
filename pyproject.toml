@@ -35,6 +35,9 @@ packages = ["src/vrstudio"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "slow: 8K 真实素材冒烟（需要 sources/ 与 cases/ 下的本地数据，CI 上自动跳过）",
+]
 
 [tool.ruff]
 line-length = 100

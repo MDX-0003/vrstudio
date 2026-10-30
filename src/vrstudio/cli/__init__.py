@@ -8,6 +8,7 @@
 - ← vrpad 迁入（fullredraw）：pad / recompose / plan / verify / calib / seam-center
 - ← vrpatch 迁入（patch）：extract（子 app，含 case|args 两命令）/ merge / restore
 - ★ 新增 stub（M3/M4 落地）：case / generate / serve
+- ★ 新增（决策 48）：relight（两张图进、一张图出）
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from . import merge as merge_cli
 from . import pad as pad_cli
 from . import plan as plan_cli
 from . import recompose as recompose_cli
+from . import relight as relight_cli
 from . import restore as restore_cli
 from . import seam_center as seam_center_cli
 from . import serve as serve_cli
@@ -63,6 +65,7 @@ app.command(name="assemble", help=assemble_cli.assemble.__doc__)(assemble_cli.as
 app.command(name="restore", help=restore_cli.restore.__doc__)(restore_cli.restore)
 
 # ── ★ 新增（M3 落地 case/generate；M4 落地 serve）───────────────────────
+app.command(name="relight", help=relight_cli.relight.__doc__)(relight_cli.relight)
 app.add_typer(case_cli.app, name="case", help=case_cli.app.info.help)
 app.add_typer(generate_cli.app, name="generate", help=generate_cli.app.info.help)
 app.command(name="serve", help=serve_cli.serve.__doc__)(serve_cli.serve)
