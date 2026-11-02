@@ -222,6 +222,17 @@ describe('GenerateStep', () => {
     wrapper.unmount()
   })
 
+  it('shows a row for a template variable that has no value yet', async () => {
+    const data = info()
+    data.prompt!.vars = { target: '红色外套' }
+    const wrapper = await mountStep(data)
+    const text = wrapper.text()
+    // 原主体 在模板里但草稿里没有值：仍然出现，值为空并标成未填写。
+    expect(text).toContain('原主体')
+    expect(text).toContain('未填写')
+    wrapper.unmount()
+  })
+
   it('disables submit when the generate gate is not ready', async () => {
     const wrapper = await mountStep()
     const submit = wrapper.findAll('button').find((item) => item.text().includes('提交生成'))

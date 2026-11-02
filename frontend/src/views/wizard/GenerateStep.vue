@@ -249,7 +249,7 @@ function applyInfo(data: CaseInfo): void {
       promptRendered.value = ''
     }
   } else if (prompt && !promptDirty) {
-    promptVars.value = buildPromptVariables(prompt)
+      promptVars.value = buildPromptVariables(prompt, { includeUndefined: true })
     promptRendered.value = prompt.rendered || prompt.template_text || ''
     promptRenderError.value = prompt.render_error || ''
   }

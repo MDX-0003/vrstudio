@@ -47,6 +47,34 @@ describe('buildPromptVariables', () => {
   it('returns an empty list without a prompt payload', () => {
     expect(buildPromptVariables(null)).toEqual([])
   })
+
+  it('lists template placeholders without a value when the caller asks for them', () => {
+    const rows = buildPromptVariables(payload(), { includeUndefined: true })
+
+    // target 在模板里但没有值：按模板顺序排在 subject 之前，交给用户填。
+    expect(rows.map((row) => row.key)).toEqual(['target', 'subject', 'plot', 'extra'])
+    expect(rows[0]).toMatchObject({
+      key: 'target',
+      label: '重绘结果',
+      value: '',
+      defined: false,
+    })
+    expect(rows[1]).toMatchObject({ key: 'subject', defined: true })
+  })
+
+  it('never exposes geometry or computed keys as editable rows', () => {
+    const rows = buildPromptVariables(
+      payload({
+        placeholders: ['image_roles', 'target', 'canvas_w'],
+        geometry_keys: ['canvas_w'],
+        computed_keys: ['image_roles'],
+        vars: {},
+      }),
+      { includeUndefined: true },
+    )
+
+    expect(rows.map((row) => row.key)).toEqual(['target'])
+  })
 })
 
 describe('shouldExpirePreview', () => {

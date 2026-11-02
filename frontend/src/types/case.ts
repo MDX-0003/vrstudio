@@ -89,4 +89,6 @@ export interface PromptVariable {
   label: string
   help: string
   value: string
+  /** 模板引用了它、草稿里还没有值时是 false；旧调用方不传按已定义处理。 */
+  defined?: boolean
 }

@@ -1009,6 +1009,21 @@ def test_prompt_save_passes_through_to_vrgen(client, patch_case, monkeypatch):
     assert r.status_code == 400 and "没有要改" in r.text
 
 
+def test_prompt_save_returns_expanded_overview(client, patch_case, monkeypatch):
+    """save 只回草稿；再读一次 show，页面才能拿到 rendered 与 render_error。"""
+
+    def fake_vrgen_json(argv):
+        if argv[:2] == ["prompt", "show"]:
+            return {"rendered": "展开后的正文", "render_error": None,
+                    "vars": {"theme": "黄昏"}}
+        return {"template": "character-repaint", "vars": {"theme": "黄昏"}}
+
+    monkeypatch.setattr(web_app, "_vrgen_json", fake_vrgen_json)
+    r = client.post("/api/case/p1/prompt", json={"set": "theme", "value": "黄昏"})
+    assert r.status_code == 200
+    assert r.json()["prompt"]["rendered"] == "展开后的正文"
+
+
 def test_prompt_save_propagates_vrgen_error(client, patch_case, monkeypatch):
     monkeypatch.setattr(web_app, "_vrgen_json",
                         lambda argv: {"error": "变量 ['theme'] 被模板正文引用，不能删除"})

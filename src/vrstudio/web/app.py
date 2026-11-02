@@ -3064,8 +3064,13 @@ async def api_prompt(request):
             refs_file.unlink(missing_ok=True)
     if "error" in payload:
         return JSONResponse(payload, status_code=400)
+    # save 只回草稿概览（没有 rendered/render_error），页面据此判断不了还差哪些变量、
+    # 也刷新不了正文；再读一次 overview，读失败就保留 save 的回显。
+    overview = await asyncio.to_thread(_prompt, name, case.flow, mode)
+    if "error" not in overview:
+        payload = overview
     info = await asyncio.to_thread(_case_info, name)
-    info["prompt"] = payload          # save 的回显就是保存后的状态，不再多问一次
+    info["prompt"] = payload
     return JSONResponse(info)
 
 

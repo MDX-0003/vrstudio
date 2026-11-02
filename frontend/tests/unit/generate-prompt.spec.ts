@@ -39,8 +39,8 @@ const stubs = {
 }
 
 const VARIABLES: PromptVariable[] = [
-  { key: 'subject', label: '原主体', help: '要被替换的主体', value: '人偶' },
-  { key: 'target', label: '重绘结果', help: '', value: '' },
+  { key: 'subject', label: '原主体', help: '要被替换的主体', value: '人偶', defined: true },
+  { key: 'target', label: '重绘结果', help: '', value: '', defined: true },
 ]
 
 async function mountPrompt(props: Record<string, unknown> = {}) {
@@ -101,13 +101,27 @@ describe('GeneratePrompt 添加变量（F3）', () => {
   })
 })
 
-describe('GeneratePrompt render_error 展示（F2）', () => {
-  it('prefixes the raw render error with a Chinese explanation', async () => {
+describe('GeneratePrompt 警告文案', () => {
+  it('names the missing variables instead of showing the raw template error', async () => {
+    const wrapper = await mountPrompt({
+      variables: [
+        { key: 'edit', label: '重绘内容', help: '', value: '', defined: false },
+        { key: 'preserve', label: '必须保持', help: '', value: '', defined: false },
+      ],
+      renderError: 'prompt template uses {edit}, which nothing defines.',
+    })
+    const alerts = wrapper.findAll('.alert').map((a) => a.text())
+    expect(alerts.join('\n')).toContain('还有 2 个变量未填写：重绘内容、必须保持')
+    expect(alerts.join('\n')).not.toContain('nothing defines')
+    wrapper.unmount()
+  })
+
+  it('falls back to the raw render error when every variable is defined', async () => {
     const wrapper = await mountPrompt({
       renderError: 'prompt template uses {asset_list}, which nothing defines.',
     })
     const alerts = wrapper.findAll('.alert').map((a) => a.text())
-    expect(alerts.join('\n')).toContain('提示词暂时无法完整展开：')
+    expect(alerts.join('\n')).toContain('提示词还展不开：')
     expect(alerts.join('\n')).toContain('{asset_list}')
     wrapper.unmount()
   })

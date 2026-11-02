@@ -21,6 +21,16 @@ const emit = defineEmits<{
 const newKey = ref('')
 const newValue = ref('')
 
+/** 模板引用、草稿里还没有值的变量：先按中文名告诉用户要补哪几个。 */
+const missing = computed(() => props.variables.filter((item) => item.defined === false))
+const alertTitle = computed(() => {
+  if (missing.value.length) {
+    const labels = missing.value.map((item) => item.label).join('、')
+    return `还有 ${missing.value.length} 个变量未填写：${labels}`
+  }
+  return props.renderError ? `提示词还展不开：${props.renderError}` : ''
+})
+
 const newKeyUsable = computed(() => {
   const key = newKey.value.trim()
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && !props.variables.some((item) => item.key === key)
@@ -42,10 +52,10 @@ function submitNewVar(): void {
     </div>
     <div class="panel-body">
       <el-alert
-        v-if="renderError"
+        v-if="alertTitle"
         type="warning"
         :closable="false"
-        :title="`提示词暂时无法完整展开：${renderError}`"
+        :title="alertTitle"
         class="prompt-error"
       />
       <div v-if="variables.length" class="prompt-summary">
@@ -64,10 +74,10 @@ function submitNewVar(): void {
       <section class="template-block">
         <h3>完整提示词（只读）</h3>
         <el-alert
-          v-if="renderError"
+          v-if="alertTitle"
           type="warning"
           :closable="false"
-          :title="`提示词暂时无法完整展开：${renderError}`"
+          :title="alertTitle"
           class="prompt-error"
         />
         <pre>{{ rendered || '还没有提示词内容' }}</pre>
