@@ -32,6 +32,7 @@ from ..redraw.manifest import ImageManifest
 from ..redraw.image import ImageFlowError, stitch_image
 from .. import case as case_mod
 from .. import config as config_mod
+from ..jsonio import json_safe
 
 app = typer.Typer(add_completion=False, help=__doc__)
 
@@ -227,8 +228,10 @@ def _merge_image(case, cases_dir, *, feather: int, levels: int,
         }
         target = report or (d / "report.json")
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                          encoding="utf-8")
+        target.write_text(
+            json.dumps(json_safe(data), ensure_ascii=False, indent=2,
+                       allow_nan=False),
+            encoding="utf-8")
 
         log.phase(f"erp {erp_w}x{erp_h}  viewport "
                   f"{geo.viewport.width}x{geo.viewport.height}  "
@@ -352,8 +355,10 @@ def _merge_full(case, cases_dir, *, report: Path | None, quiet: bool,
         }
         target = report or (d / "report.json")
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                          encoding="utf-8")
+        target.write_text(
+            json.dumps(json_safe(data), ensure_ascii=False, indent=2,
+                       allow_nan=False),
+            encoding="utf-8")
 
         log.phase(f"stitched {width}x{height}  d*={stitched.registration.d_star}"
                   f"  corr={stitched.registration.correlation:.3f}"

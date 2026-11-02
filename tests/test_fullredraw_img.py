@@ -160,9 +160,16 @@ def test_merge_returns_the_source_bit_exactly(tmp_path):
     assert out.is_file()
     assert np.array_equal(read_image(out), read_image(src))
 
-    report = json.loads((version / "report.json").read_text(encoding="utf-8"))
+    text = (version / "report.json").read_text(encoding="utf-8")
+    report = json.loads(text, parse_constant=_reject_non_finite)
     assert report["gate"] == "ok"
     assert report["source"] == [384, 192]
+    # 逐位相同时 quality 是无穷；报告必须是严格 JSON，转成 null 下发。
+    assert report["registration"]["quality"] is None
+
+
+def _reject_non_finite(token: str):
+    raise AssertionError(f"报告里出现了非法的 JSON 常量 {token}")
 
 
 def test_merge_requires_an_adopted_result(tmp_path):

@@ -171,6 +171,21 @@ def test_fullredrawimg_has_no_pick_step_and_extract_is_ready(tmp_path, client):
     assert "image_pad.json" in gates["extract"]["evidence"]
 
 
+def test_case_info_survives_a_report_with_infinity(tmp_path, client):
+    """旧报告里的 Infinity 不能让 /api/case 变成 500（决策 68）。"""
+    src = _png(tmp_path)
+    case_mod.create("f1", "fullRedrawImg", src, root=tmp_path)
+    version = _extract_version(tmp_path, "f1", "image_pad.json")
+    (version / "report.json").write_text(
+        '{"case": "f1", "registration": {"quality": Infinity}, '
+        '"gate": "ok", "verdict": "ok", "reasons": [], "aspect_drift_pct": 0.0}',
+        encoding="utf-8")
+
+    r = client.get("/api/case/f1")
+    assert r.status_code == 200, r.text
+    assert r.json()["image_report"]["registration"]["quality"] is None
+
+
 def test_fullredrawimg_merge_ready_from_a_library_input(tmp_path, client):
     """拼接输入来自素材库时，没有 adopt 结果也可以拼接（决策 66）。"""
     src = _png(tmp_path)

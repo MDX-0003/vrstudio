@@ -53,6 +53,7 @@ from ..cli.generate import (
     clip_duration_s,
     template_for,
 )
+from ..jsonio import json_safe
 from ..media.videoio import VideoIOError
 from ..patch import sidecar as sidecar_mod
 from ..patch.projection import viewport_erp_rects, viewport_erp_size
@@ -550,7 +551,9 @@ def _image_report(case: case_mod.Case) -> dict | None:
         return None
     path = case.dir(_ctx["cases_root"]) / "extracts" / case.extract_current / "report.json"
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        # 旧报告可能含 Infinity（完美匹配时的 quality），JSONResponse 会因此 500；
+        # 读入时统一清掉非有限值，老文件不必重跑 merge。
+        return json_safe(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, ValueError):
         return None
 

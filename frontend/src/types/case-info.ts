@@ -216,7 +216,13 @@ export interface PatchImageReport {
 export interface FullRedrawImageReport {
   source: [number, number]
   canvas: [number, number]
-  registration: { d_star: number; correlation: number; quality: number; mae_min: number }
+  /** quality 是“次优比最优”的比值，逐位相同时为无穷，后端落盘/下发前转成 null。 */
+  registration: {
+    d_star: number
+    correlation: number
+    quality: number | null
+    mae_min: number
+  }
   gate: string
   seam: Record<string, unknown>
   verdict: string
