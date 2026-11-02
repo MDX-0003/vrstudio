@@ -185,7 +185,7 @@ def stitch_image(
     *,
     search_pct: float = 25.0,
     max_sample_rows: int = 256,
-    min_band_correlation: float = 0.80,
+    min_band_correlation: float = 0.60,
     warn_quality: float = 1.15,
     restore_interp: str = "lanczos4",
     blend_weight: str = "smoothstep",

@@ -48,9 +48,13 @@ aspect_drift_warn_pct = 2.0  # 工具返回的宽高比与画布差多少就告�
                              # 闭合是横向的，但内容会被拉伸）
 
 # 配准 / 画布假设闸门
-min_band_correlation = 0.80   # 对齐后蓝绿带的相关系数低于此值 -> ERROR 中止。
+min_band_correlation = 0.60   # 对齐后蓝绿带的相关系数低于此值 -> ERROR 中止。
                               # 本质检验："两条带是不是同一段内容"。同内容 >= 0.95，
                               # 无关内容 ~0。对整体亮度梯度免疫（梯度只改均值）。
+                              # 2026-11-02 决策 69 从 0.80 降到 0.60：AIGC 重绘后两端
+                              # 轻微分岔（实测 0.73/0.78）也能出片，代价是高对比区域
+                              # 可能重影。恢复原行为：改回 0.80，或在本机 vrstudio.toml
+                              # 写 [recompose] min_band_correlation = 0.80。
 warn_quality         = 1.15   # 代价曲线过平（mae_second/mae_min 低于此值）-> WARN：
                               # d* 可能是巧合匹配
 

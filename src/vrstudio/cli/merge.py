@@ -309,7 +309,7 @@ def _merge_full(case, cases_dir, *, report: Path | None, quiet: bool,
                 search_pct=float(conf.get("recompose.search_pct", 25.0)),
                 max_sample_rows=int(conf.get("recompose.max_sample_rows", 256)),
                 min_band_correlation=float(
-                    conf.get("recompose.min_band_correlation", 0.80)),
+                    conf.get("recompose.min_band_correlation", 0.60)),
                 warn_quality=float(conf.get("recompose.warn_quality", 1.15)),
                 restore_interp=str(conf.get("recompose.restore_interp", "lanczos4")),
                 blend_weight=str(conf.get("recompose.blend_weight", "smoothstep")),

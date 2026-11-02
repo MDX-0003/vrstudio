@@ -63,6 +63,12 @@ def test_defaults_load_and_validate():
     assert conf.get("video.pix_fmt") == "yuv420p"   # 唯一编码档，浏览器可播
 
 
+def test_band_gate_default_is_relaxed_to_point_six():
+    """决策 69：冗余带相关性闸门默认 0.60；回退方式见 docs/decisions.md。"""
+    assert builtin_defaults()["recompose"]["min_band_correlation"] == 0.60
+    assert config_mod._FALLBACK["recompose"]["min_band_correlation"] == 0.60
+
+
 def test_override_parsing_types():
     assert parse_override("recompose.endpoint_lock_pct=3") == ("recompose.endpoint_lock_pct", 3)
     assert parse_override("recompose.endpoint_lock_pct=3.5")[1] == 3.5

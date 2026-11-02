@@ -109,7 +109,7 @@ def main(
     quality = float(np.median(quals))
     correlation = float(np.median(corrs))
     baseline = float(np.mean(base))
-    min_corr = float(conf.get("recompose.min_band_correlation", 0.80))
+    min_corr = float(conf.get("recompose.min_band_correlation", 0.60))
     warn_quality = float(conf.get("recompose.warn_quality", 1.15))
 
     print("\nredundant-band correspondence")

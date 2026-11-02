@@ -43,7 +43,7 @@ class RegistrationResult:
     correlation: float   # Pearson r between the aligned bands -- the structural gate
 
 
-def gate_registration(reg, min_band_correlation: float = 0.80,
+def gate_registration(reg, min_band_correlation: float = 0.60,
                       warn_quality: float = 1.15) -> str:
     """The canvas-premise gate shared by video recompose and still stitch.
 

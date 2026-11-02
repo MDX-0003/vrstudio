@@ -67,7 +67,7 @@ def _gate(reg: RegistrationReport, conf) -> str:
     """
     return gate_registration(
         reg,
-        float(conf.get("recompose.min_band_correlation", 0.80)),
+        float(conf.get("recompose.min_band_correlation", 0.60)),
         float(conf.get("recompose.warn_quality", 1.15)),
     )
 
