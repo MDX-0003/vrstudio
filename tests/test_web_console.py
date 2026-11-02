@@ -351,6 +351,12 @@ def test_file_route_serves_each_whitelist_root(client, tmp_path, monkeypatch):
     src = client.get("/file", params={"root": "sources", "p": "src.mp4"})
     assert src.status_code == 200 and src.content == b"source"
 
+    download = client.get("/file", params={"root": "cases", "p": "c1/clip_mask.png",
+                                           "download": "1"})
+    assert download.status_code == 200
+    assert download.headers["content-disposition"].startswith("attachment")
+    assert 'filename="clip_mask.png"' in download.headers["content-disposition"]
+
 
 def test_file_route_supports_range(client, tmp_path, monkeypatch):
     _file_roots(tmp_path, monkeypatch)

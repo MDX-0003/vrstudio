@@ -445,17 +445,21 @@ def _file_target(token: str, raw: str) -> Path | None:
 
 
 async def file_open(request):
-    """``GET /file?root=<cases|sources|workdir>&p=<根内相对路径>``：只读原片。"""
+    """``GET /file?root=<cases|sources|workdir>&p=<根内相对路径>``：只读原片。
+
+    ``download=1`` 时按附件下发（浏览器直接落盘）；不带参数仍是内联打开。
+    """
     target = _file_target(request.query_params.get("root", ""),
                           request.query_params.get("p", ""))
     if target is None:
         return JSONResponse({"error": "not found"}, status_code=404)
+    download = (request.query_params.get("download") or "").lower() in ("1", "true", "yes")
     response = FileResponse(
         str(target),
         media_type=_FILE_MEDIA_TYPES.get(target.suffix.lower(),
                                          "application/octet-stream"),
         filename=target.name,
-        content_disposition_type="inline",
+        content_disposition_type="attachment" if download else "inline",
     )
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response

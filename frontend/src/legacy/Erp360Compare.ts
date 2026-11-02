@@ -31,13 +31,16 @@ const FOV_MIN = (30 * Math.PI) / 180
 const FOV_MAX = (120 * Math.PI) / 180
 const PITCH_MAX = (89 * Math.PI) / 180
 
+/** 两路纹理的来源：视频按帧去重，静态图只上传一次。 */
+export type ErpSource = HTMLVideoElement | HTMLImageElement
+
 /**
- * 对比页的 360° 全景观看器：一块画布画两路 ERP 视频，分割线右侧用成片覆盖。
+ * 对比页的 360° 全景观看器：一块画布画两路 ERP（视频或静态图），分割线右侧用成片覆盖。
  * 着色器与双路时钟对齐从旧前端原样迁入，不在这里改投影规则。
  */
 export class Erp360Compare {
   private canvas: HTMLCanvasElement
-  private videos: [HTMLVideoElement, HTMLVideoElement]
+  private sources: [ErpSource, ErpSource]
   private gl: WebGLRenderingContext | null = null
   private textures: WebGLTexture[] = []
   private lastKey = ['', '']
@@ -45,6 +48,7 @@ export class Erp360Compare {
   private raf = 0
   private observer: ResizeObserver | null = null
   private dragging: { x: number; y: number } | null = null
+  private scratch: HTMLCanvasElement | null = null
   private onPointerDown = (event: PointerEvent): void => {
     this.dragging = { x: event.clientX, y: event.clientY }
     this.canvas.setPointerCapture(event.pointerId)
@@ -72,9 +76,9 @@ export class Erp360Compare {
   pitch = 0
   fovH = (90 * Math.PI) / 180
 
-  constructor(canvas: HTMLCanvasElement, videoA: HTMLVideoElement, videoB: HTMLVideoElement) {
+  constructor(canvas: HTMLCanvasElement, sourceA: ErpSource, sourceB: ErpSource) {
     this.canvas = canvas
-    this.videos = [videoA, videoB]
+    this.sources = [sourceA, sourceB]
     this.gl = canvas.getContext('webgl')
     if (!this.gl) return
     this.init()
@@ -146,7 +150,7 @@ export class Erp360Compare {
     gl.enableVertexAttribArray(aPos)
     gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0)
     gl.uniform1i(this.loc.uTex, 0)
-    this.textures = this.videos.map(() => {
+    this.textures = this.sources.map(() => {
       const texture = gl.createTexture()
       gl.bindTexture(gl.TEXTURE_2D, texture)
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
@@ -167,17 +171,46 @@ export class Erp360Compare {
     }
   }
 
+  /** 源可上传时的真实尺寸；视频等帧、静态图等解码完成。 */
+  private readySize(source: ErpSource): [number, number] | null {
+    if (source instanceof HTMLVideoElement) {
+      if (!source.videoWidth || source.readyState < 2) return null
+      // seek 进行中 currentTime 已跳到目标值但元素里还是旧帧，等 seek 完成再传。
+      if (source.seeking) return null
+      return [source.videoWidth, source.videoHeight]
+    }
+    if (!source.complete || !source.naturalWidth) return null
+    return [source.naturalWidth, source.naturalHeight]
+  }
+
   private upload(index: number): void {
     const gl = this.gl
-    const video = this.videos[index]
-    if (!gl || !video.videoWidth || video.readyState < 2) return
-    // seek 进行中 currentTime 已跳到目标值但元素里还是旧帧，等 seek 完成再传。
-    if (video.seeking) return
-    const key = `${video.currentSrc}:${video.currentTime}`
-    if (key === this.lastKey[index]) return
+    const source = this.sources[index]
+    if (!gl) return
+    const size = this.readySize(source)
+    if (!size) return
+    const key = source instanceof HTMLVideoElement
+      ? `${source.currentSrc}:${source.currentTime}`
+      : (source.currentSrc || source.src)
+    if (!key || key === this.lastKey[index]) return
     this.lastKey[index] = key
     gl.bindTexture(gl.TEXTURE_2D, this.textures[index])
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video)
+    const [width, height] = size
+    // 超过 MAX_TEXTURE_SIZE 的源当纹理上传会失败（8K 图在 8192 上限的 GPU 上正好边界，
+    // 9558 宽的 padded 画布必然超限）：按比例降采样到离屏 canvas 再上传。
+    const max = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 0
+    if (max > 0 && (width > max || height > max)) {
+      const scale = Math.min(max / width, max / height)
+      const canvas = this.scratch ?? (this.scratch = document.createElement('canvas'))
+      canvas.width = Math.max(1, Math.floor(width * scale))
+      canvas.height = Math.max(1, Math.floor(height * scale))
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+      ctx.drawImage(source, 0, 0, canvas.width, canvas.height)
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas)
+      return
+    }
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source)
   }
 
   private frame(): void {

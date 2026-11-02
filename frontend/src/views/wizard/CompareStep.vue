@@ -18,18 +18,29 @@ const relightStill = computed(
 )
 /** 「静态并排」这一类：图片两条流程与图片底版的 relight。 */
 const isStill = computed(() => isImageFlow.value || relightStill.value)
-const isPatchImg = computed(() => props.info.flow === 'patchimg')
 const sourceImageUrl = computed(() =>
   relightStill.value
     ? (props.info.relight?.gt?.entry.open_url ?? '')
     : (props.info.source_file?.open_url ?? ''),
 )
+const outputs = computed<OutputFile[]>(() => props.info.outputs)
+const selectedFile = ref<string>('')
+const selected = computed(
+  () => outputs.value.find((item) => item.file === selectedFile.value) ?? null,
+)
+/**
+ * 右路成片：图片流程与视频一样选「最新一份」，下拉可切；relight 图片底版用当前采用物。
+ * 旧实现直接取 outputs[0]（升序第一份，即最旧一份），跑过多轮 merge 的 case 会看错图。
+ */
 const imageOutput = computed(() =>
-  isRelight.value
-    ? (props.info.relight?.current ?? null)
-    : (props.info.outputs[0] ?? null),
+  isRelight.value ? (props.info.relight?.current ?? null) : (selected.value ?? null),
 )
 const outputImageUrl = computed(() => imageOutput.value?.open_url ?? '')
+/** 「打开原图」新标签直开，「下载」带 download=1 走 attachment。 */
+const imageOpenUrl = computed(() => outputImageUrl.value)
+const imageDownloadUrl = computed(() =>
+  outputImageUrl.value ? `${outputImageUrl.value}&download=1` : '',
+)
 /** 左路标签：relight 播/比的是底版，不是「源片」。 */
 const leftLabel = computed(() => (isRelight.value ? '底版' : '源片'))
 const fullReport = computed<FullRedrawImageReport | null>(() =>
@@ -37,14 +48,7 @@ const fullReport = computed<FullRedrawImageReport | null>(() =>
     ? ((props.info.image_report as FullRedrawImageReport) ?? null)
     : null,
 )
-const zoom = ref(100)
-const diffOn = ref(false)
-const diffBusy = ref(false)
-const paneA = ref<HTMLElement | null>(null)
-const paneB = ref<HTMLElement | null>(null)
-const diffCanvas = ref<HTMLCanvasElement | null>(null)
 
-const selectedFile = ref<string>('')
 const sourceProxy = ref(props.info.proxy?.state ?? 'missing')
 const sourceProxyWidth = ref<number | null>(props.info.proxy?.width ?? null)
 const outputProxy = ref('missing')
@@ -66,10 +70,6 @@ let proxyTimer: ReturnType<typeof setInterval> | null = null
 let sourceWasReady = false
 let outputWasReady = false
 
-const outputs = computed<OutputFile[]>(() => props.info.outputs)
-const selected = computed(
-  () => outputs.value.find((item) => item.file === selectedFile.value) ?? null,
-)
 const sourceUrl = computed(() =>
   quality.value === 'proxy' && sourceProxy.value === 'ready'
     ? `/video/proxy/${encodeURIComponent(props.caseName)}`
@@ -288,83 +288,35 @@ function stopProxyPolling(): void {
 }
 
 function initViewer(): void {
-  if (!canvas.value || !videoA.value || !videoB.value) return
+  if (!canvas.value) return
+  const a = isStill.value ? imageA : videoA.value
+  const b = isStill.value ? imageB : videoB.value
+  if (!a || !b) return
   viewer?.destroy()
-  viewer = new Erp360Compare(canvas.value, videoA.value, videoB.value)
+  viewer = new Erp360Compare(canvas.value, a, b)
   viewerError.value = viewer.supported ? '' : '这个浏览器不支持 WebGL，全景对比看不了'
   viewer.setSplit(split.value / 100)
 }
 
-/** 左右两栏共用缩放倍数与滚动位置，保证同一坐标在两边指的是同一个画面点。 */
-function syncPaneScroll(event: Event): void {
-  const from = event.target as HTMLElement
-  const other = from === paneA.value ? paneB.value : paneA.value
-  if (!other) return
-  other.scrollLeft = from.scrollLeft
-  other.scrollTop = from.scrollTop
+/**
+ * 静态图的两路来源不进 DOM：直接交给 WebGL 查看器当纹理，图片 `complete` 后
+ * 只在第一帧上传一次。换图或换成片时重建查看器。
+ */
+let imageA: HTMLImageElement | null = null
+let imageB: HTMLImageElement | null = null
+
+function loadSource(src: string): HTMLImageElement | null {
+  if (!src) return null
+  const image = new Image()
+  image.src = src
+  return image
 }
 
-function loadImage(src: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const image = new Image()
-    image.onload = () => resolve(image)
-    image.onerror = () => reject(new Error('图片加载失败'))
-    image.src = src
-  })
+function initStillViewer(): void {
+  imageA = loadSource(sourceImageUrl.value)
+  imageB = loadSource(outputImageUrl.value)
+  initViewer()
 }
-
-/** 差异高亮：两张同源同尺寸图按显示尺寸采样后逐像素求差并着色，避免整图放大占内存。 */
-async function drawDiff(): Promise<void> {
-  const canvasEl = diffCanvas.value
-  if (!diffOn.value || !canvasEl || !sourceImageUrl.value || !outputImageUrl.value) return
-  diffBusy.value = true
-  try {
-    const [a, b] = await Promise.all([
-      loadImage(sourceImageUrl.value),
-      loadImage(outputImageUrl.value),
-    ])
-    const width = Math.min(1200, a.naturalWidth || 1200)
-    const scale = width / (a.naturalWidth || width)
-    const height = Math.max(1, Math.round((a.naturalHeight || 1) * scale))
-    canvasEl.width = width
-    canvasEl.height = height
-    const ctx = canvasEl.getContext('2d')
-    if (!ctx) return
-    ctx.drawImage(a, 0, 0, width, height)
-    const base = ctx.getImageData(0, 0, width, height)
-    const tmp = document.createElement('canvas')
-    tmp.width = width
-    tmp.height = height
-    const tctx = tmp.getContext('2d')
-    if (!tctx) return
-    tctx.drawImage(b, 0, 0, width, height)
-    const other = tctx.getImageData(0, 0, width, height)
-    const data = base.data
-    const ref = other.data
-    for (let i = 0; i < data.length; i += 4) {
-      const diff = Math.max(
-        Math.abs(data[i] - ref[i]),
-        Math.abs(data[i + 1] - ref[i + 1]),
-        Math.abs(data[i + 2] - ref[i + 2]),
-      )
-      if (diff <= 10) continue
-      const alpha = Math.min(0.85, 0.2 + diff / 255)
-      // 差异越大越偏红：小差异偏黄，大差异直接压成红色。
-      data[i] = Math.round(data[i] * (1 - alpha) + 255 * alpha)
-      data[i + 1] = Math.round(data[i + 1] * (1 - alpha) + (diff > 96 ? 40 : 200) * alpha)
-      data[i + 2] = Math.round(data[i + 2] * (1 - alpha) + 40 * alpha)
-    }
-    ctx.putImageData(base, 0, 0)
-  } catch {
-    // 差异视图只是辅助信息；取图失败就保留原图。
-  } finally {
-    diffBusy.value = false
-  }
-}
-
-watch([diffOn, outputImageUrl, sourceImageUrl], () => {
-  if (diffOn.value) void nextTick(drawDiff)
-})
 
 watch(
   () => props.info.outputs,
@@ -381,17 +333,26 @@ watch(
 )
 
 watch(selectedFile, () => {
-  if (isStill.value) return
+  if (isStill.value) {
+    initStillViewer()
+    return
+  }
   outputProxy.value = 'missing'
   outputWasReady = false
   void ensureOutputProxy()
   startProxyPolling()
 })
 
+// case 刷新后源图或成片地址可能变化；静态图直接重建查看器。
+watch([sourceImageUrl, outputImageUrl], () => {
+  if (isStill.value) initStillViewer()
+})
+
 onMounted(async () => {
   await nextTick()
   if (isStill.value) {
     if (selected.value) selectedFile.value = selected.value.file
+    initStillViewer()
     return
   }
   if (selected.value) {
@@ -410,9 +371,8 @@ onUnmounted(() => {
 })
 
 function onKeydown(event: KeyboardEvent): void {
-  if (isStill.value) return
-  // 空格切播放/暂停；焦点在按钮等控件上时让控件自己处理，避免双触发。
-  if (event.code === 'Space') {
+  // 空格只服务视频播放；左右方向键调分割线两条路一致。
+  if (!isStill.value && event.code === 'Space') {
     const tag = (event.target as HTMLElement | null)?.tagName ?? ''
     if (['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(tag)) return
     event.preventDefault()
@@ -433,52 +393,136 @@ function onKeydown(event: KeyboardEvent): void {
       <el-empty description="还没有可对比的成片；先完成生成与合并" />
     </div>
 
-    <template v-else-if="isStill">
+    <template v-else>
       <div class="compare-top">
-        <span class="muted">{{ leftLabel }}</span>
-        <span class="muted">{{ imageOutput?.name ?? '交付图缺失' }}</span>
-        <label class="ctl">
-          <span>缩放</span>
-          <el-slider v-model="zoom" class="zoom-slider" :min="100" :max="400" :step="10" />
-          <span class="mono zoom-value">{{ zoom }}%</span>
+        <label v-if="isStill && !isRelight" class="ctl">
+          <span>右路成片</span>
+          <el-select
+            :model-value="selectedFile"
+            size="small"
+            style="width: 260px"
+            @update:model-value="onSelect"
+          >
+            <el-option
+              v-for="item in outputs"
+              :key="item.file"
+              :label="item.file"
+              :value="item.file"
+            />
+          </el-select>
         </label>
-        <el-switch
-          v-if="isPatchImg"
-          v-model="diffOn"
-          active-text="差异高亮"
-          :loading="diffBusy"
-        />
+        <template v-if="!isStill">
+          <label class="ctl">
+            <span>播放画质</span>
+            <el-select v-model="quality" size="small" style="width: 130px">
+              <el-option label="代理" value="proxy" />
+              <el-option label="原始分辨率" value="original" />
+            </el-select>
+          </label>
+          <span class="muted">左路：{{ sourceLabel }}</span>
+          <span class="muted">右路：{{ outputLabel }}</span>
+          <el-button
+            size="small"
+            :icon="Refresh"
+            @click="
+              () => {
+                void ensureSourceProxy()
+                void ensureOutputProxy()
+                startProxyPolling()
+              }
+            "
+          >
+            刷新代理
+          </el-button>
+        </template>
+        <template v-else>
+          <span class="muted">左路：{{ leftLabel }}</span>
+          <span class="muted">右路：{{ imageOutput?.name ?? '交付图缺失' }}</span>
+          <a
+            v-if="imageOpenUrl"
+            class="file-action"
+            :href="imageOpenUrl"
+            target="_blank"
+            rel="noopener"
+          >
+            打开原图
+          </a>
+          <a v-if="imageDownloadUrl" class="file-action" :href="imageDownloadUrl" download>
+            下载
+          </a>
+        </template>
       </div>
 
-      <div v-if="!outputImageUrl" class="panel">
+      <div v-if="isStill && !outputImageUrl" class="panel">
         <el-empty description="交付图还没有生成；先在拼接步出片" />
       </div>
-      <div v-else-if="diffOn && isPatchImg" class="diff-wrap">
-        <canvas ref="diffCanvas" class="diff-canvas" />
+      <template v-else>
+        <div class="compare-stage">
+          <template v-if="!isStill">
+            <video
+              ref="videoA"
+              :src="sourceUrl"
+              muted
+              loop
+              playsinline
+              preload="auto"
+              @loadedmetadata="onLoaded"
+              @timeupdate="syncFromMaster"
+              @seeked="syncFromMaster"
+              @play="onMasterPlay"
+              @pause="onMasterPause"
+            />
+            <video
+              ref="videoB"
+              :src="outputUrl"
+              muted
+              loop
+              playsinline
+              preload="auto"
+              @loadedmetadata="onFollowerLoaded"
+            />
+          </template>
+          <canvas ref="canvas" class="compare-canvas" />
+          <div
+            class="split-line"
+            :class="{ dragging: splitDragging }"
+            :style="{ left: `${split}%` }"
+            title="拖动调整分割线位置"
+            @pointerdown="onLineDown"
+            @pointermove="onLineMove"
+            @pointerup="onLineUp"
+            @pointercancel="onLineUp"
+          />
+          <div v-if="viewerError" class="viewer-error">{{ viewerError }}</div>
+        </div>
+
+        <div class="compare-bar">
+          <template v-if="!isStill">
+            <el-button :icon="playing ? VideoPause : VideoPlay" size="small" @click="togglePlay">
+              {{ playing ? '暂停' : '播放' }}
+            </el-button>
+            <el-slider
+              :model-value="currentTime"
+              :min="0"
+              :max="duration || 0"
+              :show-tooltip="false"
+              class="time-slider"
+              @update:model-value="onSeek"
+            />
+            <span class="mono muted">{{ timeText }}</span>
+          </template>
+          <el-button size="small" @click="resetView">视角复位</el-button>
+          <el-button size="small" :icon="FullScreen" @click="toggleFullscreen">全屏</el-button>
+        </div>
         <p class="muted hint">
-          差异图以源图为底，差异越大越偏红；同源同尺寸逐像素比较，按显示宽度采样。
+          <template v-if="isStill">
+            拖动画面转头，滚轮变焦；在画面上左右拖动分割线调整对比位置（左右方向键微调）。两侧是同一套视角，分割线左右各显示一张图。
+          </template>
+          <template v-else>
+            拖动画面转头，滚轮变焦，空格播放/暂停；在画面上左右拖动分割线调整对比位置（左右方向键微调）。两路自动循环播放，共用同一组视角与时钟。
+          </template>
         </p>
-      </div>
-      <div v-else class="image-compare">
-        <div ref="paneA" class="image-pane" @scroll="syncPaneScroll">
-          <img
-            v-if="sourceImageUrl"
-            :src="sourceImageUrl"
-            alt="源图"
-            :style="{ width: `${zoom}%` }"
-            draggable="false"
-          />
-          <span v-else class="muted">{{ leftLabel }}直开地址缺失</span>
-        </div>
-        <div ref="paneB" class="image-pane" @scroll="syncPaneScroll">
-          <img
-            :src="outputImageUrl"
-            alt="交付图"
-            :style="{ width: `${zoom}%` }"
-            draggable="false"
-          />
-        </div>
-      </div>
+      </template>
 
       <div v-if="fullReport" class="seam-box">
         <div class="seam-head">
@@ -495,106 +539,6 @@ function onKeydown(event: KeyboardEvent): void {
           {{ fullReport.reasons.length ? fullReport.reasons.join('；') : '没有接缝告警。' }}
         </p>
       </div>
-    </template>
-
-    <template v-else>
-      <div class="compare-top">
-        <label class="ctl">
-          <span>右路成片</span>
-          <el-select
-            :model-value="selectedFile"
-            size="small"
-            style="width: 260px"
-            @update:model-value="onSelect"
-          >
-            <el-option
-              v-for="item in outputs"
-              :key="item.file"
-              :label="item.file"
-              :value="item.file"
-            />
-          </el-select>
-        </label>
-        <label class="ctl">
-          <span>播放画质</span>
-          <el-select v-model="quality" size="small" style="width: 130px">
-            <el-option label="代理" value="proxy" />
-            <el-option label="原始分辨率" value="original" />
-          </el-select>
-        </label>
-        <span class="muted">左路：{{ sourceLabel }}</span>
-        <span class="muted">右路：{{ outputLabel }}</span>
-        <el-button
-          size="small"
-          :icon="Refresh"
-          @click="
-            () => {
-              void ensureSourceProxy()
-              void ensureOutputProxy()
-              startProxyPolling()
-            }
-          "
-        >
-          刷新代理
-        </el-button>
-      </div>
-
-      <div class="compare-stage">
-        <video
-          ref="videoA"
-          :src="sourceUrl"
-          muted
-          loop
-          playsinline
-          preload="auto"
-          @loadedmetadata="onLoaded"
-          @timeupdate="syncFromMaster"
-          @seeked="syncFromMaster"
-          @play="onMasterPlay"
-          @pause="onMasterPause"
-        />
-        <video
-          ref="videoB"
-          :src="outputUrl"
-          muted
-          loop
-          playsinline
-          preload="auto"
-          @loadedmetadata="onFollowerLoaded"
-        />
-        <canvas ref="canvas" class="compare-canvas" />
-        <div
-          class="split-line"
-          :class="{ dragging: splitDragging }"
-          :style="{ left: `${split}%` }"
-          title="拖动调整分割线位置"
-          @pointerdown="onLineDown"
-          @pointermove="onLineMove"
-          @pointerup="onLineUp"
-          @pointercancel="onLineUp"
-        />
-        <div v-if="viewerError" class="viewer-error">{{ viewerError }}</div>
-      </div>
-
-      <div class="compare-bar">
-        <el-button :icon="playing ? VideoPause : VideoPlay" size="small" @click="togglePlay">
-          {{ playing ? '暂停' : '播放' }}
-        </el-button>
-        <el-slider
-          :model-value="currentTime"
-          :min="0"
-          :max="duration || 0"
-          :show-tooltip="false"
-          class="time-slider"
-          @update:model-value="onSeek"
-        />
-        <span class="mono muted">{{ timeText }}</span>
-        <el-button size="small" @click="resetView">视角复位</el-button>
-        <el-button size="small" :icon="FullScreen" @click="toggleFullscreen">全屏</el-button>
-      </div>
-      <p class="muted hint">
-        拖动画面转头，滚轮变焦，空格播放/暂停；在画面上左右拖动分割线调整对比位置（左右方向键微调）。两路自动循环播放，共用同一组视角与时钟。
-      </p>
     </template>
   </div>
 </template>
@@ -699,46 +643,21 @@ function onKeydown(event: KeyboardEvent): void {
   font-size: var(--text-xs);
 }
 
-.image-compare {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-3);
-}
-
-.image-pane {
-  height: min(66vh, 720px);
-  overflow: auto;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  background: var(--color-video-bg);
-}
-
-.image-pane img {
-  display: block;
-  max-width: none;
-  cursor: zoom-in;
-}
-
-.diff-wrap {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.diff-canvas {
-  display: block;
-  width: 100%;
-  border-radius: var(--radius-lg);
-  background: var(--color-video-bg);
-}
-
-.zoom-slider {
-  width: 160px;
-}
-
-.zoom-value {
-  min-width: 48px;
+/* 「打开原图 / 下载」：与 el-button small 同尺寸，语义仍是链接（新标签/下载）。 */
+.file-action {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 12px;
+  border: 1px solid var(--el-border-color);
+  border-radius: var(--el-border-radius-base);
+  color: var(--color-text);
   font-size: var(--text-xs);
+  text-decoration: none;
+}
+
+.file-action:hover {
+  border-color: var(--el-color-primary);
+  color: var(--el-color-primary);
 }
 
 .seam-box {
@@ -759,12 +678,6 @@ function onKeydown(event: KeyboardEvent): void {
 
 .seam-box .hint {
   margin-top: var(--space-2);
-}
-
-@media (max-width: 900px) {
-  .image-compare {
-    grid-template-columns: 1fr;
-  }
 }
 
 .compare-page:fullscreen {
