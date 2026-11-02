@@ -14,6 +14,11 @@ interface RelightReport {
   size: [number, number]
   frames?: number
   fps?: string
+  kind?: 'sample' | 'full'
+  started_at?: string
+  finished_at?: string
+  cache?: { enabled?: boolean; hit?: boolean; load?: number }
+  timing?: Record<string, number>
   ref_frame?: number
   ref_matched?: number
   align: {
@@ -48,6 +53,7 @@ const emit = defineEmits<{ updated: [data: CaseInfo] }>()
 const { latest, start } = useCaseTasks(computed(() => props.caseName), ['relight'])
 const running = ref('')
 const report = ref<RelightReport | null>(null)
+const sampleReport = ref<RelightReport | null>(null)
 const reportError = ref('')
 let startedAt = 0
 
@@ -108,14 +114,79 @@ async function loadReport(): Promise<void> {
   }
 }
 
+async function loadSampleReport(): Promise<void> {
+  sampleReport.value = null
+  const url = payload.value?.sample_report?.open_url
+  if (!url) return
+  try {
+    sampleReport.value = await getJson<RelightReport>(url)
+  } catch {
+    // 老小样可能没有报告；时间戳仍可从素材文件名或 mtime 回退。
+  }
+}
+
+/** 时间戳是本页的重点：运行什么时候发生，比分段数字更先被看到。 */
+function formatDate(date: Date): string {
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
+    + `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+function formatTime(iso?: string): string {
+  if (!iso) return ''
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? iso : formatDate(date)
+}
+
+function reportTime(r: RelightReport | null, fallbackMtime?: number | null): string {
+  if (r?.started_at) return formatTime(r.started_at)
+  if (fallbackMtime) return formatDate(new Date(fallbackMtime * 1000))
+  return '时间未知'
+}
+
+const TIMING_LABELS: Record<string, string> = {
+  cache_load: '缓存读取',
+  scan: '选帧扫描',
+  read: '参考帧解码',
+  align: '相似变换',
+  fields: '光照场',
+  sample_decode: '小样解码',
+  sample_compose: '小样合成',
+  sample_write: '小样写图',
+  render_decode: '渲染解码',
+  render_compose: '渲染合成',
+  render_write: '编码写入',
+  render_flush: '编码收尾',
+}
+
+function timingRows(r: RelightReport | null): Array<{ label: string; value: string }> {
+  const timing = r?.timing
+  if (!timing) return []
+  return Object.entries(TIMING_LABELS)
+    .filter(([key]) => typeof timing[key] === 'number' && timing[key] > 0)
+    .map(([key, label]) => ({ label, value: timing[key].toFixed(2) }))
+}
+
+function timingSummary(r: RelightReport | null): string {
+  const rows = timingRows(r).map((item) => `${item.label} ${item.value}s`)
+  return rows.join(' · ')
+}
+
+function cacheLabel(cache?: { enabled?: boolean; hit?: boolean } | null): string {
+  if (!cache?.enabled) return '未启用缓存'
+  return cache.hit ? '命中缓存' : '未命中缓存'
+}
+
 onMounted(() => {
   applyDraft()
   void start()
   void loadReport()
+  void loadSampleReport()
 })
 
 watch(draft, applyDraft)
 watch(current, () => void loadReport())
+watch(() => payload.value?.sample_report?.open_url, () => void loadSampleReport())
 
 function runPayload() {
   const body: Record<string, string | number | boolean> = {
@@ -272,7 +343,17 @@ const percent = (value: number | undefined): string =>
         </div>
 
         <div v-if="samples.length" class="samples">
-          <h3>小样（{{ samples.length }} 帧）</h3>
+          <h3>
+            小样（{{ samples.length }} 帧）
+            <span class="run-time">
+              {{ reportTime(sampleReport, samples[0]?.mtime) }}
+            </span>
+          </h3>
+          <p v-if="sampleReport" class="timing-line mono">
+            总耗时 {{ sampleReport.seconds }}s
+            <span> · {{ cacheLabel(sampleReport.cache) }}</span>
+            <span v-if="timingSummary(sampleReport)"> · {{ timingSummary(sampleReport) }}</span>
+          </p>
           <div class="sample-strip">
             <a
               v-for="file in samples"
@@ -317,7 +398,10 @@ const percent = (value: number | undefined): string =>
 
     <section class="panel">
       <div class="panel-head">
-        <h2 class="panel-title">上次运行</h2>
+        <h2 class="panel-title">
+          上次运行
+          <span v-if="current" class="run-time">{{ reportTime(report, current.mtime) }}</span>
+        </h2>
         <el-button link type="primary" :icon="Refresh" @click="loadReport">刷新报告</el-button>
       </div>
       <div class="panel-body">
@@ -326,6 +410,15 @@ const percent = (value: number | undefined): string =>
         </div>
         <template v-else>
           <div v-if="report?.align" class="report-grid mono">
+            <span>运行时间</span>
+            <span>
+              {{ reportTime(report, current.mtime) }}
+              <template v-if="report.finished_at"> → {{ formatTime(report.finished_at) }}</template>
+            </span>
+            <template v-if="report.cache">
+              <span>缓存</span>
+              <span>{{ cacheLabel(report.cache) }}</span>
+            </template>
             <span>对齐内点 / 匹配</span>
             <span>{{ report.align.inliers }} / {{ report.align.matches }}</span>
             <span>缩放 · 旋转</span>
@@ -351,6 +444,9 @@ const percent = (value: number | undefined): string =>
             <span>耗时</span>
             <span>{{ report.seconds }}s</span>
           </div>
+          <p v-if="timingSummary(report)" class="timing-line mono">
+            分段耗时：{{ timingSummary(report) }}
+          </p>
           <el-alert
             v-if="reportError"
             type="warning"
@@ -469,6 +565,19 @@ const percent = (value: number | undefined): string =>
 .samples h3 {
   margin: 0 0 var(--space-2);
   font-size: var(--text-sm);
+}
+
+.run-time {
+  margin-left: var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: 400;
+  color: var(--color-text-muted);
+}
+
+.timing-line {
+  margin: var(--space-1) 0 var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
 }
 
 .sample-strip {

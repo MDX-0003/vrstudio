@@ -256,6 +256,8 @@ export interface RelightPayload {
   current: FileInfo | null
   current_report: FileInfo | null
   samples: FileInfo[]
+  /** 最近一次小样的报告 JSON；老小样没有报告时为 null。 */
+  sample_report: FileInfo | null
 }
 
 export interface StepFiles {

@@ -24,6 +24,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import closing
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import NoReturn
 
@@ -65,6 +66,11 @@ app = typer.Typer(add_completion=False, help=__doc__)
 
 SCENE_PRESETS = {"night": (1.0, 0.35), "day": (0.8, 0.2)}
 """场景预设只给默认值：夜戏 1.0/0.35，日光 0.8/0.2（实测 strength 1.0 过曝 8.9%）。"""
+
+
+def _now() -> datetime:
+    """当前本地时间（带时区）；报告时间戳与产物文件名同源。"""
+    return datetime.now().astimezone()
 
 
 def _param_error(message: str) -> NoReturn:
@@ -153,6 +159,26 @@ class FixedLight:
 
 
 @dataclass(frozen=True)
+class SetupTiming:
+    """固定光照准备各阶段耗时（秒）：选帧、参考帧解码、匹配、光照场。"""
+
+    cache_hit: bool
+    scan: float
+    read: float
+    align: float
+    fields: float
+
+
+@dataclass(frozen=True)
+class ResolvedReference:
+    """定下的固定光照、是否来自缓存，以及准备阶段的计时。"""
+
+    fixed: FixedLight
+    from_cache: bool
+    timing: SetupTiming
+
+
+@dataclass(frozen=True)
 class RelightInputs:
     """一次 relight 的输入与缓存身份。
 
@@ -215,7 +241,7 @@ def _read_frame(open_frames: Callable[..., Iterator[np.ndarray]],
 def resolve_reference(open_frames: Callable[..., Iterator[np.ndarray]], atmo,
                       width: int, ref_frame: int | None, log: Log,
                       *, cached: relight_cache.CachedFixed | None = None
-                      ) -> tuple[FixedLight, bool]:
+                      ) -> ResolvedReference:
     """挑参考帧、定变换与光照场；命中缓存时跳过选帧扫描与 SIFT。
 
     ``open_frames`` 每次调用打开一遍视频、返回逐帧迭代器；传 ``index`` 时按帧号
@@ -224,22 +250,30 @@ def resolve_reference(open_frames: Callable[..., Iterator[np.ndarray]], atmo,
     最佳帧的原分辨率图，光照场直接用它，避免再从片头解码到参考帧。
 
     ``cached`` 命中时不再扫描、不做 SIFT，只按缓存的参考帧取一帧并重算光照场；
-    返回值第二项表示是否用了缓存，供调用方决定是否写回。
+    返回值里的 ``from_cache`` 供调用方决定是否写回，``timing`` 是各阶段耗时。
     """
     if cached is not None:
+        read_start = time.perf_counter()
         reference = _read_frame(open_frames, cached.ref_frame)
+        read = time.perf_counter() - read_start
         if reference is not None:
             log.info(f"reference: frame {cached.ref_frame} (cached), "
                      f"structure {cached.ref_matched:.3f}")
+            fields_start = time.perf_counter()
             fields = estimate_fields(reference, warp_to_gt(atmo, cached.alignment))
-            return FixedLight(alignment=cached.alignment, fields=fields,
-                              ref_frame=cached.ref_frame,
-                              ref_matched=cached.ref_matched), True
+            fields_s = time.perf_counter() - fields_start
+            return ResolvedReference(
+                fixed=FixedLight(alignment=cached.alignment, fields=fields,
+                                 ref_frame=cached.ref_frame,
+                                 ref_matched=cached.ref_matched),
+                from_cache=True,
+                timing=SetupTiming(cache_hit=True, scan=0.0, read=read,
+                                   align=0.0, fields=fields_s))
         log.warn(f"缓存的参考帧 {cached.ref_frame} 在视频里取不到；重新选帧。")
 
+    setup_start = time.perf_counter()
     atmo_gray = gray8(reference_small(atmo, width)).astype(np.float32)
-    # 扫描在 90 帧就 break，生成器不会被消费到底；不显式 close 的话它停在
-    # ``with FrameReader`` 里面，那一路 ffmpeg 会一直挂着并占住 4–5 GB（8K 实测）。
+    read = 0.0
     if ref_frame is None:
         # 扫描在 90 帧就 break，生成器不会被消费到底；不显式 close 的话它停在
         # ``with FrameReader`` 里面，那一路 ffmpeg 会一直挂着并占住 4–5 GB（8K 实测）。
@@ -267,13 +301,16 @@ def resolve_reference(open_frames: Callable[..., Iterator[np.ndarray]], atmo,
     else:
         if ref_frame < 0:
             _param_error(f"--ref-frame 必须从 0 起，收到 {ref_frame}")
+        read_start = time.perf_counter()
         reference = _read_frame(open_frames, ref_frame)
+        read = time.perf_counter() - read_start
         if reference is None:
             _param_error(f"--ref-frame {ref_frame} 超出视频帧数")
         ref_index = ref_frame
         ref_small = reference_small(reference, width)
         score = structure_score(gray8(ref_small), atmo_gray)
         log.info(f"reference: frame {ref_index}, structure {score:.3f}")
+    scan = max(0.0, time.perf_counter() - setup_start - read)
     if score < MIN_STRUCTURE_CORRELATION:
         # 只提示，不在这里中断：这一项是「未对齐」的带通相关，几像素的平移就能把它
         # 压到 0（实测拼接后的氛围图有 −9 px 位移，相关从 0.55 掉到 −0.01），而
@@ -282,10 +319,18 @@ def resolve_reference(open_frames: Callable[..., Iterator[np.ndarray]], atmo,
         log.warn(f"参考帧与氛围图未对齐时的结构重合度只有 {score:.3f}；"
                  f"按对齐后的重合度判定。")
 
+    align_start = time.perf_counter()
     alignment = estimate_similarity(ref_small, atmo)
+    align = time.perf_counter() - align_start
+    fields_start = time.perf_counter()
     fields = estimate_fields(reference, warp_to_gt(atmo, alignment))
-    return FixedLight(alignment=alignment, fields=fields, ref_frame=ref_index,
-                      ref_matched=score), False
+    fields_s = time.perf_counter() - fields_start
+    return ResolvedReference(
+        fixed=FixedLight(alignment=alignment, fields=fields, ref_frame=ref_index,
+                         ref_matched=score),
+        from_cache=False,
+        timing=SetupTiming(cache_hit=False, scan=scan, read=read,
+                           align=align, fields=fields_s))
 
 
 def _write_report(report: Path | None, summary: dict) -> None:
@@ -300,16 +345,23 @@ def _write_report(report: Path | None, summary: dict) -> None:
     typer.echo(f"report -> {report}")
 
 
-def _video_report(fixed: FixedLight, base: dict, frames: int, fps: str,
+def _video_report(fixed: FixedLight, base: dict, frames: int, fps: str, *,
+                  kind: str, started_at: datetime, finished_at: datetime,
+                  cache: dict, timing: dict,
                   sample: dict | None = None) -> dict:
-    """视频版报告：``clip``/``light`` 与图像版同构，新增帧数、帧率与参考帧。
+    """视频版报告：``clip``/``light`` 与图像版同构，新增帧数、帧率、参考帧与计时。
 
-    ``sample`` 只在 ``--sample`` 时出现，记录小样的采样帧号；整段执行时该键不存在，
-    所以整段报告仍然是决策 56 定的那一组字段（决策 64 删掉了同位检查的两项）。
+    ``sample`` 只在 ``--sample`` 时出现，记录小样的采样帧号。``kind``/``started_at``/
+    ``finished_at``/``cache``/``timing`` 是决策 65 的运行记录：前端重点显示时间戳，
+    分段耗时作为次要信息。
     """
     summary = {
         "gt": base["gt"], "atmo": base["atmo"], "size": base["size"],
         "frames": frames, "fps": fps,
+        "kind": kind,
+        "started_at": started_at.isoformat(timespec="seconds"),
+        "finished_at": finished_at.isoformat(timespec="seconds"),
+        "cache": cache, "timing": timing,
         "ref_frame": fixed.ref_frame, "ref_matched": round(fixed.ref_matched, 4),
         "params": base["params"], "align": base["align"],
         "clip": base["clip"], "light": base["light"], "seconds": base["seconds"],
@@ -409,33 +461,51 @@ def _sample_indices(frames: int, count: int) -> list[int]:
     return sorted(set(indices))
 
 
+@dataclass(frozen=True)
+class SampleOutput:
+    """小样输出与三段累计耗时（秒）：seek 解码、合成、写图。"""
+
+    paths: list[Path]
+    decode: float
+    compose: float
+    write: float
+
+
 def _write_samples(out_dir: Path, info, conf, light, indices: list[int],
-                   params: Params, log: Log) -> list[Path]:
+                   params: Params, log: Log) -> SampleOutput:
     """按时间点 seek 逐帧取图：只解码被采样的那几帧，不整段解码。"""
     if out_dir.exists() and not out_dir.is_dir():
         _param_error(f"--sample 要求 --out 是目录，但它是文件：{out_dir}")
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
+    decode = compose = write = 0.0
     for index in indices:
         seek = index / info.fps_float if info.fps_float > 0 else 0.0
+        decode_start = time.perf_counter()
         with FrameReader(info, conf, seek=seek, count=1) as reader:
             frame = next(iter(reader), None)
+        decode += time.perf_counter() - decode_start
         if frame is None:
             log.warn(f"第 {index} 帧取不到（seek {seek:.3f}s），跳过")
             continue
+        compose_start = time.perf_counter()
         relit = light.apply(np.ascontiguousarray(frame))
         if params.highlight_clip:
             relit = soft_clip(relit, params.clip_knee, params.clip_max)
+        compose += time.perf_counter() - compose_start
         path = out_dir / f"sample_{index:06d}.png"
+        write_start = time.perf_counter()
         write_png(path, relit)
+        write += time.perf_counter() - write_start
         written.append(path)
         log.info(f"sample: frame {index} -> {path.name}")
-    return written
+    return SampleOutput(paths=written, decode=decode, compose=compose, write=write)
 
 
 def _relight_video(inputs: RelightInputs, params: Params, conf,
                    log: Log, *, ref_frame: int | None, sample: int | None,
-                   crf: int | None, started: float) -> None:
+                   crf: int | None, started: float,
+                   started_at: datetime) -> None:
     """整段路径：对齐与光照场只估一次，整段逐帧复用；``--sample`` 时只写采样帧。"""
     video_cfg = dict(conf.video, **({"crf": crf} if crf is not None else {}))
     try:
@@ -477,6 +547,7 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
 
     cached = None
     cache_key = None
+    cache_load = 0.0
     if inputs.cache_file is not None:
         cache_key = relight_cache.CacheKey(
             gt_sha256=inputs.gt_sha256, gt_size=inputs.gt_size,
@@ -485,20 +556,23 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
             atmo_mtime_ns=inputs.atmo_mtime_ns,
             ref_frame="auto" if ref_frame is None else ref_frame,
         )
+        load_start = time.perf_counter()
         cached = relight_cache.load(inputs.cache_file, cache_key)
+        cache_load = time.perf_counter() - load_start
         if cached is not None:
             log.info(f"fixed: cache hit, reference frame {cached.ref_frame}")
         else:
             log.info("fixed: cache miss; scanning reference frame")
 
     try:
-        fixed, from_cache = resolve_reference(
+        resolved = resolve_reference(
             open_frames, atmo_image, width, ref_frame, log, cached=cached)
     except VideoIOError as exc:
         _runtime_error(str(exc))
+    fixed = resolved.fixed
     _check_alignment(fixed)
     if (inputs.cache_file is not None and cache_key is not None
-            and not from_cache):
+            and not resolved.from_cache):
         saved = relight_cache.save(
             inputs.cache_file, cache_key,
             relight_cache.CachedFixed(ref_frame=fixed.ref_frame,
@@ -507,6 +581,15 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
         if not saved:
             log.warn(f"fixed: 缓存写入失败，下次仍会重算：{inputs.cache_file}")
 
+    cache = {"enabled": inputs.cache_file is not None,
+             "hit": resolved.from_cache, "load": round(cache_load, 3)}
+    setup_timing = {
+        "scan": round(resolved.timing.scan, 3),
+        "read": round(resolved.timing.read, 3),
+        "align": round(resolved.timing.align, 3),
+        "fields": round(resolved.timing.fields, 3),
+    }
+
     light = light_compose(fixed.fields, (width, height), params.strength,
                           params.local_shading)
 
@@ -514,36 +597,68 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
         indices = _sample_indices(info.frames, sample)
         if not info.frames:
             log.warn("ffprobe 未报告帧数：小样从片头连续取，不是全片均匀采样")
-        written = _write_samples(inputs.out, info, conf, light, indices, params, log)
+        samples = _write_samples(inputs.out, info, conf, light, indices, params, log)
+        written = samples.paths
         if not written:
             _runtime_error("小样一帧都没写出来：GT 视频解码不出任何帧")
+        total = time.perf_counter() - started
         base = build_report(
             gt=str(inputs.gt), atmo=str(inputs.atmo), size=(width, height),
             params=params.as_dict(), align=align_report(fixed.alignment, width),
             clip=None, light=light_report(fixed.fields),
-            seconds=time.perf_counter() - started,
+            seconds=total,
         )
+        timing = {
+            "cache_load": round(cache_load, 3),
+            **setup_timing,
+            "sample_decode": round(samples.decode, 3),
+            "sample_compose": round(samples.compose, 3),
+            "sample_write": round(samples.write, 3),
+            "total": base["seconds"],
+        }
+        log.info("timing: " + ", ".join(f"{key}={value:.2f}s"
+                                        for key, value in timing.items()))
         typer.echo(f"wrote {len(written)} sample frames -> {inputs.out}")
         _write_report(inputs.report, _video_report(
             fixed, base, info.frames, info.fps,
+            kind="sample", started_at=started_at,
+            finished_at=started_at + timedelta(seconds=total),
+            cache=cache, timing=timing,
             sample={"count": len(written), "frames": indices}))
         return
 
     sample_out = None
     meter = RateMeter(info.frames or None, log)
     log.step("render pass")
+    render_decode = render_compose = render_write = 0.0
+    render_start = time.perf_counter()
+    loop_end = render_start
     try:
         with FrameWriter(inputs.out, info.size, info.fps, video_cfg,
                          audio_from=inputs.gt, config=conf) as writer:
             with FrameReader(info, conf) as reader:
-                for frame in reader:
+                reader_iter = iter(reader)
+                while True:
+                    decode_start = time.perf_counter()
+                    try:
+                        frame = next(reader_iter)
+                    except StopIteration:
+                        break
+                    render_decode += time.perf_counter() - decode_start
+                    compose_start = time.perf_counter()
                     relit = light.apply(np.ascontiguousarray(frame))
                     if writer.frames_written == fixed.ref_frame:
                         sample_out = relit
                     if params.highlight_clip:
                         relit = soft_clip(relit, params.clip_knee, params.clip_max)
+                    render_compose += time.perf_counter() - compose_start
+                    write_start = time.perf_counter()
                     writer.write(relit)
+                    render_write += time.perf_counter() - write_start
                     meter.tick()
+            loop_end = time.perf_counter()
+        render_flush = time.perf_counter() - loop_end
+        render_total = time.perf_counter() - render_start
         written = writer.frames_written
     except VideoIOError as exc:
         Path(inputs.out).unlink(missing_ok=True)
@@ -560,14 +675,31 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
         log.info(f"clip: over-exposure of the reference frame "
                  f"{clip_stats['clipped_before']}")
     meter.done()
+    total = time.perf_counter() - started
     base = build_report(
         gt=str(inputs.gt), atmo=str(inputs.atmo), size=(width, height),
         params=params.as_dict(), align=align_report(fixed.alignment, width),
         clip=clip_stats, light=light_report(fixed.fields),
-        seconds=time.perf_counter() - started,
+        seconds=total,
     )
+    timing = {
+        "cache_load": round(cache_load, 3),
+        **setup_timing,
+        "render_decode": round(render_decode, 3),
+        "render_compose": round(render_compose, 3),
+        "render_write": round(render_write, 3),
+        "render_flush": round(render_flush, 3),
+        "render_total": round(render_total, 3),
+        "total": base["seconds"],
+    }
+    log.info("timing: " + ", ".join(f"{key}={value:.2f}s"
+                                    for key, value in timing.items()))
     typer.echo(f"wrote {inputs.out}  ({meter.summary()})")
-    _write_report(inputs.report, _video_report(fixed, base, written, info.fps))
+    _write_report(inputs.report, _video_report(
+        fixed, base, written, info.fps,
+        kind="full", started_at=started_at,
+        finished_at=started_at + timedelta(seconds=total),
+        cache=cache, timing=timing))
 
 
 @app.command()
@@ -608,13 +740,15 @@ def relight(
 ) -> None:
     """把 AI 氛围图的光照搬到真 GT 上：图片出单帧，视频出整段（固定机位）。"""
     started = time.perf_counter()
+    started_at = _now()
     log = Log(quiet=quiet)
     strength, local_shading = resolve_params(scene, strength, local_shading)
     if highlight_clip and not 0.0 < clip_knee < clip_max <= 1.0:
         _param_error(f"软裁切参数须满足 0 < knee < max <= 1，"
                      f"收到 knee={clip_knee}，max={clip_max}")
 
-    inputs = _resolve_inputs(gt, atmo, out, case, cases_dir, sample, report)
+    inputs = _resolve_inputs(gt, atmo, out, case, cases_dir, sample, report,
+                             started_at)
 
     try:
         kind = kind_of(inputs.gt)
@@ -643,19 +777,20 @@ def relight(
     else:
         _relight_video(inputs, params, _conf(config, overrides), log,
                        ref_frame=ref_frame, sample=sample, crf=crf,
-                       started=started)
+                       started=started, started_at=started_at)
     if case:
         _record_into_case(case, cases_dir, inputs.out, sample is not None)
 
 
 def _resolve_inputs(gt: Path | None, atmo: Path | None, out: Path | None,
                     case: str | None, cases_dir: Path | None, sample: int | None,
-                    report: Path | None) -> RelightInputs:
+                    report: Path | None, started_at: datetime) -> RelightInputs:
     """把 ``--case`` 或三个显式路径解析成同一组入参。
 
     ``--case`` 只从两个槽位取文件，不接受同时给 ``--gt``/``--atmo``：一份文件有两个来源
     会让「case 里记的是哪张」变得含糊。产物位置也由 case 决定，所以 ``--out`` 同样不接受。
-    ``--case`` 模式额外带缓存身份；显式路径没有 ``cache_file``，不缓存。
+    ``--case`` 模式额外带缓存身份；显式路径没有 ``cache_file``，不缓存。产物文件名里的
+    时间戳取自命令开始时捕获的 ``started_at``，与报告里的 ``started_at`` 同源。
     """
     if case is None:
         missing = [flag for flag, value in (("--gt", gt), ("--atmo", atmo),
@@ -679,7 +814,7 @@ def _resolve_inputs(gt: Path | None, atmo: Path | None, out: Path | None,
                      f"（vrstudio case relight --case {case} …）")
     cdir = loaded.dir(cases_dir)
     suffix = ".png" if gt_asset.kind == "image" else ".mp4"
-    stamp = time.strftime("%Y%m%d-%H%M%S")
+    stamp = started_at.strftime("%Y%m%d-%H%M%S")
     target = (cdir / "out" / "samples" / stamp if sample is not None
               else cdir / "out" / f"{stamp}_relit{suffix}")
     gt_path = gt_asset.resolved(loaded, cases_dir)

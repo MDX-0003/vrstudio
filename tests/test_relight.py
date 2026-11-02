@@ -14,6 +14,7 @@ CLI 三条错误路径分别对应退出码：比例/尺寸/参数越界是 2，
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
 
@@ -443,9 +444,16 @@ def test_video_strength_zero_keeps_gt_pixels(tmp_path):
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert set(report) == {
-        "gt", "atmo", "size", "frames", "fps", "ref_frame", "ref_matched",
+        "gt", "atmo", "size", "frames", "fps", "kind", "started_at",
+        "finished_at", "cache", "timing", "ref_frame", "ref_matched",
         "params", "align", "clip", "light", "seconds"}
     assert report["size"] == [VW, VH] and report["frames"] == VN
+    assert report["kind"] == "full"
+    assert datetime.fromisoformat(report["finished_at"]) >= datetime.fromisoformat(
+        report["started_at"])
+    assert report["timing"]["total"] == report["seconds"]
+    assert report["timing"]["render_total"] > 0
+    assert report["cache"] == {"enabled": False, "hit": False, "load": 0.0}
     assert report["params"]["strength"] == 0.0
     assert report["clip"] is None
     assert set(report["align"]) == {

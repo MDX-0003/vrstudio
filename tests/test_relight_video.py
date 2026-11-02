@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 import cv2
 import numpy as np
@@ -190,6 +191,12 @@ def test_sample_writes_frames_without_encoding(sources):
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["sample"]["count"] == 3
     assert len(report["sample"]["frames"]) == 3
+    assert report["kind"] == "sample"
+    assert report["timing"]["total"] == report["seconds"]
+    assert report["timing"]["sample_decode"] > 0
+    assert report["timing"]["sample_compose"] > 0
+    assert "render_total" not in report["timing"]
+    assert report["cache"] == {"enabled": False, "hit": False, "load": 0.0}
 
 
 def test_retired_command_name_is_gone(sources):
@@ -290,9 +297,10 @@ def test_reference_scan_keeps_the_best_frame_in_one_pass():
     frames = _shifted_frames()
     atmo = frames[3]
     calls = []
-    fixed, from_cache = resolve_reference(
+    resolved = resolve_reference(
         _open_frames(frames, calls), atmo, VW, None, Log(quiet=True))
-    assert not from_cache
+    fixed = resolved.fixed
+    assert not resolved.from_cache
     assert calls == [None]
     assert fixed.ref_frame == 3
     expected = estimate_fields(frames[fixed.ref_frame],
@@ -306,11 +314,11 @@ def test_explicit_reference_frame_reads_only_that_frame():
     """显式参考帧按帧号 seek，不再从片头顺序解码。"""
     frames = _shifted_frames()
     calls = []
-    fixed, from_cache = resolve_reference(
+    resolved = resolve_reference(
         _open_frames(frames, calls), frames[3], VW, 3, Log(quiet=True))
-    assert not from_cache
+    assert not resolved.from_cache
     assert calls == [3]
-    assert fixed.ref_frame == 3
+    assert resolved.fixed.ref_frame == 3
 
 
 def test_cached_reference_skips_the_scan_and_sift(monkeypatch):
@@ -319,8 +327,8 @@ def test_cached_reference_skips_the_scan_and_sift(monkeypatch):
 
     frames = _shifted_frames()
     atmo = frames[3]
-    cold, _ = resolve_reference(
-        _open_frames(frames, []), atmo, VW, None, Log(quiet=True))
+    cold = resolve_reference(
+        _open_frames(frames, []), atmo, VW, None, Log(quiet=True)).fixed
     cached = CachedFixed(cold.ref_frame, cold.ref_matched, cold.alignment)
 
     def boom(*_args, **_kwargs):
@@ -328,10 +336,11 @@ def test_cached_reference_skips_the_scan_and_sift(monkeypatch):
 
     monkeypatch.setattr(relight_cli, "estimate_similarity", boom)
     calls = []
-    warm, from_cache = resolve_reference(
+    resolved = resolve_reference(
         _open_frames(frames, calls), atmo, VW, None, Log(quiet=True),
         cached=cached)
-    assert from_cache
+    warm = resolved.fixed
+    assert resolved.from_cache
     assert calls == [cold.ref_frame]
     assert np.array_equal(warm.fields.gain, cold.fields.gain)
     assert np.array_equal(warm.fields.visibility, cold.fields.visibility)
@@ -352,9 +361,11 @@ def test_case_sample_reuses_the_fixed_cache(tmp_path, monkeypatch):
     """同一 case 的第二次小样命中缓存，且两次小样逐位一致。"""
     _tmp, video, atmo, _frames = _shifted_sources(tmp_path)
     _relight_case(tmp_path, video, atmo)
-    stamps = iter(["20261102-120000", "20261102-120001"])
-    monkeypatch.setattr("vrstudio.cli.relight.time.strftime",
-                        lambda _fmt: next(stamps))
+    stamps = iter([
+        datetime(2026, 11, 2, 12, 0, 0).astimezone(),
+        datetime(2026, 11, 2, 12, 0, 1).astimezone(),
+    ])
+    monkeypatch.setattr("vrstudio.cli.relight._now", lambda: next(stamps))
 
     first = run_video_cli("--case", "rl", "--cases-dir", str(tmp_path),
                           "--sample", "6")
@@ -374,6 +385,19 @@ def test_case_sample_reuses_the_fixed_cache(tmp_path, monkeypatch):
     for a, b in zip(first_files, second_files):
         assert np.array_equal(cv2.imread(str(a)), cv2.imread(str(b)))
 
+    first_report = json.loads(first_dir.with_suffix(".json").read_text(encoding="utf-8"))
+    second_report = json.loads(second_dir.with_suffix(".json").read_text(encoding="utf-8"))
+    assert first_report["kind"] == "sample"
+    assert first_report["cache"]["enabled"] is True
+    assert first_report["cache"]["hit"] is False
+    assert second_report["cache"]["hit"] is True
+    assert second_report["timing"]["scan"] == 0.0
+    assert second_report["timing"]["align"] == 0.0
+    assert second_report["timing"]["read"] > 0
+    assert second_report["timing"]["total"] == second_report["seconds"]
+    assert datetime.fromisoformat(second_report["started_at"]) == (
+        datetime(2026, 11, 2, 12, 0, 1).astimezone())
+
 
 @pytest.mark.skipif(find_tool("ffmpeg.exe") is None or find_tool("ffprobe.exe") is None,
                     reason="external ffmpeg not populated in bin/ (see bin/README.md)")
@@ -381,9 +405,11 @@ def test_case_full_run_reuses_the_fixed_cache_and_keeps_pixels(tmp_path, monkeyp
     """整段第二次命中缓存，输出帧与冷跑逐位一致。"""
     _tmp, video, atmo, _frames = _shifted_sources(tmp_path)
     _relight_case(tmp_path, video, atmo)
-    stamps = iter(["20261102-120000", "20261102-120001"])
-    monkeypatch.setattr("vrstudio.cli.relight.time.strftime",
-                        lambda _fmt: next(stamps))
+    stamps = iter([
+        datetime(2026, 11, 2, 12, 0, 0).astimezone(),
+        datetime(2026, 11, 2, 12, 0, 1).astimezone(),
+    ])
+    monkeypatch.setattr("vrstudio.cli.relight._now", lambda: next(stamps))
 
     args = ("--case", "rl", "--cases-dir", str(tmp_path),
             "--crf", "0", "--set", "video.preset=ultrafast")
@@ -398,3 +424,11 @@ def test_case_full_run_reuses_the_fixed_cache_and_keeps_pixels(tmp_path, monkeyp
     assert first_video.is_file() and second_video.is_file()
     for a, b in zip(read_video(first_video), read_video(second_video)):
         assert np.array_equal(a, b)
+
+    first_report = json.loads(first_video.with_suffix(".json").read_text(encoding="utf-8"))
+    second_report = json.loads(second_video.with_suffix(".json").read_text(encoding="utf-8"))
+    assert first_report["kind"] == "full"
+    assert first_report["cache"]["hit"] is False
+    assert second_report["cache"]["hit"] is True
+    assert second_report["timing"]["render_total"] > 0
+    assert second_report["timing"]["total"] == second_report["seconds"]

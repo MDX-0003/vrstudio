@@ -222,6 +222,23 @@ def test_pinned_current_wins_over_newest(tmp_path, client):
     assert info["relight"]["current"]["name"] == "old_relit.png"
 
 
+def test_sample_report_is_exposed_for_the_latest_sample(tmp_path, client):
+    """前端靠 sample_report 显示这次小样的时间戳与分段耗时。"""
+    client.post("/api/cases", json={"flow": "relight", "name": "rl1"})
+    sample = case_mod.case_dir("rl1", tmp_path) / "out" / "samples" / "20261102-120000"
+    sample.mkdir(parents=True)
+    write_png(sample / "sample_000000.png", synthetic_erp(W, H))
+    report = sample.with_suffix(".json")
+    report.write_text('{"kind": "sample", "seconds": 1.0}', encoding="utf-8")
+
+    info = client.get("/api/case/rl1").json()
+    payload = info["relight"]
+    assert payload["sample_report"]["name"] == "20261102-120000.json"
+    assert payload["sample_report"]["exists"] is True
+    assert payload["sample_report"]["open_url"]
+    assert len(payload["samples"]) == 1
+
+
 # ── op 装配 ──────────────────────────────────────────────────────────────
 
 

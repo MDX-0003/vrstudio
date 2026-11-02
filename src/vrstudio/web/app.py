@@ -1355,16 +1355,34 @@ def _relight_current(case: case_mod.Case, cdir: Path) -> Path | None:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
-def _relight_samples(case: case_mod.Case, cdir: Path) -> list[dict]:
-    """最近一次小样的缩略图清单：``out/samples/<时间戳>/sample_*.png``。"""
+def _latest_sample_dir(cdir: Path) -> Path | None:
+    """最近一次小样目录：``out/samples/<时间戳>``；没有小样时为 None。"""
     root = cdir / "out" / "samples"
     if not root.is_dir():
-        return []
+        return None
     dirs = sorted((p for p in root.iterdir() if p.is_dir()),
                   key=lambda p: p.name, reverse=True)
-    if not dirs:
+    return dirs[0] if dirs else None
+
+
+def _relight_samples(cdir: Path) -> list[dict]:
+    """最近一次小样的缩略图清单：``out/samples/<时间戳>/sample_*.png``。"""
+    latest = _latest_sample_dir(cdir)
+    if latest is None:
         return []
-    return [file_entry(p) for p in sorted(dirs[0].glob("sample_*.png"))]
+    return [file_entry(p) for p in sorted(latest.glob("sample_*.png"))]
+
+
+def _relight_sample_report(cdir: Path) -> dict | None:
+    """最近一次小样的报告：``out/samples/<时间戳>.json``。
+
+    前端靠这份报告显示这次小样的时间戳与分段耗时；老小样没有报告时返回 None。
+    """
+    latest = _latest_sample_dir(cdir)
+    if latest is None:
+        return None
+    report = latest.with_suffix(".json")
+    return file_entry(report) if report.is_file() else None
 
 
 def _relight_step_files(case: case_mod.Case, cdir: Path) -> dict:
@@ -1689,7 +1707,8 @@ def _relight_payload(case: case_mod.Case) -> dict | None:
         "current_report": (file_entry(current.with_suffix(".json"))
                            if current is not None and current.with_suffix(".json").is_file()
                            else None),
-        "samples": _relight_samples(case, cdir),
+        "samples": _relight_samples(cdir),
+        "sample_report": _relight_sample_report(cdir),
     }
 
 
