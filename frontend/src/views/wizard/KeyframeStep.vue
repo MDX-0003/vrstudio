@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
-import { fetchCase } from '@/api/case'
+import { fetchCase, saveParams } from '@/api/case'
 import {
   fetchKeyframePrompt,
   fetchKeyframeRounds,
@@ -24,7 +24,7 @@ import { KEYFRAME_ROLE_OPTIONS } from '@/constants/assetRoles'
 import { KEYFRAME_MAX_CANDIDATES, KEYFRAME_RESOLUTIONS } from '@/constants/keyframe'
 import { taskStatusMeta } from '@/constants/taskStatus'
 import { buildPromptVariables, promptVariablesToRecord } from '@/utils/prompt'
-import type { CaseInfo, PromptPayload } from '@/types/case-info'
+import type { CaseInfo, ModelOption, PromptPayload } from '@/types/case-info'
 import type { PromptVariable } from '@/types/case'
 import type { ReferenceRow } from '@/types/reference'
 
@@ -123,13 +123,38 @@ const targetLabel = computed(() => (step.value === 'first' ? '首帧定稿' : '�
 const refs = computed(() => keyframe.value.refs ?? [])
 const primary = computed(() => refs.value.find((ref) => ref.role === 'subject_ref') ?? null)
 const details = computed(() => refs.value.filter((ref) => ref.role === 'detail_ref'))
-/** 首尾帧共用一个图片模型：值来自生成页底栏保存的 image_model_id。 */
-const imageModelName = computed(() => {
-  const params = props.info.generation_params
-  const id = params?.fixed?.image_model_id
-  if (id == null) return ''
-  return params.image_models?.find((item) => item.id === id)?.name ?? `模型 #${id}`
+/** 首尾帧共用一个图片模型：就放在候选批次的标题栏，保存进 generation.toml。 */
+const imageModelId = ref<number | null>(null)
+const imageModelSaving = ref(false)
+const imageModels = computed(() => props.info.generation_params?.image_models ?? [])
+const imageModelsError = computed(() => props.info.generation_params?.image_models_error ?? '')
+const imageModelChoices = computed<ModelOption[]>(() => {
+  const options = imageModels.value
+  const id = imageModelId.value
+  if (id == null || id <= 0 || options.some((item) => item.id === id)) return options
+  return [{ id, name: `模型 #${id}`, description: '不在当前清单里' }, ...options]
 })
+
+function syncImageModel(): void {
+  const id = props.info.generation_params?.fixed?.image_model_id
+  imageModelId.value = id == null || id <= 0 ? null : id
+}
+
+async function changeImageModel(value: number | null): Promise<void> {
+  const saved = props.info.generation_params?.fixed?.image_model_id
+  if (value == null || value <= 0 || value === saved) return
+  imageModelSaving.value = true
+  try {
+    const data = await saveParams(props.caseName, { image_model_id: value })
+    emit('updated', data)
+    ElMessage.success('图片模型已切换')
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '切换图片模型失败')
+    syncImageModel()
+  } finally {
+    imageModelSaving.value = false
+  }
+}
 const anchorNumber = computed(() =>
   step.value === 'last' && firstPick.value && primary.value ? 3 : null,
 )
@@ -264,10 +289,18 @@ async function run(): Promise<void> {
   running.value = true
   startedAt = Date.now()
   try {
-    const payload: { step: Step; resolution?: string; num?: number } = {
+    const payload: {
+      step: Step
+      resolution?: string
+      num?: number
+      image_model_id?: number
+    } = {
       step: step.value,
       resolution: resolution.value,
       num: num.value,
+    }
+    if (imageModelId.value != null && imageModelId.value > 0) {
+      payload.image_model_id = imageModelId.value
     }
     await runKeyframe(props.caseName, payload)
     startTasks()
@@ -464,7 +497,10 @@ watch(latest, async (task) => {
   }
 })
 
+watch(() => props.info.generation_params?.fixed?.image_model_id, syncImageModel)
+
 onMounted(() => {
+  syncImageModel()
   void loadPrompt()
   void loadRounds()
 })
@@ -650,13 +686,25 @@ onUnmounted(() => {
         <h2 class="panel-title">{{ step === 'first' ? '首帧候选' : '尾帧候选' }}</h2>
         <span class="spacer" />
         <div class="kf-head-actions">
-          <span
-            v-if="imageModelName"
-            class="kf-model-hint muted"
-            title="首尾帧两步共用这一个图片模型；在生成页底栏切换"
+          <span class="kf-image-model-label muted">图片模型</span>
+          <el-select
+            v-model="imageModelId"
+            size="small"
+            class="kf-image-model"
+            placeholder="选择图片模型"
+            :loading="imageModelSaving"
+            :title="imageModelsError || '首尾帧两步共用这一个图片模型，切换后写入 generation.toml'"
+            @change="changeImageModel"
           >
-            图片模型：{{ imageModelName }}
-          </span>
+            <el-option
+              v-for="item in imageModelChoices"
+              :key="item.id"
+              :label="item.name"
+              :value="item.id"
+              :title="`${item.name}（#${item.id}）${item.description ? '：' + item.description : ''}`"
+            />
+            <el-option v-if="!imageModelChoices.length" label="清单不可用" :value="-1" disabled />
+          </el-select>
           <el-select v-model="resolution" size="small" style="width: 104px">
             <el-option
               v-for="item in KEYFRAME_RESOLUTIONS"
@@ -983,9 +1031,13 @@ onUnmounted(() => {
   gap: var(--space-2);
 }
 
-.kf-model-hint {
+.kf-image-model-label {
   font-size: var(--text-xs);
   white-space: nowrap;
+}
+
+.kf-image-model {
+  width: 190px;
 }
 
 .round-list {

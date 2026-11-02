@@ -3,7 +3,7 @@ import { defineComponent } from 'vue'
 import ElementPlus from 'element-plus'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('@/api/case', () => ({ fetchCase: vi.fn() }))
+vi.mock('@/api/case', () => ({ fetchCase: vi.fn(), saveParams: vi.fn() }))
 
 const keyframeApi = vi.hoisted(() => ({
   rounds: [] as unknown[],
@@ -48,6 +48,7 @@ vi.mock('@/composables/useCaseTasks', async () => {
 })
 
 import KeyframeStep from '@/views/wizard/KeyframeStep.vue'
+import { saveParams } from '@/api/case'
 import type { CaseInfo, FileInfo, KeyframePick, RawFrame } from '@/types/case-info'
 
 const LinkStub = defineComponent({
@@ -176,6 +177,7 @@ function round(name: string, step: string, count = 1) {
 
 beforeEach(() => {
   keyframeApi.rounds = []
+  vi.mocked(saveParams).mockClear()
 })
 
 describe('KeyframeStep 四格输入', () => {
@@ -289,6 +291,20 @@ describe('KeyframeStep 候选批次折叠', () => {
 
     expect(wrapper.findAll('.candidate-card')).toHaveLength(1)
     expect(wrapper.text()).not.toContain('更早的批次')
+    wrapper.unmount()
+  })
+})
+
+describe('KeyframeStep 图片模型', () => {
+  it('switches the model from the candidate header and saves it', async () => {
+    vi.mocked(saveParams).mockResolvedValue(info())
+    const wrapper = await mountStep()
+    const select = wrapper.findComponent('.kf-image-model')
+    expect(select.exists()).toBe(true)
+    select.vm.$emit('update:modelValue', 25)
+    select.vm.$emit('change', 25)
+    await flushPromises()
+    expect(saveParams).toHaveBeenCalledWith('p1', { image_model_id: 25 })
     wrapper.unmount()
   })
 })

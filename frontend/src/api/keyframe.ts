@@ -21,6 +21,8 @@ export interface KeyframeRunPayload {
   step: 'first' | 'last'
   resolution?: string
   num?: number
+  /** 首尾帧两步共用的图片模型；缺省时用 generation.toml 的值。 */
+  image_model_id?: number
 }
 
 export function fetchKeyframeRounds(name: string): Promise<KeyframeRounds> {

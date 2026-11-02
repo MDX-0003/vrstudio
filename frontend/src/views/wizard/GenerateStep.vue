@@ -472,7 +472,7 @@ function paramsBody(): SaveParamsPayload {
   if (resolution.value) body.resolution = resolution.value
   if (scale.value) body.scale = scale.value
   if (videoModelId.value != null) body.video_model_id = videoModelId.value
-  if (imageModelId.value != null) body.image_model_id = imageModelId.value
+  // 视频流的图片模型只服务首尾帧，改在「首尾帧」页的候选标题栏里设置。
   return { ...body, ...sessionBody() }
 }
 
@@ -1024,7 +1024,6 @@ function statusTone(): string {
     v-model:duration="duration"
     v-model:audio="audio"
     v-model:video-model-id="videoModelId"
-    v-model:image-model-id="imageModelId"
     v-model:selected-project="selectedProject"
     v-model:selected-episode="selectedEpisode"
     v-model:selected-session="selectedSession"
@@ -1033,8 +1032,6 @@ function statusTone(): string {
     :resolution-options="resolutionOptions"
     :scale-options="scaleOptions"
     :video-model-options="videoModelChoices"
-    :image-model-options="imageModelChoices"
-    :image-models-error="imageModelsError"
     :duration-options="durationOptions"
     :projects="projects"
     :episodes="episodes"

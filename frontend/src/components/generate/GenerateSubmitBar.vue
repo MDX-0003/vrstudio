@@ -10,7 +10,6 @@ const scale = defineModel<string>('scale', { required: true })
 const duration = defineModel<string>('duration', { required: true })
 const audio = defineModel<'keep' | 'none'>('audio', { required: true })
 const videoModelId = defineModel<number | null>('videoModelId', { required: true })
-const imageModelId = defineModel<number | null>('imageModelId', { required: true })
 const selectedProject = defineModel<string>('selectedProject', { required: true })
 const selectedEpisode = defineModel<string>('selectedEpisode', { required: true })
 const selectedSession = defineModel<string>('selectedSession', { required: true })
@@ -21,8 +20,6 @@ defineProps<{
   resolutionOptions: OutputOption[]
   scaleOptions: InputOption[]
   videoModelOptions: ModelOption[]
-  imageModelOptions: ModelOption[]
-  imageModelsError: string
   durationOptions: { value: string; label: string }[]
   projects: ProjectOption[]
   episodes: EpisodeOption[]
@@ -133,25 +130,6 @@ function scaleLabel(option: InputOption): string {
               :value="item.value"
               :disabled="!item.ok"
             />
-          </el-select>
-        </label>
-        <label class="ctl">
-          <span>图片模型</span>
-          <el-select
-            v-model="imageModelId"
-            size="small"
-            class="w-image-model"
-            placeholder="选择图片模型"
-            :title="imageModelsError || undefined"
-          >
-            <el-option
-              v-for="item in imageModelOptions"
-              :key="item.id"
-              :label="item.name"
-              :value="item.id"
-              :title="`${item.name}（#${item.id}）${item.description ? '：' + item.description : ''}`"
-            />
-            <el-option v-if="!imageModelOptions.length" label="清单不可用" :value="-1" disabled />
           </el-select>
         </label>
         <span v-if="paramsError" class="session-error">{{ paramsError }}</span>
@@ -324,10 +302,6 @@ function scaleLabel(option: InputOption): string {
 }
 
 .w-video-model {
-  width: 220px;
-}
-
-.w-image-model {
   width: 220px;
 }
 

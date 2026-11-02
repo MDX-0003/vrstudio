@@ -229,23 +229,23 @@ describe('GenerateStep', () => {
     wrapper.unmount()
   })
 
-  it('saves both model ids when the submit bar changes them', async () => {
+  it('saves the video model without touching the image model', async () => {
     vi.mocked(saveParams).mockResolvedValue(info())
     const data = info()
     data.gates.generate = { ok: true, ready: true, reason: '' }
     const wrapper = await mountStep(data)
     const bar = wrapper.findComponent(GenerateSubmitBar)
     bar.vm.$emit('update:videoModelId', 39)
-    bar.vm.$emit('update:imageModelId', 46)
     await flushPromises()
     const submit = wrapper.findAll('button').find((item) => item.text().includes('提交生成'))
     expect(submit?.attributes('disabled')).toBeUndefined()
     await submit!.trigger('click')
     await flushPromises()
-    expect(saveParams).toHaveBeenCalledWith(
-      'p1',
-      expect.objectContaining({ video_model_id: 39, image_model_id: 46 }),
-    )
+    const calls = vi.mocked(saveParams).mock.calls
+    expect(calls.length).toBeGreaterThan(0)
+    const payload = calls[calls.length - 1][1]
+    expect(payload).toMatchObject({ video_model_id: 39 })
+    expect(payload).not.toHaveProperty('image_model_id')
     wrapper.unmount()
   })
 
