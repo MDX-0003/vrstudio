@@ -242,6 +242,25 @@ def _merge_image(case, cases_dir, *, feather: int, levels: int,
         fh.close()
 
 
+#: 拼接输入宽高比的相对容差：模型输出与画布只差几像素，2% 足够；2:1 源图或成片
+#: （偏差约 14%）会在这里被拒，而不是被 ``restore_canvas`` 先拉成 21:9 再靠相关性碰运气。
+_INPUT_ASPECT_TOL = 0.02
+
+
+def _check_stitch_input(generated, manifest, path: Path) -> None:
+    """拼接输入必须是这次 extract 的 21:9 画布图（决策 66）。"""
+    height_px, width_px = generated.shape[:2]
+    canvas_w, canvas_h = (int(v) for v in manifest.canvas.size)
+    ratio = width_px / max(1, height_px)
+    target = canvas_w / max(1, canvas_h)
+    if abs(ratio / target - 1.0) > _INPUT_ASPECT_TOL:
+        typer.secho(
+            f"merge: 拼接输入必须是 {canvas_w}x{canvas_h}（21:9）的画布图，"
+            f"当前 {width_px}x{height_px}（{ratio:.3f}:1）：{path}；"
+            f"2:1 源图或成片不能直接拼接", err=True)
+        raise typer.Exit(2)
+
+
 def _merge_full(case, cases_dir, *, report: Path | None, quiet: bool,
                 progress_every: int) -> None:
     """fullRedrawImg 的收口：把 4K 21:9 结果 stitch 回 2:1 的源图尺寸。
@@ -253,13 +272,17 @@ def _merge_full(case, cases_dir, *, report: Path | None, quiet: bool,
         raise typer.Exit("merge: fullRedrawImg 还没有 extract 版本——先 extract")
     d = case.dir(cases_dir) / "extracts" / case.extract_current
     manifest_path = d / "image_pad.json"
-    result_path = d / "result.png"
+    # 拼接输入：``[merge] input`` 指向的素材优先，没写指针才回退 adopt 落点（决策 66）。
+    result_path = case.merge_input_file(cases_dir) or d / "result.png"
     if not manifest_path.is_file():
         raise typer.Exit(f"merge: 缺 {manifest_path.name}——重跑 extract")
     if not result_path.is_file():
+        if case.merge_input:
+            raise typer.Exit(
+                f"merge: [merge] input 指向的素材文件不存在：{result_path}")
         raise typer.Exit(
-            f"merge: 没有采用的结果（{result_path} 不存在）——先 "
-            f"`vrstudio generate adopt --case {case.name} --index N`")
+            f"merge: 没有拼接输入（{result_path} 不存在）——在素材库里选一张 "
+            f"21:9 画布图，或先 `vrstudio generate adopt --case {case.name} --index N`")
     src = case_mod.check_source(case, cases_dir)
     conf = config_mod.load()
     try:
@@ -272,6 +295,7 @@ def _merge_full(case, cases_dir, *, report: Path | None, quiet: bool,
     typer.echo(f"log -> {log_path}")
     try:
         generated = read_image(result_path)
+        _check_stitch_input(generated, manifest, result_path)
         repair = str(conf.get("recompose.boundary_repair", "off"))
         repair_px = (max(8, int(round(manifest.canvas.L * float(
             conf.get("recompose.boundary_repair_pct", 15.0)) / 100.0)))
@@ -309,6 +333,8 @@ def _merge_full(case, cases_dir, *, report: Path | None, quiet: bool,
         data = {
             "case": case.name,
             "extract": case.extract_current,
+            "input": {"asset": case.merge_input, "path": str(result_path),
+                      "sha256": case_mod.file_sha256(result_path)},
             "source": [int(width), int(height)],
             "canvas": list(manifest.canvas.size),
             "registration": {

@@ -157,6 +157,14 @@ export function pickRelightSlot(
   })
 }
 
+/** fullRedrawImg 的拼接输入：assetId 指向库里一张图；null 回退生成采用的结果。 */
+export function setMergeInput(name: string, assetId: string | null): Promise<CaseInfo> {
+  return postJson<CaseInfo>(`${casePath(name)}/assets`, {
+    op: 'merge-input',
+    asset_id: assetId ?? '',
+  })
+}
+
 export function reorderAssets(name: string, ids: string[]): Promise<CaseInfo> {
   return postJson<CaseInfo>(`${casePath(name)}/assets`, { op: 'reorder', ids })
 }

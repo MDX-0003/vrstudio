@@ -350,6 +350,8 @@ export interface CaseInfo {
   adopt_round: string | null
   /** 图片流程采用的候选序号；视频流程为 null。 */
   adopt_index?: number | null
+  /** fullRedrawImg 的拼接输入素材 id；null = 用生成采用的结果。 */
+  merge_input?: string | null
   /** 图片流程的生成轮次（最新在前）；视频流程为空数组。 */
   image_rounds?: ImageRound[]
   /** 图片流程 merge 的 report.json；还没出片时为 null。 */

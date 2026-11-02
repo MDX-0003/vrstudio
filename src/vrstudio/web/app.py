@@ -1314,11 +1314,22 @@ def _fullredraw_img_step_files(case: case_mod.Case, cdir: Path) -> dict:
     }
     steps["generate"] = _generation_groups(
         case, [file_entry(upload), file_entry(upload_mask)], result)
+    # 拼接输入按 ``[merge] input`` 解析：指针优先，缺省是 adopt 落点 result.png。
+    stitch_input = _stitch_input_file(case, cdir, result)
     steps["merge"] = {
-        "inputs": [file_entry(result), file_entry(manifest)],
+        "inputs": [file_entry(stitch_input), file_entry(manifest)],
         "outputs": [file_entry(out), file_entry(d / "report.json")],
     }
     return steps
+
+
+def _stitch_input_file(case: case_mod.Case, cdir: Path, fallback: Path) -> Path:
+    """fullRedrawImg 的拼接输入文件：指针优先，没写指针才回退 adopt 结果。
+
+    指针指向的文件缺失时仍然显示它（页面标「文件缺失」、门控不放行），不悄悄换回
+    采用结果——否则用户不知道拼接用的是哪张。
+    """
+    return case.merge_input_file(_ctx["cases_root"]) or fallback
 
 
 def _gen_step_files(case: case_mod.Case, cdir: Path) -> dict:
@@ -1545,11 +1556,18 @@ def _gates(case: case_mod.Case, extracts: list[dict],
             "evidence": (f"在 {cur}\\result.png 检测到已采用的第 {case.adopt_index} 张候选"
                          f"（来自 Session {case.adopt_round}）" if picked else ""),
         }
+        if patchimg:
+            merge_ready = extracted and picked
+            merge_reason = "采用一张候选后才能贴回"
+        else:
+            # 拼接输入可以来自 adopt，也可以是素材库里选定的一张 21:9 画布图。
+            merge_ready = extracted and _stitch_input_file(
+                case, cdir, result_png).is_file()
+            merge_reason = "采用一张候选，或在素材库里选定一张 21:9 画布图后才能拼回 2:1"
         steps["merge"] = {
             "ok": has_out,
-            "ready": extracted and picked,
-            "reason": "" if has_out else (
-                "采用一张候选后才能贴回" if patchimg else "采用一张候选后才能拼回 2:1"),
+            "ready": merge_ready,
+            "reason": "" if has_out else merge_reason,
             "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}；每次合并都会覆盖同名文件",
         }
         steps["compare"] = {
@@ -1750,6 +1768,7 @@ def _case_info(name: str) -> dict | None:
         "extract_current": case.extract_current,
         "adopt_round": case.adopt_round,
         "adopt_index": case.adopt_index,
+        "merge_input": case.merge_input,
         "assets": assets,
         "raw_frames": _raw_frames(case),
         "keyframe": _keyframe_state(case, assets),
@@ -2404,6 +2423,11 @@ async def api_assets(request):
             else:
                 return JSONResponse(
                     {"error": "槽位需要 asset_id、upload_ids 或 path"}, status_code=400)
+        elif op == "merge-input":
+            # fullRedrawImg 的拼接输入：asset_id 指向库里一张图，空值 = 回退采用结果。
+            await asyncio.to_thread(
+                case_mod.set_merge_input, name,
+                str(body.get("asset_id") or "") or None, _ctx["cases_root"])
         elif op == "remove":
             asset_id = str(body.get("id") or "")
             await asyncio.to_thread(case_mod.remove_asset, name,

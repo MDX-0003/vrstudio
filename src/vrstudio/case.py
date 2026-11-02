@@ -44,6 +44,10 @@ _RELIGHT_KEYS = ("current", "gt", "atmo", "scene", "strength", "local_shading",
 #: ``[relight]`` 里指向素材的两把指针，以及各自要求的素材角色。
 _RELIGHT_SLOTS = {"gt": RELIGHT_GT, "atmo": RELIGHT_ATMO}
 
+#: ``[merge]`` 只属于 fullRedrawImg：``input`` 指向素材库里的拼接输入，
+#: 缺省时回退到 adopt 落点 ``extracts/<current>/result.png``（决策 66）。
+_MERGE_INPUT_KEYS = ("input",)
+
 #: 与 vrgen 的 job 名同一套约束：case 名是 cases/ 下的目录名。
 _CASE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -126,6 +130,8 @@ class Case:
     # ── adopt 指针：vrgen 台账里被采用的轮次 ──
     adopt_round: str | None = None
     adopt_index: int | None = None
+    # ── 仅 flow = fullRedrawImg：``[merge] input`` 指向素材库里的拼接输入 ──
+    merge_input: str | None = None
     # ── 仅 flow = relight：``[relight]`` 草稿与当前成片指针 ──
     relight: dict | None = None
 
@@ -175,6 +181,25 @@ class Case:
         relight = self.relight or {}
         by_id = {asset.id: asset for asset in self.assets}
         return by_id.get(relight.get("gt")), by_id.get(relight.get("atmo"))
+
+    def merge_input_asset(self) -> Asset | None:
+        """``[merge] input`` 指向的素材；没写指针时是 None（回退 adopt 结果）。"""
+        if not self.merge_input:
+            return None
+        return self.asset(self.merge_input)
+
+    def merge_input_file(self, root: str | Path | None = None) -> Path | None:
+        """拼接输入的落点文件：指针优先，否则 adopt 落点 result.png；都没有时 None。
+
+        CLI 与 web 共用这一处判定，避免两边各写一套“先看指针再回退”的规则。
+        """
+        asset = self.merge_input_asset()
+        if asset is not None:
+            return asset.resolved(self, root)
+        if not self.extract_current:
+            return None
+        fallback = self.dir(root) / "extracts" / self.extract_current / "result.png"
+        return fallback if fallback.is_file() else None
 
 
 # ── 创建 ─────────────────────────────────────────────────────────────────
@@ -302,6 +327,7 @@ def load(name: str, root: str | Path | None = None) -> Case:
         submit_roles=roles,
         adopt_round=raw.get("adopt", {}).get("round"),
         adopt_index=raw.get("adopt", {}).get("index"),
+        merge_input=_parse_merge(raw.get("merge"), path) if flow == "fullRedrawImg" else None,
     )
     allowed = (_PATCH_SECTIONS if flow == "patch"
                else _PATCHIMG_SECTIONS if flow == "patchimg"
@@ -313,6 +339,10 @@ def load(name: str, root: str | Path | None = None) -> Case:
         raise CaseError(f"{path}: [gen] 只属于 flow=gen")
     if flow != "relight" and raw.get("relight") is not None:
         raise CaseError(f"{path}: [relight] 只属于 flow=relight")
+    if flow != "fullRedrawImg" and raw.get("merge") is not None:
+        raise CaseError(f"{path}: [merge] 只属于 flow=fullRedrawImg")
+    if flow == "fullRedrawImg":
+        _check_merge_input(case, path)
     if flow != "gen" and flow != "relight" and not case.source_path:
         raise CaseError(f"{path}: [source] 缺 path")
     if flow == "relight":
@@ -357,6 +387,9 @@ def save(case: Case, root: str | Path | None = None) -> Case:
         lines += ["", "[adopt]", f"round = {_s(case.adopt_round)}"]
         if case.adopt_index is not None:
             lines.append(f"index = {int(case.adopt_index)}")
+    if case.flow == "fullRedrawImg" and case.merge_input:
+        _check_merge_input(case, case_toml(case.name, root))
+        lines += ["", "[merge]", f"input = {_s(case.merge_input)}"]
     if case.flow == "relight":
         # 槽位约束在每次写盘时检查，所以「多挂一条别的角色」在 add_assets 就失败，
         # 不会等到下次 load 才暴露。
@@ -560,6 +593,39 @@ def _check_relight_assets(case: Case, path: Path) -> None:
                 f"应为 {role}")
 
 
+def _parse_merge(raw, path: Path) -> str | None:
+    """``[merge]`` 段：只有 ``input``，值是素材 id；写错按真实原因拒绝。"""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise CaseError(f"{path}: [merge] 必须是表")
+    unknown = sorted(set(raw) - set(_MERGE_INPUT_KEYS))
+    if unknown:
+        raise CaseError(
+            f"{path}: [merge] 不认识的键 {unknown}；可用：{'、'.join(_MERGE_INPUT_KEYS)}")
+    value = raw.get("input")
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r"[vi]\d+", value):
+        raise CaseError(
+            f"{path}: [merge] input 必须是素材 id（v1、i2…），收到 {value!r}")
+    return value
+
+
+def _check_merge_input(case: Case, path: Path) -> None:
+    """拼接输入指针必须指向本 case 的一张图片：拼接读取的是 21:9 画布图。"""
+    if not case.merge_input:
+        return
+    asset = next((a for a in case.assets if a.id == case.merge_input), None)
+    if asset is None:
+        raise CaseError(
+            f"{path}: [merge] input 指向不存在的素材 {case.merge_input}")
+    if asset.kind != "image":
+        raise CaseError(
+            f"{path}: [merge] input 指向的 {asset.id} 是 {asset.kind}；"
+            f"拼接输入必须是图片")
+
+
 def _migrate_gen(case: Case, references: list[str] | None, path: Path,
                  root: str | Path | None) -> Case:
     """旧 ``[source]`` 与 ``[gen] reference_images`` → assets，并落盘一次。
@@ -660,6 +726,9 @@ def remove_asset(name: str, asset_id: str, root: str | Path | None = None) -> Ca
     except OSError as exc:
         raise CaseError(f"素材文件删不掉：{target}（{exc}）；记录未改动") from exc
     case.assets = [a for a in case.assets if a.id != asset_id]
+    # 删掉拼接输入指向的素材时清空指针，回退到 adopt 结果；否则 load 会因悬空指针失败。
+    if case.merge_input == asset_id:
+        case.merge_input = None
     if case.submit_selected is not None:
         case.submit_selected = [item for item in case.submit_selected
                                 if item != asset_id]
@@ -903,6 +972,22 @@ def set_relight_pick(name: str, slot: str, asset_id: str,
         raise CaseError(
             f"素材 {asset_id} 的角色是 {asset.role}，不能放进 {slot} 槽位（应 {wanted}）")
     return set_relight(name, {slot: asset_id}, root)
+
+
+def set_merge_input(name: str, asset_id: str | None,
+                    root: str | Path | None = None) -> Case:
+    """设置 fullRedrawImg 的拼接输入；``None`` 清空指针、回退 adopt 结果。"""
+    case = load(name, root)
+    if case.flow != "fullRedrawImg":
+        raise CaseError(f"case {name} 是 {case.flow} 流，没有 [merge] 拼接输入")
+    if asset_id:
+        asset = case.asset(asset_id)
+        if asset.kind != "image":
+            raise CaseError(
+                f"素材 {asset_id} 是 {asset.kind}；拼接输入必须是图片"
+                "（21:9 画布图，不是 2:1 源图或成片）")
+    case.merge_input = asset_id or None
+    return save(case, root)
 
 
 def set_extract_current(name: str, version: str, root: str | Path | None = None) -> Case:

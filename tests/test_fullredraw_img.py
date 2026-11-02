@@ -171,3 +171,101 @@ def test_merge_requires_an_adopted_result(tmp_path):
         "--case", "p", "-q", "--cases-dir", str(tmp_path)])
     assert result.exit_code != 0
     assert "adopt" in result.output
+
+
+# ── 拼接输入可以指向素材库（决策 66）────────────────────────────────────
+
+
+def _add_merge_candidate(tmp_path, path) -> str:
+    """把一张图片加进素材库并作为拼接输入，返回素材 id。"""
+    case_mod.add_assets("p", [(path, "lighting_ref")], root=tmp_path)
+    case_id = case_mod.load("p", tmp_path).assets[-1].id
+    case_mod.set_merge_input("p", case_id, root=tmp_path)
+    return case_id
+
+
+def test_merge_input_roundtrip_and_clear(tmp_path):
+    _prepared_case(tmp_path)
+    case_id = _add_merge_candidate(tmp_path, _source(tmp_path, "edited.png"))
+
+    case = case_mod.load("p", tmp_path)
+    assert case.merge_input == case_id
+    assert case.merge_input_file(tmp_path).name == f"{case_id}_edited.png"
+    raw = case_mod.case_toml("p", tmp_path).read_text(encoding="utf-8")
+    assert "[merge]" in raw and f'input = "{case_id}"' in raw
+
+    case_mod.set_merge_input("p", None, root=tmp_path)
+    assert case_mod.load("p", tmp_path).merge_input is None
+    assert "[merge]" not in case_mod.case_toml("p", tmp_path).read_text(encoding="utf-8")
+
+
+def test_merge_input_falls_back_to_the_adopted_result(tmp_path):
+    _prepared_case(tmp_path)
+    version = _version_dir(tmp_path)
+    result = version / "result.png"
+    assert case_mod.load("p", tmp_path).merge_input_file(tmp_path) is None
+    result.write_bytes(b"png")
+    assert case_mod.load("p", tmp_path).merge_input_file(tmp_path) == result
+
+
+def test_merge_stitches_from_a_library_asset(tmp_path):
+    """没有 adopt 结果，只靠 ``[merge] input`` 也能出片。"""
+    src = _prepared_case(tmp_path)
+    version = _version_dir(tmp_path)
+    case_id = _add_merge_candidate(tmp_path, version / "padded.png")
+
+    result = runner.invoke(merge_cli.app, [
+        "--case", "p", "-q", "--cases-dir", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+
+    case = case_mod.load("p", tmp_path)
+    out = (case_mod.case_dir("p", tmp_path) / "out"
+           / f"{case.extract_current}_image.png")
+    assert np.array_equal(read_image(out), read_image(src))
+    report = json.loads((version / "report.json").read_text(encoding="utf-8"))
+    assert report["input"]["asset"] == case_id
+    assert report["input"]["sha256"]
+
+
+def test_merge_rejects_a_two_to_one_library_input(tmp_path):
+    _prepared_case(tmp_path)
+    _add_merge_candidate(tmp_path, _source(tmp_path, "erp.png"))
+
+    result = runner.invoke(merge_cli.app, [
+        "--case", "p", "-q", "--cases-dir", str(tmp_path)])
+    assert result.exit_code == 2
+    assert "21:9" in result.output
+
+
+def test_merge_input_rejects_a_video_asset(tmp_path):
+    _prepared_case(tmp_path)
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"not a video")
+    case_mod.add_assets("p", [(video, "edit_master")], root=tmp_path)
+    with pytest.raises(CaseError, match="拼接输入必须是图片"):
+        case_mod.set_merge_input("p", "v1", root=tmp_path)
+
+
+def test_merge_input_rejects_a_dangling_pointer(tmp_path):
+    _prepared_case(tmp_path)
+    toml = case_mod.case_toml("p", tmp_path)
+    toml.write_text(toml.read_text(encoding="utf-8")
+                    + '\n[merge]\ninput = "i7"\n', encoding="utf-8")
+    with pytest.raises(CaseError, match="不存在的素材"):
+        case_mod.load("p", tmp_path)
+
+
+def test_merge_input_only_belongs_to_fullredrawimg(tmp_path):
+    case_mod.create("g", "gen", root=tmp_path)
+    toml = case_mod.case_toml("g", tmp_path)
+    toml.write_text(toml.read_text(encoding="utf-8")
+                    + '\n[merge]\ninput = "i1"\n', encoding="utf-8")
+    with pytest.raises(CaseError, match="只属于"):
+        case_mod.load("g", tmp_path)
+
+
+def test_removing_the_merge_input_asset_clears_the_pointer(tmp_path):
+    _prepared_case(tmp_path)
+    case_id = _add_merge_candidate(tmp_path, _source(tmp_path, "edited.png"))
+    case_mod.remove_asset("p", case_id, root=tmp_path)
+    assert case_mod.load("p", tmp_path).merge_input is None

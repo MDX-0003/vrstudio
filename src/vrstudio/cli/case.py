@@ -292,3 +292,5 @@ def show(
     if case.adopt_index is not None:
         adopt += f"  index={case.adopt_index}"
     typer.echo(f"adopt    {adopt}")
+    if case.flow == "fullRedrawImg":
+        typer.echo(f"merge    {case.merge_input or '(用采用结果)'}")

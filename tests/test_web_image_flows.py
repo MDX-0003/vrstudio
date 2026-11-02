@@ -171,6 +171,63 @@ def test_fullredrawimg_has_no_pick_step_and_extract_is_ready(tmp_path, client):
     assert "image_pad.json" in gates["extract"]["evidence"]
 
 
+def test_fullredrawimg_merge_ready_from_a_library_input(tmp_path, client):
+    """拼接输入来自素材库时，没有 adopt 结果也可以拼接（决策 66）。"""
+    src = _png(tmp_path)
+    case_mod.create("f1", "fullRedrawImg", src, root=tmp_path)
+    _extract_version(tmp_path, "f1", "image_pad.json")
+    gates = _gates(tmp_path, "f1")
+    assert gates["merge"]["ready"] is False
+    assert "21:9" in gates["merge"]["reason"]
+
+    case_mod.add_assets("f1", [(src, "lighting_ref")], root=tmp_path)
+    case_mod.set_merge_input("f1", "i1", root=tmp_path)
+    gates = _gates(tmp_path, "f1")
+    assert gates["merge"]["ready"] is True
+
+
+def test_fullredrawimg_step_files_show_the_library_input(tmp_path, client):
+    src = _png(tmp_path)
+    case_mod.create("f1", "fullRedrawImg", src, root=tmp_path)
+    _extract_version(tmp_path, "f1", "image_pad.json")
+    case_mod.add_assets("f1", [(src, "lighting_ref")], root=tmp_path)
+    case_mod.set_merge_input("f1", "i1", root=tmp_path)
+
+    files = web_app._step_files(case_mod.load("f1", tmp_path))
+    names = [item["name"] for item in files["merge"]["inputs"]]
+    assert names[0].startswith("i1_")
+    assert "image_pad.json" in names
+
+
+def test_merge_input_op_sets_and_clears_the_pointer(tmp_path, client):
+    src = _png(tmp_path)
+    case_mod.create("f1", "fullRedrawImg", src, root=tmp_path)
+    case_mod.add_assets("f1", [(src, "lighting_ref")], root=tmp_path)
+
+    r = client.post("/api/case/f1/assets",
+                    json={"op": "merge-input", "asset_id": "i1"})
+    assert r.status_code == 200, r.text
+    assert case_mod.load("f1", tmp_path).merge_input == "i1"
+    assert r.json()["merge_input"] == "i1"
+
+    r = client.post("/api/case/f1/assets",
+                    json={"op": "merge-input", "asset_id": ""})
+    assert r.status_code == 200, r.text
+    assert case_mod.load("f1", tmp_path).merge_input is None
+
+
+def test_merge_input_op_refuses_a_video_asset(tmp_path, client):
+    src = _png(tmp_path)
+    case_mod.create("f1", "fullRedrawImg", src, root=tmp_path)
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"not a video")
+    case_mod.add_assets("f1", [(video, "edit_master")], root=tmp_path)
+
+    r = client.post("/api/case/f1/assets",
+                    json={"op": "merge-input", "asset_id": "v1"})
+    assert r.status_code == 400 and "拼接输入必须是图片" in r.json()["error"]
+
+
 # ── 建案例收图片源 ───────────────────────────────────────────────────────
 
 
