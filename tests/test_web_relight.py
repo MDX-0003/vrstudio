@@ -256,12 +256,13 @@ def test_op_argv_video_gt_passes_ref_frame_and_crf(tmp_path, client):
     assert "--crf" in argv and "0" in argv
 
 
-def test_op_argv_sample_omits_full_run_flags(tmp_path, client):
+def test_op_argv_sample_passes_ref_frame_but_not_crf(tmp_path, client):
     name = _ready_case(tmp_path, "video")
-    argv = web_app._op_argv(name, "relight", {"sample": 5, "ref_frame": 12})
+    argv = web_app._op_argv(name, "relight", {"sample": 5, "ref_frame": 12, "crf": 0})
     assert "--sample" in argv and "5" in argv
-    # 小样不编码整段：参考帧与编码质量在这条路径上没有意义。
-    assert "--ref-frame" not in argv
+    # 小样也要能钉参考帧；编码质量只对整段有意义。
+    assert "--ref-frame" in argv and "12" in argv
+    assert "--crf" not in argv
 
 
 def test_relight_draft_endpoint_persists_and_returns_no_prompt(tmp_path, client):

@@ -36,14 +36,13 @@ from ..case import CaseError, kind_of
 from ..media.imageio import ImageError, read_image, write_gray_png, write_png
 from ..media.videoio import FrameReader, FrameWriter, VideoIOError, probe
 from ..progress import Log, RateMeter
+from ..relight import cache as relight_cache
 from ..relight.align import (
     MAX_REFERENCE_SCAN,
-    MIN_FRAME_HOLD,
     MIN_REFERENCE_STRUCTURE,
     MIN_STRUCTURE_CORRELATION,
     AlignResult,
     estimate_similarity,
-    frame_hold,
     gray8,
     reference_small,
     structure_score,
@@ -151,12 +150,28 @@ class FixedLight:
     fields: LightFields
     ref_frame: int
     ref_matched: float        # 参考帧与氛围图的结构重合度（带通相关）
-    frames_checked: int       # 与参考帧按同一坐标比过的其余帧数；0 表示没有
-    min_hold: float | None    # 这些帧与参考帧的最低重合度；没有可比帧时为 None
 
-    @property
-    def static(self) -> bool:
-        return self.min_hold is None or self.min_hold >= MIN_FRAME_HOLD
+
+@dataclass(frozen=True)
+class RelightInputs:
+    """一次 relight 的输入与缓存身份。
+
+    ``cache_file`` 只在 ``--case`` 模式存在；显式 ``--gt/--atmo`` 不缓存。
+    ``gt_sha256``/``atmo_sha256`` 可能为 ``None``（手写或旧 case），这时靠
+    ``size + mtime_ns`` 区分文件。
+    """
+
+    gt: Path
+    atmo: Path
+    out: Path
+    report: Path | None
+    cache_file: Path | None = None
+    gt_sha256: str | None = None
+    gt_size: int = 0
+    gt_mtime_ns: int = 0
+    atmo_sha256: str | None = None
+    atmo_size: int = 0
+    atmo_mtime_ns: int = 0
 
 
 def _conf(config: Path | None, overrides: list[str]) -> config_mod.Config:
@@ -175,30 +190,61 @@ def _check_video(size: tuple[int, int]) -> None:
         _param_error(f"yuv420p 需要偶数宽高，收到 {width}x{height}")
 
 
-def resolve_reference(open_frames: Callable[[], Iterator[np.ndarray]], atmo,
-                      width: int, ref_frame: int | None, log: Log,
-                      *, check_hold: bool = True) -> tuple[FixedLight, np.ndarray]:
-    """挑参考帧、定变换与光照场，并检查其余帧是否与参考帧同位。
+@dataclass
+class _BestReference:
+    """扫描时留下的最佳帧：2K 小图用于比较，原分辨率图用于估光照场。"""
 
-    ``open_frames`` 每次调用打开一遍视频、返回逐帧迭代器。这里要读两遍：第一遍在
-    2K 小图上选参考帧并比较各帧，第二遍取参考帧原分辨率图来估光照场。
+    score: float = -np.inf
+    index: int = 0
+    small: np.ndarray | None = None
+    frame: np.ndarray | None = None
 
-    参考帧有两条来源：``ref_frame`` 显式给出（0 起，不合法是参数错），或跑一遍整段
-    在 2K 上选与氛围图最相关的一帧。选中的帧还要过结构闸门，不过就退出 1。
 
-    其余帧与参考帧**直接按像素**比结构重合度（``frame_hold``）。固定变换打光要求
-    画面在参考帧的坐标里不动，这条比较就是那个要求本身，不需要先估位移；机位移动时
-    这条比较会掉下来，命中后在报告里记最低值，由命令给出警告。
+def _read_frame(open_frames: Callable[..., Iterator[np.ndarray]],
+                index: int) -> np.ndarray | None:
+    """按帧号取一帧原分辨率图；取不到返回 ``None``。
 
-    ``check_hold=False`` 供 ``--sample`` 使用：小样预览的全部意义是快，而这一遍要解码
-    整段。跳过时 ``frames_checked`` 记为 0、``min_hold`` 记为 None。
+    显式参考帧与缓存命中的参考帧都只解这一帧，不再从片头顺序解码。
     """
+    with closing(open_frames(index=index)) as frames:
+        for frame in frames:
+            return np.array(frame, copy=True)
+    return None
+
+
+def resolve_reference(open_frames: Callable[..., Iterator[np.ndarray]], atmo,
+                      width: int, ref_frame: int | None, log: Log,
+                      *, cached: relight_cache.CachedFixed | None = None
+                      ) -> tuple[FixedLight, bool]:
+    """挑参考帧、定变换与光照场；命中缓存时跳过选帧扫描与 SIFT。
+
+    ``open_frames`` 每次调用打开一遍视频、返回逐帧迭代器；传 ``index`` 时按帧号
+    定位只取一帧。参考帧有两条来源：``ref_frame`` 显式给出（0 起，不合法是参数错），
+    或扫前 ``MAX_REFERENCE_SCAN`` 帧在 2K 上选与氛围图最相关的一帧。扫描时保留
+    最佳帧的原分辨率图，光照场直接用它，避免再从片头解码到参考帧。
+
+    ``cached`` 命中时不再扫描、不做 SIFT，只按缓存的参考帧取一帧并重算光照场；
+    返回值第二项表示是否用了缓存，供调用方决定是否写回。
+    """
+    if cached is not None:
+        reference = _read_frame(open_frames, cached.ref_frame)
+        if reference is not None:
+            log.info(f"reference: frame {cached.ref_frame} (cached), "
+                     f"structure {cached.ref_matched:.3f}")
+            fields = estimate_fields(reference, warp_to_gt(atmo, cached.alignment))
+            return FixedLight(alignment=cached.alignment, fields=fields,
+                              ref_frame=cached.ref_frame,
+                              ref_matched=cached.ref_matched), True
+        log.warn(f"缓存的参考帧 {cached.ref_frame} 在视频里取不到；重新选帧。")
+
     atmo_gray = gray8(reference_small(atmo, width)).astype(np.float32)
     # 扫描在 90 帧就 break，生成器不会被消费到底；不显式 close 的话它停在
     # ``with FrameReader`` 里面，那一路 ffmpeg 会一直挂着并占住 4–5 GB（8K 实测）。
-    with closing(open_frames()) as frames:
-        if ref_frame is None:
-            best = (-np.inf, 0, None)
+    if ref_frame is None:
+        # 扫描在 90 帧就 break，生成器不会被消费到底；不显式 close 的话它停在
+        # ``with FrameReader`` 里面，那一路 ffmpeg 会一直挂着并占住 4–5 GB（8K 实测）。
+        with closing(open_frames()) as frames:
+            best = _BestReference()
             scanned = 0
             for index, frame in enumerate(frames):
                 scanned += 1
@@ -207,27 +253,27 @@ def resolve_reference(open_frames: Callable[[], Iterator[np.ndarray]], atmo,
                 if float(gray.std()) < MIN_REFERENCE_STRUCTURE:
                     continue                      # 黑场/空镜：几乎没有结构可选
                 score = structure_score(gray, atmo_gray)
-                if score > best[0]:
-                    best = (score, index, small)
+                if score > best.score:
+                    # 只留最佳帧的原分辨率图；它替换旧的最佳帧，峰值不多出一帧。
+                    best = _BestReference(score, index, small,
+                                          np.array(frame, copy=True))
                 if index >= MAX_REFERENCE_SCAN:
                     break
-            if best[2] is None:
-                _runtime_error(f"前 {scanned} 帧里没有带结构的画面（可能是黑场或空镜）")
-            score, ref_index, ref_small = best
-            log.info(f"reference: frame {ref_index}, structure {score:.3f}")
-        else:
-            if ref_frame < 0:
-                _param_error(f"--ref-frame 必须从 0 起，收到 {ref_frame}")
-            ref_small = None
-            for index, frame in enumerate(frames):
-                if index == ref_frame:
-                    ref_small = reference_small(frame, width)
-                    break
-            if ref_small is None:
-                _param_error(f"--ref-frame {ref_frame} 超出视频帧数")
-            ref_index = ref_frame
-            score = structure_score(gray8(ref_small), atmo_gray)
-            log.info(f"reference: frame {ref_index}, structure {score:.3f}")
+        if best.frame is None or best.small is None:
+            _runtime_error(f"前 {scanned} 帧里没有带结构的画面（可能是黑场或空镜）")
+        score, ref_index = best.score, best.index
+        ref_small, reference = best.small, best.frame
+        log.info(f"reference: frame {ref_index}, structure {score:.3f}")
+    else:
+        if ref_frame < 0:
+            _param_error(f"--ref-frame 必须从 0 起，收到 {ref_frame}")
+        reference = _read_frame(open_frames, ref_frame)
+        if reference is None:
+            _param_error(f"--ref-frame {ref_frame} 超出视频帧数")
+        ref_index = ref_frame
+        ref_small = reference_small(reference, width)
+        score = structure_score(gray8(ref_small), atmo_gray)
+        log.info(f"reference: frame {ref_index}, structure {score:.3f}")
     if score < MIN_STRUCTURE_CORRELATION:
         # 只提示，不在这里中断：这一项是「未对齐」的带通相关，几像素的平移就能把它
         # 压到 0（实测拼接后的氛围图有 −9 px 位移，相关从 0.55 掉到 −0.01），而
@@ -237,40 +283,9 @@ def resolve_reference(open_frames: Callable[[], Iterator[np.ndarray]], atmo,
                  f"按对齐后的重合度判定。")
 
     alignment = estimate_similarity(ref_small, atmo)
-
-    ref_gray = gray8(ref_small)
-    checked = 0
-    min_hold = None
-    if check_hold:
-        # 重新打开：``open_frames()`` 的生成器被完整消费过一遍后再迭代什么也拿不到。
-        with closing(open_frames()) as held:
-            for index, frame in enumerate(held):
-                if index == ref_index:
-                    continue
-                hold = frame_hold(ref_gray, gray8(reference_small(frame, width)))
-                checked += 1
-                min_hold = hold if min_hold is None else min(min_hold, hold)
-
-    reference, fields = _reference_fields(open_frames, ref_index, atmo, alignment)
-    fixed = FixedLight(alignment=alignment, fields=fields, ref_frame=ref_index,
-                       ref_matched=score, frames_checked=checked, min_hold=min_hold)
-    return fixed, reference
-
-
-def _reference_fields(open_frames: Callable[[], Iterator[np.ndarray]], ref_index: int,
-                      atmo, alignment: AlignResult) -> tuple[np.ndarray, LightFields]:
-    """再读一遍视频，取参考帧的原分辨率图并估光照场。
-
-    扫描时只留了 2K 小图，光场要原分辨率的 GT 引导（引导滤波的半径按 2K 换算到
-    原尺寸，小图放大会丢掉遮挡边界）。再解一遍首段视频比把每帧原图留在内存里便宜，
-    也符合逐帧流式的约束。``ref_index`` 不超过扫描上限，所以这一遍的解码量有界。
-    """
-    with closing(open_frames()) as frames:
-        for index, frame in enumerate(frames):
-            if index == ref_index:
-                reference = np.ascontiguousarray(frame)
-                return reference, estimate_fields(reference, warp_to_gt(atmo, alignment))
-    _runtime_error(f"参考帧 {ref_index} 在第二次读视频时没有出现")
+    fields = estimate_fields(reference, warp_to_gt(atmo, alignment))
+    return FixedLight(alignment=alignment, fields=fields, ref_frame=ref_index,
+                      ref_matched=score), False
 
 
 def _write_report(report: Path | None, summary: dict) -> None:
@@ -287,17 +302,15 @@ def _write_report(report: Path | None, summary: dict) -> None:
 
 def _video_report(fixed: FixedLight, base: dict, frames: int, fps: str,
                   sample: dict | None = None) -> dict:
-    """视频版报告：``clip``/``light`` 与图像版同构，新增帧数、帧率与同位检查。
+    """视频版报告：``clip``/``light`` 与图像版同构，新增帧数、帧率与参考帧。
 
     ``sample`` 只在 ``--sample`` 时出现，记录小样的采样帧号；整段执行时该键不存在，
-    所以整段报告仍然是决策 56 定的那一组字段。
+    所以整段报告仍然是决策 56 定的那一组字段（决策 64 删掉了同位检查的两项）。
     """
     summary = {
         "gt": base["gt"], "atmo": base["atmo"], "size": base["size"],
         "frames": frames, "fps": fps,
         "ref_frame": fixed.ref_frame, "ref_matched": round(fixed.ref_matched, 4),
-        "frames_checked": fixed.frames_checked,
-        "min_hold": None if fixed.min_hold is None else round(fixed.min_hold, 4),
         "params": base["params"], "align": base["align"],
         "clip": base["clip"], "light": base["light"], "seconds": base["seconds"],
     }
@@ -420,17 +433,17 @@ def _write_samples(out_dir: Path, info, conf, light, indices: list[int],
     return written
 
 
-def _relight_video(gt: Path, atmo: Path, out: Path, params: Params, conf,
+def _relight_video(inputs: RelightInputs, params: Params, conf,
                    log: Log, *, ref_frame: int | None, sample: int | None,
-                   crf: int | None, report: Path | None, started: float) -> None:
+                   crf: int | None, started: float) -> None:
     """整段路径：对齐与光照场只估一次，整段逐帧复用；``--sample`` 时只写采样帧。"""
     video_cfg = dict(conf.video, **({"crf": crf} if crf is not None else {}))
     try:
-        atmo_image = read_image(atmo)
+        atmo_image = read_image(inputs.atmo)
     except ImageError as exc:
         _runtime_error(str(exc))
     try:
-        info = probe(gt, conf)
+        info = probe(inputs.gt, conf)
     except VideoIOError as exc:
         _runtime_error(str(exc))
     _check_video(info.size)
@@ -445,22 +458,54 @@ def _relight_video(gt: Path, atmo: Path, out: Path, params: Params, conf,
              f"{mode} scene={params.scene} strength={params.strength} "
              f"local-shading={params.local_shading}")
 
-    def open_frames() -> Iterator[np.ndarray]:
+    def open_frames(index: int | None = None) -> Iterator[np.ndarray]:
+        """打开视频；传 ``index`` 时按帧号定位，只取一帧。"""
+        if index is None:
+            with FrameReader(info, conf) as reader:
+                yield from reader
+            return
+        if info.fps_float > 0:
+            with FrameReader(info, conf, seek=index / info.fps_float,
+                             count=1) as reader:
+                yield from reader
+            return
         with FrameReader(info, conf) as reader:
-            yield from reader
+            for current, frame in enumerate(reader):
+                if current == index:
+                    yield frame
+                    return
+
+    cached = None
+    cache_key = None
+    if inputs.cache_file is not None:
+        cache_key = relight_cache.CacheKey(
+            gt_sha256=inputs.gt_sha256, gt_size=inputs.gt_size,
+            gt_mtime_ns=inputs.gt_mtime_ns,
+            atmo_sha256=inputs.atmo_sha256, atmo_size=inputs.atmo_size,
+            atmo_mtime_ns=inputs.atmo_mtime_ns,
+            ref_frame="auto" if ref_frame is None else ref_frame,
+        )
+        cached = relight_cache.load(inputs.cache_file, cache_key)
+        if cached is not None:
+            log.info(f"fixed: cache hit, reference frame {cached.ref_frame}")
+        else:
+            log.info("fixed: cache miss; scanning reference frame")
 
     try:
-        fixed, reference = resolve_reference(
-            open_frames, atmo_image, width, ref_frame, log,
-            check_hold=sample is None)
+        fixed, from_cache = resolve_reference(
+            open_frames, atmo_image, width, ref_frame, log, cached=cached)
     except VideoIOError as exc:
         _runtime_error(str(exc))
     _check_alignment(fixed)
-    if sample is None and not fixed.static:
-        log.warn(f"机位在动：{fixed.frames_checked} 帧里有帧与参考帧的结构重合度只有 "
-                 f"{fixed.min_hold:.3f}（下限 {MIN_FRAME_HOLD}）。固定光照场在这类"
-                 f"画面上会错位，逐帧重估与时间平滑尚未实现。")
-    del reference
+    if (inputs.cache_file is not None and cache_key is not None
+            and not from_cache):
+        saved = relight_cache.save(
+            inputs.cache_file, cache_key,
+            relight_cache.CachedFixed(ref_frame=fixed.ref_frame,
+                                      ref_matched=fixed.ref_matched,
+                                      alignment=fixed.alignment))
+        if not saved:
+            log.warn(f"fixed: 缓存写入失败，下次仍会重算：{inputs.cache_file}")
 
     light = light_compose(fixed.fields, (width, height), params.strength,
                           params.local_shading)
@@ -469,17 +514,17 @@ def _relight_video(gt: Path, atmo: Path, out: Path, params: Params, conf,
         indices = _sample_indices(info.frames, sample)
         if not info.frames:
             log.warn("ffprobe 未报告帧数：小样从片头连续取，不是全片均匀采样")
-        written = _write_samples(out, info, conf, light, indices, params, log)
+        written = _write_samples(inputs.out, info, conf, light, indices, params, log)
         if not written:
             _runtime_error("小样一帧都没写出来：GT 视频解码不出任何帧")
         base = build_report(
-            gt=str(gt), atmo=str(atmo), size=(width, height),
+            gt=str(inputs.gt), atmo=str(inputs.atmo), size=(width, height),
             params=params.as_dict(), align=align_report(fixed.alignment, width),
             clip=None, light=light_report(fixed.fields),
             seconds=time.perf_counter() - started,
         )
-        typer.echo(f"wrote {len(written)} sample frames -> {out}")
-        _write_report(report, _video_report(
+        typer.echo(f"wrote {len(written)} sample frames -> {inputs.out}")
+        _write_report(inputs.report, _video_report(
             fixed, base, info.frames, info.fps,
             sample={"count": len(written), "frames": indices}))
         return
@@ -488,8 +533,8 @@ def _relight_video(gt: Path, atmo: Path, out: Path, params: Params, conf,
     meter = RateMeter(info.frames or None, log)
     log.step("render pass")
     try:
-        with FrameWriter(out, info.size, info.fps, video_cfg,
-                         audio_from=gt, config=conf) as writer:
+        with FrameWriter(inputs.out, info.size, info.fps, video_cfg,
+                         audio_from=inputs.gt, config=conf) as writer:
             with FrameReader(info, conf) as reader:
                 for frame in reader:
                     relit = light.apply(np.ascontiguousarray(frame))
@@ -501,10 +546,10 @@ def _relight_video(gt: Path, atmo: Path, out: Path, params: Params, conf,
                     meter.tick()
         written = writer.frames_written
     except VideoIOError as exc:
-        Path(out).unlink(missing_ok=True)
+        Path(inputs.out).unlink(missing_ok=True)
         _runtime_error(f"编码失败：{exc}")
     if not written:
-        Path(out).unlink(missing_ok=True)
+        Path(inputs.out).unlink(missing_ok=True)
         _runtime_error("GT 视频解码不出任何帧")
 
     clip_stats = None
@@ -516,13 +561,13 @@ def _relight_video(gt: Path, atmo: Path, out: Path, params: Params, conf,
                  f"{clip_stats['clipped_before']}")
     meter.done()
     base = build_report(
-        gt=str(gt), atmo=str(atmo), size=(width, height),
+        gt=str(inputs.gt), atmo=str(inputs.atmo), size=(width, height),
         params=params.as_dict(), align=align_report(fixed.alignment, width),
         clip=clip_stats, light=light_report(fixed.fields),
         seconds=time.perf_counter() - started,
     )
-    typer.echo(f"wrote {out}  ({meter.summary()})")
-    _write_report(report, _video_report(fixed, base, written, info.fps))
+    typer.echo(f"wrote {inputs.out}  ({meter.summary()})")
+    _write_report(inputs.report, _video_report(fixed, base, written, info.fps))
 
 
 @app.command()
@@ -569,10 +614,10 @@ def relight(
         _param_error(f"软裁切参数须满足 0 < knee < max <= 1，"
                      f"收到 knee={clip_knee}，max={clip_max}")
 
-    gt, atmo, out, report = _resolve_inputs(gt, atmo, out, case, cases_dir, sample, report)
+    inputs = _resolve_inputs(gt, atmo, out, case, cases_dir, sample, report)
 
     try:
-        kind = kind_of(gt)
+        kind = kind_of(inputs.gt)
     except CaseError as exc:
         _param_error(str(exc))
     if kind == "image":
@@ -593,30 +638,31 @@ def relight(
                     highlight_clip=highlight_clip, clip_knee=clip_knee,
                     clip_max=clip_max)
     if kind == "image":
-        _relight_image(gt, atmo, out, params, dump_light=dump_light,
-                       report=report, started=started)
+        _relight_image(inputs.gt, inputs.atmo, inputs.out, params,
+                       dump_light=dump_light, report=inputs.report, started=started)
     else:
-        _relight_video(gt, atmo, out, params, _conf(config, overrides), log,
+        _relight_video(inputs, params, _conf(config, overrides), log,
                        ref_frame=ref_frame, sample=sample, crf=crf,
-                       report=report, started=started)
+                       started=started)
     if case:
-        _record_into_case(case, cases_dir, out, sample is not None)
+        _record_into_case(case, cases_dir, inputs.out, sample is not None)
 
 
 def _resolve_inputs(gt: Path | None, atmo: Path | None, out: Path | None,
                     case: str | None, cases_dir: Path | None, sample: int | None,
-                    report: Path | None) -> tuple[Path, Path, Path, Path | None]:
+                    report: Path | None) -> RelightInputs:
     """把 ``--case`` 或三个显式路径解析成同一组入参。
 
     ``--case`` 只从两个槽位取文件，不接受同时给 ``--gt``/``--atmo``：一份文件有两个来源
     会让「case 里记的是哪张」变得含糊。产物位置也由 case 决定，所以 ``--out`` 同样不接受。
+    ``--case`` 模式额外带缓存身份；显式路径没有 ``cache_file``，不缓存。
     """
     if case is None:
         missing = [flag for flag, value in (("--gt", gt), ("--atmo", atmo),
                                             ("--out", out)) if value is None]
         if missing:
             _param_error(f"没有 --case 时必须给 {'、'.join(missing)}")
-        return gt, atmo, out, report
+        return RelightInputs(gt=gt, atmo=atmo, out=out, report=report)
     if gt is not None or atmo is not None or out is not None:
         _param_error("--case 与 --gt/--atmo/--out 只能选一种：以 case 为单位时"
                      "输入取自两个槽位、产物写 case 的 out/")
@@ -636,10 +682,27 @@ def _resolve_inputs(gt: Path | None, atmo: Path | None, out: Path | None,
     stamp = time.strftime("%Y%m%d-%H%M%S")
     target = (cdir / "out" / "samples" / stamp if sample is not None
               else cdir / "out" / f"{stamp}_relit{suffix}")
-    return (gt_asset.resolved(loaded, cases_dir),
-            atmo_asset.resolved(loaded, cases_dir),
-            target,
-            report if report is not None else target.with_suffix(".json"))
+    gt_path = gt_asset.resolved(loaded, cases_dir)
+    atmo_path = atmo_asset.resolved(loaded, cases_dir)
+    cache_file = None
+    gt_size = gt_mtime_ns = atmo_size = atmo_mtime_ns = 0
+    try:
+        gt_stat = gt_path.stat()
+        atmo_stat = atmo_path.stat()
+    except OSError:
+        pass                     # 文件不在了：后面的读图/探测会按运行失败报出来
+    else:
+        cache_file = relight_cache.cache_path(cdir)
+        gt_size, gt_mtime_ns = gt_stat.st_size, gt_stat.st_mtime_ns
+        atmo_size, atmo_mtime_ns = atmo_stat.st_size, atmo_stat.st_mtime_ns
+    return RelightInputs(
+        gt=gt_path, atmo=atmo_path, out=target,
+        report=report if report is not None else target.with_suffix(".json"),
+        cache_file=cache_file,
+        gt_sha256=gt_asset.sha256, gt_size=gt_size, gt_mtime_ns=gt_mtime_ns,
+        atmo_sha256=atmo_asset.sha256, atmo_size=atmo_size,
+        atmo_mtime_ns=atmo_mtime_ns,
+    )
 
 
 def _record_into_case(case: str, cases_dir: Path | None, out: Path,

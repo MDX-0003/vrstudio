@@ -44,12 +44,6 @@ MIN_STRUCTURE_CORRELATION = 0.15
 MAX_REFERENCE_SCAN = 90
 """视频选参考帧时最多挑几张试；固定机位下相关曲线很平，90 张够覆盖整段。"""
 
-MIN_FRAME_HOLD = 0.94
-"""其余帧与参考帧按同一坐标比的结构重合度下限；低于它就判「画面在动」。
-
-合成素材实测：同坐标 1.0、平移 4 像素 0.99、16 像素 0.887、40 像素 0.798。下限取
-0.94，约等于画面整体位移 10 像素以上就判在动。"""
-
 MIN_REFERENCE_STRUCTURE = 12.0
 """选参考帧时，2K 灰度缩略图的标准差下限：黑场与空镜几乎没有结构，不能被选中。
 
@@ -122,17 +116,6 @@ def reference_small(frame: np.ndarray, width: int) -> np.ndarray:
                       interpolation=cv2.INTER_AREA).copy()
 
 
-def frame_hold(reference_gray: np.ndarray, frame_gray: np.ndarray) -> float:
-    """参考帧与另一帧直接按像素比的结构重合度：机位没动时接近 1。
-
-    用固定变换打光要求整段画面在参考帧的坐标里不动，所以判据就是「这一帧和参考帧
-    按同一坐标比得上吗」，不需要先估出位移。带通去掉了整体明暗，光照变化不影响它；
-    实测同一坐标的静止帧 0.97 以上，画面整体平移后明显下降。
-    """
-    return structure_correlation(reference_gray.astype(np.float32),
-                                 frame_gray.astype(np.float32))
-
-
 def reference_score(frame: np.ndarray, width: int,
                     atmo_gray: np.ndarray | None = None) -> float:
     """这一帧有多适合当参考帧。
@@ -157,7 +140,8 @@ def search_matrix(candidate: np.ndarray, reference: np.ndarray) -> np.ndarray:
     """相位相关（带通后）求两帧之间的纯平移，坐标在 2K 工作尺度上。
 
     只用于小幅位移：带通图像的能量集中在低频，纯平移超过半个通带周期（几十像素）
-    时，相位相关的峰值会塌成噪声。视频版判断机位是否移动不用它，用 ``frame_hold``。
+    时，相位相关的峰值会塌成噪声。视频版不做逐帧同位检查（决策 64），只用它估
+    ``estimate_similarity`` 的回退平移。
     """
     (dx, dy), _ = cv2.phaseCorrelate(band_pass(reference.astype(np.float32)),
                                      band_pass(candidate.astype(np.float32)))

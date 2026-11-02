@@ -17,12 +17,18 @@ from tests.test_relight import (
     VH,
     VN,
     VW,
+    read_video,
     video_erp_without_edges,
     write_video,
 )
 from vrstudio.cli import app
+from vrstudio.cli.relight import resolve_reference
 from vrstudio.media.binres import find_tool
 from vrstudio.media.imageio import write_png
+from vrstudio.progress import Log
+from vrstudio.relight.align import warp_to_gt
+from vrstudio.relight.cache import CachedFixed
+from vrstudio.relight.fields import estimate_fields
 
 runner = CliRunner()
 
@@ -184,9 +190,6 @@ def test_sample_writes_frames_without_encoding(sources):
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["sample"]["count"] == 3
     assert len(report["sample"]["frames"]) == 3
-    # 小样跳过整段同位检查，所以这两个字段取「没有比较过」的默认值。
-    assert report["frames_checked"] == 0
-    assert report["min_hold"] is None
 
 
 def test_retired_command_name_is_gone(sources):
@@ -257,3 +260,141 @@ def test_case_flag_sample_writes_into_case_out(sources):
     assert len(samples) == 2, result.output
     # 小样不改 current：指针仍是两个槽位，没有成片指针。
     assert "current" not in (case_mod.load("rl", tmp_path).relight or {})
+
+
+# ── 固定光照缓存与单遍解码（决策 64）──────────────────────────────────────
+
+
+def _open_frames(frames, calls):
+    """假的 ``open_frames``：记录每次打开时的 index，按 index 返回对应帧。"""
+    def opener(index=None):
+        calls.append(index)
+
+        def generate():
+            if index is None:
+                for frame in frames:
+                    yield frame
+            elif 0 <= index < len(frames):
+                yield frames[index]
+
+        return generate()
+    return opener
+
+
+def _shifted_frames():
+    return [video_erp_without_edges(shift=index * 8) for index in range(VN)]
+
+
+def test_reference_scan_keeps_the_best_frame_in_one_pass():
+    """自动选帧只开一次视频，光照场直接用扫描留下的原分辨率最佳帧。"""
+    frames = _shifted_frames()
+    atmo = frames[3]
+    calls = []
+    fixed, from_cache = resolve_reference(
+        _open_frames(frames, calls), atmo, VW, None, Log(quiet=True))
+    assert not from_cache
+    assert calls == [None]
+    assert fixed.ref_frame == 3
+    expected = estimate_fields(frames[fixed.ref_frame],
+                               warp_to_gt(atmo, fixed.alignment))
+    assert np.array_equal(fixed.fields.gain, expected.gain)
+    assert np.array_equal(fixed.fields.visibility, expected.visibility)
+    assert np.array_equal(fixed.fields.white_balance, expected.white_balance)
+
+
+def test_explicit_reference_frame_reads_only_that_frame():
+    """显式参考帧按帧号 seek，不再从片头顺序解码。"""
+    frames = _shifted_frames()
+    calls = []
+    fixed, from_cache = resolve_reference(
+        _open_frames(frames, calls), frames[3], VW, 3, Log(quiet=True))
+    assert not from_cache
+    assert calls == [3]
+    assert fixed.ref_frame == 3
+
+
+def test_cached_reference_skips_the_scan_and_sift(monkeypatch):
+    """缓存命中时不再选帧、不再做 SIFT，只取一帧重算光照场。"""
+    import vrstudio.cli.relight as relight_cli
+
+    frames = _shifted_frames()
+    atmo = frames[3]
+    cold, _ = resolve_reference(
+        _open_frames(frames, []), atmo, VW, None, Log(quiet=True))
+    cached = CachedFixed(cold.ref_frame, cold.ref_matched, cold.alignment)
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("estimate_similarity ran despite a fresh cache")
+
+    monkeypatch.setattr(relight_cli, "estimate_similarity", boom)
+    calls = []
+    warm, from_cache = resolve_reference(
+        _open_frames(frames, calls), atmo, VW, None, Log(quiet=True),
+        cached=cached)
+    assert from_cache
+    assert calls == [cold.ref_frame]
+    assert np.array_equal(warm.fields.gain, cold.fields.gain)
+    assert np.array_equal(warm.fields.visibility, cold.fields.visibility)
+    assert np.array_equal(warm.fields.white_balance, cold.fields.white_balance)
+
+
+def _shifted_sources(tmp_path):
+    """带位移的 6 帧视频：自动选帧必须落在第 3 帧，seek 偏一帧会改变光照场。"""
+    frames = _shifted_frames()
+    video = write_video(tmp_path / "gt_shift.mp4", frames)
+    atmo = write_png(tmp_path / "atmo_shift.png", frames[3])
+    return tmp_path, video, atmo, frames
+
+
+@pytest.mark.skipif(find_tool("ffmpeg.exe") is None or find_tool("ffprobe.exe") is None,
+                    reason="external ffmpeg not populated in bin/ (see bin/README.md)")
+def test_case_sample_reuses_the_fixed_cache(tmp_path, monkeypatch):
+    """同一 case 的第二次小样命中缓存，且两次小样逐位一致。"""
+    _tmp, video, atmo, _frames = _shifted_sources(tmp_path)
+    _relight_case(tmp_path, video, atmo)
+    stamps = iter(["20261102-120000", "20261102-120001"])
+    monkeypatch.setattr("vrstudio.cli.relight.time.strftime",
+                        lambda _fmt: next(stamps))
+
+    first = run_video_cli("--case", "rl", "--cases-dir", str(tmp_path),
+                          "--sample", "6")
+    assert first.exit_code == 0, first.output
+    assert "cache miss" in first.output
+    second = run_video_cli("--case", "rl", "--cases-dir", str(tmp_path),
+                           "--sample", "6")
+    assert second.exit_code == 0, second.output
+    assert "cache hit" in second.output
+    assert (tmp_path / "rl" / "derived" / "relight" / "fixed.json").is_file()
+
+    first_dir = tmp_path / "rl" / "out" / "samples" / "20261102-120000"
+    second_dir = tmp_path / "rl" / "out" / "samples" / "20261102-120001"
+    first_files = sorted(first_dir.glob("sample_*.png"))
+    second_files = sorted(second_dir.glob("sample_*.png"))
+    assert len(first_files) == len(second_files) == 6
+    for a, b in zip(first_files, second_files):
+        assert np.array_equal(cv2.imread(str(a)), cv2.imread(str(b)))
+
+
+@pytest.mark.skipif(find_tool("ffmpeg.exe") is None or find_tool("ffprobe.exe") is None,
+                    reason="external ffmpeg not populated in bin/ (see bin/README.md)")
+def test_case_full_run_reuses_the_fixed_cache_and_keeps_pixels(tmp_path, monkeypatch):
+    """整段第二次命中缓存，输出帧与冷跑逐位一致。"""
+    _tmp, video, atmo, _frames = _shifted_sources(tmp_path)
+    _relight_case(tmp_path, video, atmo)
+    stamps = iter(["20261102-120000", "20261102-120001"])
+    monkeypatch.setattr("vrstudio.cli.relight.time.strftime",
+                        lambda _fmt: next(stamps))
+
+    args = ("--case", "rl", "--cases-dir", str(tmp_path),
+            "--crf", "0", "--set", "video.preset=ultrafast")
+    first = run_video_cli(*args)
+    assert first.exit_code == 0, first.output
+    second = run_video_cli(*args)
+    assert second.exit_code == 0, second.output
+    assert "cache hit" in second.output
+
+    first_video = tmp_path / "rl" / "out" / "20261102-120000_relit.mp4"
+    second_video = tmp_path / "rl" / "out" / "20261102-120001_relit.mp4"
+    assert first_video.is_file() and second_video.is_file()
+    for a, b in zip(read_video(first_video), read_video(second_video)):
+        assert np.array_equal(a, b)

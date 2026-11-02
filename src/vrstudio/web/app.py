@@ -3363,11 +3363,10 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
         sample = body.get("sample")
         if sample:
             argv += ["--sample", str(int(sample))]
-        else:
-            if body.get("ref_frame") is not None:
-                argv += ["--ref-frame", str(int(body["ref_frame"]))]
-            if body.get("crf") is not None:
-                argv += ["--crf", str(int(body["crf"]))]
+        if body.get("ref_frame") is not None:
+            argv += ["--ref-frame", str(int(body["ref_frame"]))]
+        if not sample and body.get("crf") is not None:
+            argv += ["--crf", str(int(body["crf"]))]
         if body.get("scene"):
             argv += ["--scene", str(body["scene"])]
         for key, flag in (("strength", "--strength"),

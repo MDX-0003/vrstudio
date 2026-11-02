@@ -16,8 +16,6 @@ interface RelightReport {
   fps?: string
   ref_frame?: number
   ref_matched?: number
-  frames_checked?: number
-  min_hold?: number | null
   align: {
     trusted: boolean
     inliers: number
@@ -347,19 +345,6 @@ const percent = (value: number | undefined): string =>
             <template v-if="report.ref_frame !== undefined">
               <span>参考帧</span>
               <span>{{ report.ref_frame }}</span>
-              <span>同位检查</span>
-              <span>
-                {{ report.frames_checked ?? 0 }} 帧，最低
-                {{ report.min_hold === null || report.min_hold === undefined ? '—' : report.min_hold }}
-                <el-tag
-                  v-if="report.min_hold !== null && report.min_hold !== undefined && report.min_hold < 0.94"
-                  size="small"
-                  type="warning"
-                  effect="light"
-                >
-                  机位可能在动
-                </el-tag>
-              </span>
             </template>
             <span>高光裁切</span>
             <span>{{ report.clip ? percent(report.clip.clipped_before ?? undefined) : '未开启' }}</span>

@@ -3,8 +3,9 @@
 CLI 三条错误路径分别对应退出码：比例/尺寸/参数越界是 2，读图失败与对齐不可信是 1。
 
 视频路径（决策 56，2026-10-30 起由同一条 ``relight`` 按 GT 媒体类型派发，决策 60）
-在本文件末尾：拍平光场的逐位一致性、同位判据、真实文件端到端（需要 ``bin/ffmpeg.exe``，
-缺了跳过）。它的视频错误路径在 ``tests/test_relight_video.py``。
+在本文件末尾：拍平光场的逐位一致性、真实文件端到端（需要 ``bin/ffmpeg.exe``，
+缺了跳过）。它的视频错误路径在 ``tests/test_relight_video.py``。决策 64 起不再做
+逐帧同位检查。
 
 8K 冒烟用真实素材（``sources/``、``cases/``，都不进 git），缺文件时跳过；标 ``slow``，
 本地用 ``uv run pytest -m slow`` 显式跑。
@@ -27,10 +28,8 @@ from vrstudio.media.binres import find_tool
 from vrstudio.media.imageio import write_png
 from vrstudio.media.videoio import FrameReader, FrameWriter, probe
 from vrstudio.relight.align import (
-    MIN_FRAME_HOLD,
     MIN_STRUCTURE_CORRELATION,
     estimate_similarity,
-    frame_hold,
     gray8,
     matrix_at_full_size,
     warp_to_gt,
@@ -445,10 +444,8 @@ def test_video_strength_zero_keeps_gt_pixels(tmp_path):
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert set(report) == {
         "gt", "atmo", "size", "frames", "fps", "ref_frame", "ref_matched",
-        "frames_checked", "min_hold", "params", "align", "clip", "light", "seconds"}
+        "params", "align", "clip", "light", "seconds"}
     assert report["size"] == [VW, VH] and report["frames"] == VN
-    assert report["frames_checked"] == VN - 1
-    assert report["min_hold"] >= MIN_FRAME_HOLD
     assert report["params"]["strength"] == 0.0
     assert report["clip"] is None
     assert set(report["align"]) == {
@@ -473,7 +470,6 @@ def test_video_reference_frame_and_lighting(tmp_path):
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["align"]["trusted"] is True
     assert 0 <= report["ref_frame"] < VN
-    assert report["frames_checked"] == VN - 1
     got = read_video(out)
     assert len(got) == VN
     # 氛围图压暗了画面，打光后均值应当低于 GT 的均值，且不是全黑
@@ -517,16 +513,3 @@ def test_video_audio_is_copied(tmp_path):
     after = probe(out)
     assert after.has_audio, "audio stream was not carried over"
     assert after.frames == VN and after.size == (VW, VH)
-
-
-# ── 同位检查：静止帧必须过、移动帧必须被抓住 ──────────────────────────────
-
-
-def test_frame_hold_follows_the_threshold():
-    """同一坐标的帧等于 1，每帧挪 16 像素就掉到下限以下（实测 0.887）。"""
-    reference = gray8(video_erp_without_edges())
-    assert frame_hold(reference, reference) == pytest.approx(1.0, abs=1e-4)
-    assert frame_hold(reference, gray8(video_erp_without_edges())) > MIN_FRAME_HOLD
-    assert frame_hold(reference, gray8(video_erp_without_edges(16))) < MIN_FRAME_HOLD
-    assert frame_hold(reference, gray8(video_erp_without_edges(40))) < MIN_FRAME_HOLD
-
