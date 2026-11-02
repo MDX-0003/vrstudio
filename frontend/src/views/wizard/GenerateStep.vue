@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
   fetchCase,
@@ -20,7 +21,7 @@ import { defaultRole } from '@/constants/assetRoles'
 import { useCaseSaveQueue } from '@/composables/useCaseSaveQueue'
 import { useCaseTasks } from '@/composables/useCaseTasks'
 import { buildPromptVariables, shouldExpirePreview } from '@/utils/prompt'
-import { visibleRounds } from '@/utils/rounds'
+import { imageRoundStatus, visibleRounds } from '@/utils/rounds'
 import { IMAGE_AUTO_ROLES, IMAGE_ROLE_MODE } from '@/utils/roles'
 import { aggregateSaveState, type SaveState } from '@/utils/saveState'
 import type { PromptVariable } from '@/types/case'
@@ -154,6 +155,20 @@ type RunStatus =
   | '失败'
 const status = ref<RunStatus>('未预演')
 const statusDetail = ref('')
+/**
+ * 图片流程的状态回显：本地运行态优先，没有再按轮次台账推导。
+ * 页面刷新或 serve 重启后 status 会回到「未预演」，但成片已经出了，
+ * 继续显示未预演会让人以为没生成。
+ */
+const displayStatus = computed(() => {
+  if (status.value !== '未预演') return status.value
+  return isImageFlow.value ? imageRoundStatus(props.info.image_rounds) : status.value
+})
+const router = useRouter()
+
+function goStep(step: 'merge' | 'compare'): void {
+  void router.push(`/case/${caseName.value}/${step}`)
+}
 const previewPassedSig = ref<string | null>(null)
 const activeTask = ref<TaskView | null>(null)
 const adoptingRound = ref<string | null>(null)
@@ -969,15 +984,17 @@ function statusTone(): string {
         :generate-gate="generateGate"
         :extracting="extracting"
         :running="running"
-        :status="status"
+        :status="displayStatus"
         :status-detail="statusDetail"
         :run-block-reason="runBlockReason"
         :session-ready="imageSessionReady"
         :adopting-key="adoptingImageKey"
+        :active-task="activeTask"
         @extract="runImageExtract"
         @dry-run="dryRun"
         @submit="submit"
         @adopt="adoptImage"
+        @go="goStep"
         @refresh-sessions="refreshSessions"
       />
       <GenerateResults

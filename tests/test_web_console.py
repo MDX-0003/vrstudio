@@ -2108,6 +2108,31 @@ def test_task_view_and_queue_filter():
     assert all_rows[1]["queue_position"] == 2
 
 
+def test_task_history_survives_restart(tmp_path, monkeypatch):
+    """任务历史落盘：serve 重启后队列重建仍能列出已结束任务与日志尾巴。"""
+    monkeypatch.setenv("VRSTUDIO_LOGS_DIR", str(tmp_path / "logs"))
+    task = tasks_mod.Task("submit", "p1", ["echo"])
+    task.state = "done"
+    task.created_at = "2026-11-02T09:49:45+08:00"
+    task.started_at = "2026-11-02T09:49:46+08:00"
+    task.finished_at = "2026-11-02T09:50:59+08:00"
+    task.out_path = tasks_mod._task_log_path(task.id, task.kind, task.case)
+    task.out_path.write_text("gate ok 1 candidate(s)\n", encoding="utf-8")
+
+    tasks_mod.TaskQueue().record(task)
+    restarted = tasks_mod.TaskQueue()
+    restarted.restore_history()
+    rows = restarted.list()
+    assert [row["id"] for row in rows] == [task.id]
+    assert rows[0]["status"] == "done"
+    assert rows[0]["tail"] == ["gate ok 1 candidate(s)"]
+
+    task.out_path.unlink()
+    gone = tasks_mod.TaskQueue()
+    gone.restore_history()
+    assert gone.list() == []
+
+
 def test_tasks_api_returns_owner_and_positions(client, monkeypatch):
     from vrstudio.web.identity import User
 

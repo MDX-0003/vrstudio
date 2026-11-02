@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
 import { VideoPlay } from '@element-plus/icons-vue'
 import FileRow from '@/components/common/FileRow.vue'
-import { taskStatusMeta } from '@/constants/taskStatus'
+import TaskPanel from '@/components/common/TaskPanel.vue'
 import { roundResultText, roundResultType } from '@/utils/rounds'
 import type { OutputFile, RoundSummary } from '@/types/case-info'
 import type { TaskView } from '@/types/task'
@@ -18,18 +17,10 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{ adopt: [round: RoundSummary] }>()
-const showTaskTail = ref(false)
 
 function isAdopted(round: RoundSummary): boolean {
   return round.round === props.adoptedRound
 }
-
-watch(
-  () => props.activeTask?.id,
-  () => {
-    showTaskTail.value = false
-  },
-)
 
 function formatRoundTime(value: string): string {
   if (!value) return '—'
@@ -121,61 +112,10 @@ function formatRoundTime(value: string): string {
     </div>
   </div>
 
-  <div class="panel">
-    <div class="panel-head">
-      <h2 class="panel-title">最近任务</h2>
-      <el-tag
-        v-if="activeTask"
-        size="small"
-        effect="light"
-        :type="taskStatusMeta(activeTask.status).type"
-      >
-        {{ activeTask.kind }} · {{ taskStatusMeta(activeTask.status).text }}
-      </el-tag>
-      <span v-else class="muted">无</span>
-    </div>
-    <div class="panel-body">
-      <div v-if="!activeTask" class="muted task-empty">这个 case 还没有任务。</div>
-      <template v-else>
-        <div class="task-summary">
-          <span>{{ activeTask.kind }}</span>
-          <span class="muted mono">{{ activeTask.id }}</span>
-          <span v-if="activeTask.queue_position" class="muted"
-            >排队第 {{ activeTask.queue_position }} 位</span
-          >
-        </div>
-        <el-alert
-          v-if="activeTask.error"
-          type="error"
-          :closable="false"
-          :title="activeTask.error"
-          class="task-error"
-        />
-        <el-button
-          v-if="activeTask.tail.length"
-          link
-          size="small"
-          @click="showTaskTail = !showTaskTail"
-        >
-          {{ showTaskTail ? '收起技术详情' : '查看技术详情' }}
-        </el-button>
-        <pre v-if="showTaskTail && activeTask.tail.length" class="task-tail">{{
-          activeTask.tail.join('\n')
-        }}</pre>
-      </template>
-    </div>
-  </div>
+  <TaskPanel :task="activeTask" />
 </template>
 
 <style scoped>
-.task-empty {
-  padding: var(--space-2) 0;
-}
-
-.task-error {
-  margin-top: var(--space-2);
-}
-
 .output-frame {
   display: flex;
   flex-direction: column;

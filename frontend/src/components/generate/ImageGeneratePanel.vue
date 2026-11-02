@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Refresh, VideoPlay } from '@element-plus/icons-vue'
-import { latestImageRound } from '@/utils/rounds'
+import TaskPanel from '@/components/common/TaskPanel.vue'
+import { adoptedImageRound, latestResultRound } from '@/utils/rounds'
 import type { Gate } from '@/types/case'
 import type { CaseInfo, ModelOption } from '@/types/case-info'
 import type { EpisodeOption, ProjectOption, SessionOption } from '@/types/session'
+import type { TaskView } from '@/types/task'
 
 const props = defineProps<{
   caseName: string
@@ -26,6 +28,7 @@ const props = defineProps<{
   runBlockReason: string
   sessionReady: boolean
   adoptingKey: string | null
+  activeTask: TaskView | null
 }>()
 
 const resolution = defineModel<string>('resolution', { required: true })
@@ -41,10 +44,21 @@ const emit = defineEmits<{
   submit: []
   adopt: [round: string, index: number]
   'refresh-sessions': []
+  go: [step: 'merge' | 'compare']
 }>()
 
 const NUM_OPTIONS = [1, 2, 3, 4]
-const round = computed(() => latestImageRound(props.info.image_rounds))
+/** 候选只认「有结果的最新一轮」：空 prepared 轮次不能把真实结果顶掉。 */
+const round = computed(() => latestResultRound(props.info.image_rounds))
+/** 采用的可能不是最新一轮，底部那行单独标出来。 */
+const adopted = computed(() => adoptedImageRound(props.info.image_rounds))
+
+const adoptedUrl = computed(() => {
+  const current = adopted.value
+  const index = props.info.adopt_index
+  if (!current || index == null) return ''
+  return `/img/round/${props.caseName}/${current.round}/${index}`
+})
 
 function isAdopted(index: number): boolean {
   const current = round.value
@@ -249,11 +263,28 @@ const extractLabel = computed(() => (props.info.flow === 'patchimg' ? '运行抽
           </div>
         </div>
       </div>
-      <p v-if="round && round.adopted" class="muted adopt-hint">
-        当前采用：{{ round.round }} 第 {{ info.adopt_index ?? '—' }} 张
-      </p>
+      <div v-if="adopted" class="adopted-bar">
+        <span class="muted">
+          当前采用：{{ adopted.round }} 第 {{ info.adopt_index ?? '—' }} 张
+        </span>
+        <div class="adopted-actions">
+          <a v-if="adoptedUrl" class="adopted-link" :href="adoptedUrl" target="_blank">查看大图</a>
+          <el-button link type="primary" size="small" @click="emit('go', 'merge')">
+            去拼接
+          </el-button>
+          <el-button link type="primary" size="small" @click="emit('go', 'compare')">
+            去对比
+          </el-button>
+        </div>
+      </div>
     </div>
   </div>
+
+  <TaskPanel
+    :task="activeTask"
+    title="最近任务"
+    empty-text="还没有生成任务；提交后会在这里显示进度与日志。"
+  />
 </template>
 
 <style scoped>
@@ -369,9 +400,33 @@ const extractLabel = computed(() => (props.info.flow === 'patchimg' ? '运行抽
   padding: var(--space-2);
 }
 
-.adopt-hint {
-  margin: var(--space-2) 0 0;
+.adopted-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
   font-size: var(--text-xs);
+}
+
+.adopted-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.adopted-link {
+  color: var(--el-color-primary);
+  font-size: var(--text-xs);
+  text-decoration: none;
+}
+
+.adopted-link:hover {
+  text-decoration: underline;
 }
 
 .run-detail {

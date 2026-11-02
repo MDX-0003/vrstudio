@@ -31,6 +31,7 @@ def serve(
     from ..web.app import build_app, sources_dir
     from ..web.logging import setup_logging
     from ..web.portguard import reclaim_port
+    from ..web.tasks import QUEUE
 
     log_path = setup_logging(log_dir, log_level, log_keep_days)
     # 配置在这里加载并定格：起不来就带着原因退出，不要带着半新半旧的配置接请求。
@@ -52,6 +53,8 @@ def serve(
     print(f"vrstudio serve: http://{host}:{port}/")
     print(f"  sources/: {sources_dir()}   cases/: {cases_dir or '仓库 cases/'}")
     print(f"  logs/: {log_path}  (service-*.jsonl / client-*.jsonl)")
+    # 队列历史在内存里，重启就空；日志索引落盘，启动时回填最近若干条。
+    QUEUE.restore_history()
     reclaim_port(port)
     uvicorn.run(build_app(cases_dir), host=host, port=port,
                 log_level=uvicorn_level, log_config=None, access_log=False)

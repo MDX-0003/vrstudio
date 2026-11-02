@@ -11,6 +11,7 @@ submit 增参即可；调度策略已是单队列先进先出，无需改动。
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import subprocess
@@ -40,6 +41,13 @@ def _task_log_path(task_id: str, kind: str, case: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     safe_case = re.sub(r"[^\w.-]", "_", case)
     return directory / f"{task_id}_{kind}_{safe_case}.log"
+
+
+def _history_path() -> Path:
+    """任务历史索引；日志正文仍在各自的 .log 文件里，这里只记摘要与路径。"""
+    directory = logs_dir() / "tasks"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / "history.jsonl"
 
 
 class Task:
@@ -153,6 +161,38 @@ class Task:
         return out
 
 
+def _task_from_record(raw: str) -> Task | None:
+    """从 history.jsonl 的一行还原任务视图；日志文件已不在的记录直接丢弃。"""
+    try:
+        data = json.loads(raw)
+        status = str(data.get("status") or "")
+        log_path = data.get("log_path")
+        if status not in ("done", "failed") or not log_path:
+            return None
+        if not Path(log_path).is_file():
+            return None
+        task = Task(str(data["kind"]), str(data["case"]), [])
+        task.id = str(data.get("id") or task.id)
+        task.owner_id = data.get("owner_id")
+        task.owner_name = data.get("owner_name")
+        task.request_id = data.get("request_id")
+        task.billing = {
+            "project_id": data.get("project_id"),
+            "episode_id": data.get("episode_id"),
+            "session_id": data.get("session_id"),
+        }
+        task.state = status
+        task.progress = data.get("progress")
+        task.error = data.get("error")
+        task.created_at = data.get("created_at") or task.created_at
+        task.started_at = data.get("started_at")
+        task.finished_at = data.get("finished_at")
+        task.out_path = Path(str(log_path))
+        return task
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 class TaskQueue:
     def __init__(self):
         self._lock = threading.Lock()
@@ -215,6 +255,43 @@ class TaskQueue:
             tasks = ([self.current] if self.current is not None else []) + self.pending
             return [task for task in tasks if task.case == case]
 
+    def record(self, task: Task) -> None:
+        """把已结束任务追加到 history.jsonl，serve 重启后还能查日志。"""
+        try:
+            row = task.view(None)
+            row.pop("tail", None)
+            with open(_history_path(), "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except OSError:
+            # 历史索引写不进去不影响任务本身；下一次 serve 只是少一条记录。
+            log.warning("task.history.write_failed", extra={"data": {
+                "event": "task.history.write_failed", "task_id": task.id}})
+
+    def restore_history(self, limit: int = 50) -> None:
+        """从 history.jsonl 回填最近的记录；只回填有日志文件的 finished 任务。"""
+        path = _history_path()
+        if not path.is_file():
+            return
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(0, 2)
+                size = fh.tell()
+                window = 256 * 1024
+                fh.seek(max(0, size - window))
+                lines = decode_text(fh.read()).splitlines()
+            if size > window and lines:
+                lines = lines[1:]          # 首行可能被窗口截断
+        except OSError:
+            return
+        restored: list[Task] = []
+        for raw in lines[-limit:]:
+            task = _task_from_record(raw)
+            if task is not None:
+                restored.append(task)
+        restored.sort(key=lambda item: item.finished_at or "")
+        with self._lock:
+            self.history = restored
+
     def _drain(self):
         while True:
             with self._lock:
@@ -226,6 +303,7 @@ class TaskQueue:
             with self._lock:
                 self.history.append(task)
                 self.current = None
+                self.record(task)
                 # 连续任务：merge 成功后才排 assemble；merge 失败就停在原地。
                 if task.state == "done" and task.follow_up:
                     follow = []
