@@ -661,6 +661,9 @@ def submit(
                                       help="输出比例（← mglc --aspect-ratio）。"),
     scale: str = typer.Option(None, "--scale",
                               help="上传缩放 auto|full|half（vrgen 自有，无 mglc 对应）。"),
+    audio: str = typer.Option(
+        None, "--audio",
+        help="keep | none：none 时结果下载后去音轨（仅视频流）。"),
     session_id: int = typer.Option(
         None, "--session-id",
         help="项目生成会话 ID（>0）：在该项目额度下提交；不传则用 generation.toml/配置。"),
@@ -676,6 +679,10 @@ def submit(
     case = _load_case(case_name, cases_dir)
     if num is not None and not 1 <= int(num) <= 4:
         _fail(GenError(f"--num 必须是 1..4，收到 {num}"))
+    if audio is not None and audio not in ("keep", "none"):
+        _fail(GenError(f"--audio 只能是 keep | none，收到 {audio!r}"))
+    if audio is not None and case.flow in ("patchimg", "fullRedrawImg"):
+        _fail(GenError(f"{case.flow} 是图片流，不接受 --audio"))
     if case.flow == "patchimg":
         if video_model_id is not None:
             _fail(GenError("patchimg 是图片流，用 --image-model-id"))
@@ -733,6 +740,8 @@ def submit(
     # auto 由 vrgen 在无比例列表的模式里自行兜底。网页仍会把下拉框的值显式传下来。
     if scale is not None:
         argv += ["--scale", scale]
+    if audio is not None:
+        argv += ["--audio", audio]
     if session_id is not None:
         argv += ["--session-id", str(session_id)]
     argv += ["--workdir", str(_workdir(conf))]

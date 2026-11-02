@@ -797,13 +797,15 @@ def test_run_submit_passes_generation_params(client, patch_case, monkeypatch):
     r = client.post("/api/case/p1/run",
                     json={"op": "submit", "mode": "allMediaRef",
                           "aspect_ratio": "16:9",
-                          "resolution": "720p", "scale": "auto"})
+                          "resolution": "720p", "scale": "auto",
+                          "audio": "none"})
     assert r.status_code == 200 and r.json()["submitted"] == "submit"
     argv = submitted[0][2]
     assert "--resolution" in argv and "720p" in argv
     assert "--scale" in argv and "auto" in argv
     assert "--mode" in argv and "allMediaRef" in argv
     assert "--aspect-ratio" in argv and "16:9" in argv
+    assert "--audio" in argv and "none" in argv
 
 
 def test_gates_progress_with_extract_and_result(client, patch_case, tmp_path):

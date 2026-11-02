@@ -8,6 +8,7 @@ const ratio = defineModel<string>('ratio', { required: true })
 const resolution = defineModel<string>('resolution', { required: true })
 const scale = defineModel<string>('scale', { required: true })
 const duration = defineModel<string>('duration', { required: true })
+const audio = defineModel<'keep' | 'none'>('audio', { required: true })
 const videoModelId = defineModel<number | null>('videoModelId', { required: true })
 const imageModelId = defineModel<number | null>('imageModelId', { required: true })
 const selectedProject = defineModel<string>('selectedProject', { required: true })
@@ -165,6 +166,13 @@ function scaleLabel(option: InputOption): string {
               :label="item.label"
               :value="item.value"
             />
+          </el-select>
+        </label>
+        <label class="ctl" title="平台没有「不生成声音」的提交参数；选关闭时在结果下载后去掉音轨">
+          <span>声音</span>
+          <el-select v-model="audio" size="small" class="w-audio">
+            <el-option label="开启（保留音轨）" value="keep" />
+            <el-option label="关闭（下载后去音轨）" value="none" />
           </el-select>
         </label>
         <label class="ctl">
@@ -337,6 +345,10 @@ function scaleLabel(option: InputOption): string {
 
 .w-duration {
   width: 150px;
+}
+
+.w-audio {
+  width: 190px;
 }
 
 .w-project {

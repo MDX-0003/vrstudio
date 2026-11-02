@@ -371,6 +371,8 @@ const ratio = ref('16:9')
 const resolution = ref('1080p')
 const scale = ref('auto')
 const duration = ref('auto')
+/** 结果音轨：keep 保留，none 下载后去掉（平台没有「不生成声音」的提交参数）。 */
+const audio = ref<'keep' | 'none'>('keep')
 
 const projects = ref<ProjectOption[]>([])
 const selectedProject = ref('')
@@ -604,6 +606,7 @@ const previewSignature = computed(() =>
       resolution.value,
       scale.value,
       duration.value,
+      audio.value,
       videoModelId.value,
       imageModelId.value,
       imageNum.value,
@@ -675,6 +678,7 @@ function submitBody(): RunPayload {
     aspect_ratio: ratio.value,
     resolution: resolution.value,
     scale: scale.value,
+    audio: audio.value,
   }
   if (duration.value !== 'auto') body.duration = Number(duration.value)
   return body
@@ -1018,6 +1022,7 @@ function statusTone(): string {
     v-model:resolution="resolution"
     v-model:scale="scale"
     v-model:duration="duration"
+    v-model:audio="audio"
     v-model:video-model-id="videoModelId"
     v-model:image-model-id="imageModelId"
     v-model:selected-project="selectedProject"

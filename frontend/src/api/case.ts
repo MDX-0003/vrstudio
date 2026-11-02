@@ -95,6 +95,8 @@ export interface RunPayload {
   crf?: number
   /** relight 视频：只出 N 帧小样，不编码整段。 */
   sample?: number
+  /** 视频生成：keep 保留结果音轨，none 下载后去音轨。 */
+  audio?: 'keep' | 'none'
 }
 
 export function runOperation(

@@ -3336,6 +3336,8 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
             argv += ["--resolution", str(body["resolution"])]
         if body.get("scale"):
             argv += ["--scale", str(body["scale"])]
+        if body.get("audio"):
+            argv += ["--audio", str(body["audio"])]
         if body.get("mode"):
             argv += ["--mode", str(body["mode"])]
         if body.get("duration") is not None:
