@@ -67,7 +67,6 @@ const current = computed(() => payload.value?.current ?? null)
 const samples = computed(() => payload.value?.samples ?? [])
 
 const form = ref({
-  scene: 'night' as 'night' | 'day',
   strength: 1,
   local_shading: 0.35,
   highlight_clip: false,
@@ -75,31 +74,21 @@ const form = ref({
   clip_max: 0.98,
   ref_frame: '' as string,
   crf: '' as string,
-  sample: 5,
+  sample: 1,
 })
-
-/** 预设只给默认值：与 CLI 的 SCENE_PRESETS 同源，改那里这里要跟着改。 */
-const PRESETS = { night: { strength: 1, local_shading: 0.35 }, day: { strength: 0.8, local_shading: 0.2 } }
 
 function applyDraft(): void {
   const d = draft.value
   form.value = {
-    scene: d.scene === 'day' ? 'day' : 'night',
-    strength: d.strength ?? PRESETS[d.scene === 'day' ? 'day' : 'night'].strength,
-    local_shading: d.local_shading ?? PRESETS[d.scene === 'day' ? 'day' : 'night'].local_shading,
+    strength: d.strength ?? 1,
+    local_shading: d.local_shading ?? 0.35,
     highlight_clip: d.highlight_clip ?? false,
     clip_knee: d.clip_knee ?? 0.72,
     clip_max: d.clip_max ?? 0.98,
     ref_frame: d.ref_frame === undefined ? '' : String(d.ref_frame),
     crf: '',
-    sample: 5,
+    sample: 1,
   }
-}
-
-function onSceneChange(value: 'night' | 'day'): void {
-  // 切场景时把两个强度重置成该场景的预设，避免「日光 + 夜戏 1.0」这种组合没人发现。
-  form.value.strength = PRESETS[value].strength
-  form.value.local_shading = PRESETS[value].local_shading
 }
 
 async function loadReport(): Promise<void> {
@@ -190,7 +179,6 @@ watch(() => payload.value?.sample_report?.open_url, () => void loadSampleReport(
 
 function runPayload() {
   const body: Record<string, string | number | boolean> = {
-    scene: form.value.scene,
     strength: form.value.strength,
     local_shading: form.value.local_shading,
     highlight_clip: form.value.highlight_clip,
@@ -264,13 +252,6 @@ const percent = (value: number | undefined): string =>
 
         <div class="param-grid">
           <label class="param">
-            <span>场景预设</span>
-            <el-select v-model="form.scene" size="small" @change="onSceneChange">
-              <el-option label="夜戏 1.0 / 0.35" value="night" />
-              <el-option label="日光 0.8 / 0.2" value="day" />
-            </el-select>
-          </label>
-          <label class="param">
             <span>整体施加量</span>
             <el-slider v-model="form.strength" :min="0" :max="1" :step="0.05" show-input />
           </label>
@@ -297,6 +278,9 @@ const percent = (value: number | undefined): string =>
             <el-input-number v-model="form.clip_max" :min="0.02" :max="1" :step="0.01" size="small" />
           </template>
         </div>
+        <p class="clip-hint muted">
+          高光软裁切（通常不需要开，只在合并完成后，对亮度大于拐点的像素进行缩放）
+        </p>
 
         <div class="action-row">
           <template v-if="isVideo">
@@ -524,6 +508,11 @@ const percent = (value: number | undefined): string =>
   align-items: center;
   gap: var(--space-2);
   margin-top: var(--space-3);
+  font-size: var(--text-xs);
+}
+
+.clip-hint {
+  margin: var(--space-2) 0 0;
   font-size: var(--text-xs);
 }
 
