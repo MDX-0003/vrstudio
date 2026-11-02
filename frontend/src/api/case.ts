@@ -157,6 +157,14 @@ export function pickRelightSlot(
   })
 }
 
+/** 上传一个文件，加入素材库（角色 merge_input）并选作拼接输入。 */
+export function uploadMergeInput(name: string, uploadId: string): Promise<CaseInfo> {
+  return postJson<CaseInfo>(`${casePath(name)}/assets`, {
+    op: 'merge-input',
+    upload_ids: [uploadId],
+  })
+}
+
 /** fullRedrawImg 的拼接输入：assetId 指向库里一张图；null 回退生成采用的结果。 */
 export function setMergeInput(name: string, assetId: string | null): Promise<CaseInfo> {
   return postJson<CaseInfo>(`${casePath(name)}/assets`, {

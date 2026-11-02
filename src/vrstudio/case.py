@@ -48,6 +48,9 @@ _RELIGHT_SLOTS = {"gt": RELIGHT_GT, "atmo": RELIGHT_ATMO}
 #: 缺省时回退到 adopt 落点 ``extracts/<current>/result.png``（决策 66）。
 _MERGE_INPUT_KEYS = ("input",)
 
+#: 拼接输入专用的素材角色（决策 67）：只收图片，不进任何生成下拉与提交。
+MERGE_INPUT = "merge_input"
+
 #: 与 vrgen 的 job 名同一套约束：case 名是 cases/ 下的目录名。
 _CASE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -988,6 +991,31 @@ def set_merge_input(name: str, asset_id: str | None,
                 "（21:9 画布图，不是 2:1 源图或成片）")
     case.merge_input = asset_id or None
     return save(case, root)
+
+
+def add_merge_input(name: str, path: str | Path,
+                    root: str | Path | None = None) -> tuple[Case, str]:
+    """把一份文件以拼接输入角色加入素材库并选中它（决策 67）。
+
+    同一 sha256 的图片已经在本 case 里时直接指向那一条，不重复拷贝；这样从素材库
+    再传一遍同一张编辑稿不会产生两份。返回 ``(case, 素材 id)``。
+    """
+    case = load(name, root)
+    if case.flow != "fullRedrawImg":
+        raise CaseError(f"case {name} 是 {case.flow} 流，没有 [merge] 拼接输入")
+    src = Path(path)
+    if not src.is_file():
+        raise CaseError(f"文件不存在：{src}")
+    if kind_of(src) != "image":
+        raise CaseError(
+            f"{src.name} 不是图片；拼接输入必须是 21:9 画布图（png/jpg/webp）")
+    digest = file_sha256(src)
+    same = next((a for a in case.assets
+                 if a.kind == "image" and a.sha256 == digest), None)
+    if same is None:
+        case = _add_assets_to(case, [(src, MERGE_INPUT)], root)
+        same = case.assets[-1]
+    return set_merge_input(name, same.id, root), same.id
 
 
 def set_extract_current(name: str, version: str, root: str | Path | None = None) -> Case:

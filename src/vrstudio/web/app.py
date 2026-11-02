@@ -2424,10 +2424,25 @@ async def api_assets(request):
                 return JSONResponse(
                     {"error": "槽位需要 asset_id、upload_ids 或 path"}, status_code=400)
         elif op == "merge-input":
-            # fullRedrawImg 的拼接输入：asset_id 指向库里一张图，空值 = 回退采用结果。
-            await asyncio.to_thread(
-                case_mod.set_merge_input, name,
-                str(body.get("asset_id") or "") or None, _ctx["cases_root"])
+            # 三种用法：asset_id 选库里已有的；upload_ids 上传入库并选中；
+            # 都没有 = 清空指针、回退采用结果（决策 66/67）。
+            asset_id = str(body.get("asset_id") or "")
+            upload_ids = [str(i) for i in (body.get("upload_ids") or [])]
+            if asset_id:
+                await asyncio.to_thread(case_mod.set_merge_input, name, asset_id,
+                                        _ctx["cases_root"])
+            elif upload_ids:
+                if len(upload_ids) != 1:
+                    return JSONResponse({"error": "拼接输入一次只收一个文件"},
+                                        status_code=400)
+                paths, dirs = _uploaded_paths(upload_ids)
+                await asyncio.to_thread(case_mod.add_merge_input, name, paths[0],
+                                        _ctx["cases_root"])
+                for directory in dirs:
+                    shutil.rmtree(directory, ignore_errors=True)
+            else:
+                await asyncio.to_thread(case_mod.set_merge_input, name, None,
+                                        _ctx["cases_root"])
         elif op == "remove":
             asset_id = str(body.get("id") or "")
             await asyncio.to_thread(case_mod.remove_asset, name,

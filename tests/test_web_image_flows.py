@@ -216,6 +216,38 @@ def test_merge_input_op_sets_and_clears_the_pointer(tmp_path, client):
     assert case_mod.load("f1", tmp_path).merge_input is None
 
 
+def _upload_png(client, name: str, payload: bytes) -> str:
+    session = client.post("/api/uploads", json={"name": name, "size": len(payload)}).json()
+    upload_id = session["upload_id"]
+    r = client.put(f"/api/uploads/{upload_id}", content=payload,
+                   headers={"Content-Type": "application/octet-stream"})
+    assert r.status_code == 200, r.text
+    assert client.post(f"/api/uploads/{upload_id}/complete").status_code == 200
+    return upload_id
+
+
+def test_merge_input_op_uploads_and_selects(tmp_path, client):
+    src = _png(tmp_path)
+    case_mod.create("f1", "fullRedrawImg", src, root=tmp_path)
+    payload = src.read_bytes()
+
+    upload_id = _upload_png(client, "edited.png", payload)
+    r = client.post("/api/case/f1/assets",
+                    json={"op": "merge-input", "upload_ids": [upload_id]})
+    assert r.status_code == 200, r.text
+    case = case_mod.load("f1", tmp_path)
+    assert case.merge_input is not None
+    asset = case.asset(case.merge_input)
+    assert (asset.role, asset.kind) == ("merge_input", "image")
+
+    # 同一份文件再传一次：指向同一条，素材库不新增。
+    again = _upload_png(client, "edited-copy.png", payload)
+    r = client.post("/api/case/f1/assets",
+                    json={"op": "merge-input", "upload_ids": [again]})
+    assert r.status_code == 200, r.text
+    assert len(case_mod.load("f1", tmp_path).assets) == 1
+
+
 def test_merge_input_op_refuses_a_video_asset(tmp_path, client):
     src = _png(tmp_path)
     case_mod.create("f1", "fullRedrawImg", src, root=tmp_path)

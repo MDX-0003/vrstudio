@@ -264,6 +264,27 @@ def test_merge_input_only_belongs_to_fullredrawimg(tmp_path):
         case_mod.load("g", tmp_path)
 
 
+def test_add_merge_input_uses_the_dedicated_role(tmp_path):
+    _prepared_case(tmp_path)
+    path = _source(tmp_path, "edited.png")
+    case, case_id = case_mod.add_merge_input("p", path, root=tmp_path)
+    assert case.merge_input == case_id
+    assert case.asset(case_id).role == case_mod.MERGE_INPUT
+
+    # 同一份文件再入库：指向同一条，不新增副本。
+    again, again_id = case_mod.add_merge_input("p", path, root=tmp_path)
+    assert again_id == case_id
+    assert len(again.assets) == 1
+
+
+def test_add_merge_input_rejects_a_video(tmp_path):
+    _prepared_case(tmp_path)
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"not a video")
+    with pytest.raises(CaseError, match="不是图片"):
+        case_mod.add_merge_input("p", video, root=tmp_path)
+
+
 def test_removing_the_merge_input_asset_clears_the_pointer(tmp_path):
     _prepared_case(tmp_path)
     case_id = _add_merge_candidate(tmp_path, _source(tmp_path, "edited.png"))

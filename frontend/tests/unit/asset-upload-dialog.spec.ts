@@ -16,6 +16,8 @@ vi.mock('@/api/uploads', () => ({
 }))
 vi.mock('@/api/case', () => ({
   addAssetsByUploads: vi.fn(),
+  setRelightSlot: vi.fn(),
+  uploadMergeInput: vi.fn(async () => ({ name: 'p1' })),
 }))
 
 import AssetUploadDialog from '@/components/upload/AssetUploadDialog.vue'
@@ -46,6 +48,15 @@ describe('AssetUploadDialog', () => {
   beforeEach(() => {
     localStorage.clear()
     vi.clearAllMocks()
+  })
+
+  it('merge-input destination accepts images only', async () => {
+    const wrapper = mount(AssetUploadDialog, {
+      props: { modelValue: true, caseName: 'p1', destination: 'merge-input' },
+      global: { stubs },
+    })
+    expect(wrapper.find('input[type="file"]').attributes('accept')).toBe('.png,.jpg,.jpeg,.webp')
+    wrapper.unmount()
   })
 
   it('cancels the server upload when the dialog unmounts', async () => {

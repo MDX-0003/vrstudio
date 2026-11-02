@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Download, FolderOpened, Refresh, VideoPlay } from '@element-plus/icons-vue'
+import { Download, FolderOpened, Refresh, Upload, VideoPlay } from '@element-plus/icons-vue'
 import { fetchCase, runOperation, setMergeInput } from '@/api/case'
 import AssetPickerDialog from '@/components/assets/AssetPickerDialog.vue'
 import FileRow from '@/components/common/FileRow.vue'
+import AssetUploadDialog from '@/components/upload/AssetUploadDialog.vue'
 import { useCaseTasks } from '@/composables/useCaseTasks'
 import { gateBlocked } from '@/utils/gates'
 import { taskStatusMeta } from '@/constants/taskStatus'
@@ -29,6 +30,7 @@ const isPatchImg = computed(() => props.info.flow === 'patchimg')
 const isFullRedrawImg = computed(() => props.info.flow === 'fullRedrawImg')
 const imageMergeLabel = computed(() => (isPatchImg.value ? '贴回' : '拼接'))
 const pickerOpen = ref(false)
+const uploadOpen = ref(false)
 const switchingInput = ref(false)
 const imageAssets = computed(
   () => (props.info.assets ?? []).filter((asset) => asset.kind === 'image'),
@@ -100,6 +102,11 @@ function useAdoptedResult(): void {
   void applyMergeInput(null, '已用回生成结果')
 }
 
+function onMergeInputUploaded(data: CaseInfo): void {
+  uploadOpen.value = false
+  emit('updated', data)
+}
+
 watch(latest, async (task) => {
   if (!running.value || !task) return
   const created = new Date(task.created_at).getTime()
@@ -152,6 +159,9 @@ watch(latest, async (task) => {
               开始{{ imageMergeLabel }}
             </el-button>
             <template v-if="isFullRedrawImg">
+              <el-button size="small" :icon="Upload" @click="uploadOpen = true">
+                上传并用作拼接输入
+              </el-button>
               <el-button
                 size="small"
                 :icon="FolderOpened"
@@ -159,15 +169,9 @@ watch(latest, async (task) => {
                 :disabled="!imageAssets.length"
                 @click="pickerOpen = true"
               >
-                换拼接输入
+                从素材库选择
               </el-button>
-              <el-button
-                v-if="info.merge_input"
-                size="small"
-                link
-                :disabled="switchingInput"
-                @click="useAdoptedResult"
-              >
+              <el-button v-if="info.merge_input" size="small" link @click="useAdoptedResult">
                 用回生成结果
               </el-button>
             </template>
@@ -177,7 +181,7 @@ watch(latest, async (task) => {
           </div>
           <p v-if="isFullRedrawImg" class="merge-input-hint muted">
             拼接输入：{{ mergeInputAsset ? mergeInputAsset.name : '生成步采用的结果' }}。
-            外部改完的 21:9 画布图先传进素材库，再从这里换；2:1 源图或成片不能直接拼接。
+            外部改完的 21:9 画布图可以直接上传并选中，也可以从素材库挑一张；2:1 源图或成片会被拼接拒绝。
           </p>
 
           <div v-if="patchReport || fullReport" class="report-box">
@@ -392,6 +396,13 @@ watch(latest, async (task) => {
       </div>
     </section>
 
+    <AssetUploadDialog
+      v-if="isFullRedrawImg"
+      v-model="uploadOpen"
+      destination="merge-input"
+      :case-name="caseName"
+      @added="onMergeInputUploaded"
+    />
     <AssetPickerDialog
       v-if="isFullRedrawImg"
       v-model="pickerOpen"

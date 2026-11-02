@@ -31,6 +31,12 @@ const PickerStub = defineComponent({
   template: '<div class="picker-stub" />',
 })
 
+const UploadStub = defineComponent({
+  props: { modelValue: Boolean, destination: String, caseName: String },
+  emits: ['added'],
+  template: '<div class="upload-stub" />',
+})
+
 const stubs = {
   'el-button': ButtonStub,
   'el-alert': AlertStub,
@@ -40,6 +46,7 @@ const stubs = {
   'el-empty': true,
   'el-checkbox': true,
   AssetPickerDialog: PickerStub,
+  AssetUploadDialog: UploadStub,
 }
 
 function info(pad: CaseInfo['gates']['pad'], recompose: CaseInfo['gates']['recompose']) {
@@ -69,7 +76,7 @@ function button(wrapper: ReturnType<typeof mount>, label: string) {
   return found
 }
 
-function imageInfo(mergeInput: string | null = null): CaseInfo {
+function imageInfo(mergeInput: string | null = null, withAssets = true): CaseInfo {
   return {
     flow: 'fullRedrawImg',
     gates: {
@@ -80,7 +87,7 @@ function imageInfo(mergeInput: string | null = null): CaseInfo {
     },
     outputs: [],
     merge_input: mergeInput,
-    assets: [
+    assets: withAssets ? [
       {
         id: 'i1',
         kind: 'image',
@@ -101,7 +108,7 @@ function imageInfo(mergeInput: string | null = null): CaseInfo {
         fps: null,
         open_url: '',
       },
-    ],
+    ] : [],
     step_files: {
       extract: { inputs: [], outputs: [] },
       generate: { inputs: [], outputs: [] },
@@ -110,9 +117,9 @@ function imageInfo(mergeInput: string | null = null): CaseInfo {
   } as unknown as CaseInfo
 }
 
-async function mountImage(mergeInput: string | null = null) {
+async function mountImage(mergeInput: string | null = null, withAssets = true) {
   const wrapper = mount(MergeStep, {
-    props: { caseName: 'p1', info: imageInfo(mergeInput) },
+    props: { caseName: 'p1', info: imageInfo(mergeInput, withAssets) },
     global: { stubs },
   })
   await flushPromises()
@@ -120,12 +127,22 @@ async function mountImage(mergeInput: string | null = null) {
 }
 
 describe('MergeStep 拼接输入（fullRedrawImg）', () => {
-  it('offers 换拼接输入 and hides 用回生成结果 until a pointer exists', async () => {
-    const wrapper = await mountImage()
-    expect(button(wrapper, '换拼接输入').attributes('disabled')).toBeUndefined()
+  it('keeps 上传并用作拼接输入 available even with an empty library', async () => {
+    const wrapper = await mountImage(null, false)
+    expect(button(wrapper, '上传并用作拼接输入').attributes('disabled')).toBeUndefined()
+    expect(button(wrapper, '从素材库选择').attributes('disabled')).toBeDefined()
     expect(wrapper.findAll('button').some((item) => item.text().includes('用回生成结果'))).toBe(
       false,
     )
+    wrapper.unmount()
+  })
+
+  it('opens the merge-input upload dialog', async () => {
+    const wrapper = await mountImage(null, false)
+    await button(wrapper, '上传并用作拼接输入').trigger('click')
+    const dialog = wrapper.findComponent(UploadStub)
+    expect(dialog.props('destination')).toBe('merge-input')
+    expect(dialog.props('modelValue')).toBe(true)
     wrapper.unmount()
   })
 

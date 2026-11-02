@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, UploadFilled } from '@element-plus/icons-vue'
-import { addAssetsByUploads, setRelightSlot } from '@/api/case'
+import { addAssetsByUploads, setRelightSlot, uploadMergeInput } from '@/api/case'
 import {
   cancelUpload,
   cancelUploadKeepalive,
@@ -34,9 +34,10 @@ const props = defineProps<{
   /**
    * assets = 加入素材库（默认，需 caseName）；
    * source = 用作新建 case 的源视频/源图片；
-   * slot = 放进 relight 的一个固定槽位（需 caseName 与 slotRole）。
+   * slot = 放进 relight 的一个固定槽位（需 caseName 与 slotRole）；
+   * merge-input = 上传并选作 fullRedrawImg 的拼接输入（入库后自动选中）。
    */
-  destination?: 'assets' | 'source' | 'slot'
+  destination?: 'assets' | 'source' | 'slot' | 'merge-input'
   /** 源文件类型：视频流程收视频，图片流程收图片；加入素材库时忽略。 */
   sourceKind?: 'video' | 'image'
   /** slot 目的地的角色：relight_gt 收视频或图片，relight_atmo 只收图片。 */
@@ -50,12 +51,17 @@ const emit = defineEmits<{
 
 const isSource = computed(() => props.destination === 'source')
 const isSlot = computed(() => props.destination === 'slot')
-/** 槽位与源文件都一次只收一个文件：槽位只有一个位置。 */
-const singleFile = computed(() => isSource.value || isSlot.value)
+const isMergeInput = computed(() => props.destination === 'merge-input')
+/** 槽位、源文件与拼接输入都一次只收一个文件：都只有一个位置。 */
+const singleFile = computed(() => isSource.value || isSlot.value || isMergeInput.value)
 const slotAcceptsVideo = computed(() => props.slotRole === 'relight_gt')
 const slotTitle = computed(() =>
   props.slotRole === 'relight_atmo' ? '上传氛围图' : '上传重打光底版',
 )
+const dialogTitle = computed(() => {
+  if (isMergeInput.value) return '上传拼接输入'
+  return isSlot.value ? slotTitle.value : ''
+})
 const sourceKind = computed<'video' | 'image'>(() => props.sourceKind ?? 'video')
 const sourceAccept = computed(() =>
   sourceKind.value === 'image'
@@ -67,6 +73,7 @@ const sourceButton = computed(() => (sourceKind.value === 'image' ? '用作源�
 
 /** 对话框收哪些扩展名：槽位按角色收，源文件按流程收，素材库两种都收。 */
 const accept = computed(() => {
+  if (isMergeInput.value) return '.png,.jpg,.jpeg,.webp'
   if (isSlot.value) {
     return slotAcceptsVideo.value ? '.mp4,.mov,.mkv,.avi,.png,.jpg,.jpeg,.webp' : '.png,.jpg,.jpeg,.webp'
   }
@@ -214,6 +221,10 @@ function addFiles(files: File[]): void {
       ElMessage.warning(`${file.name}：氛围图只支持 png/jpg/webp`)
       continue
     }
+    if (isMergeInput.value && kind === 'video') {
+      ElMessage.warning(`${file.name}：拼接输入只支持 png/jpg/webp（21:9 画布图）`)
+      continue
+    }
     if (rows.value.some((row) => row.key === storageKey(file))) continue
     if (singleFile.value) {
       // 源文件与槽位都一次一个：替换列表（取消未完成的上传）。
@@ -297,6 +308,15 @@ async function confirmAdd(): Promise<void> {
       visible.value = false
       return
     }
+    if (isMergeInput.value) {
+      const row = completed.value[0]
+      const data = await uploadMergeInput(props.caseName as string, row.uploadId as string)
+      emit('added', data)
+      ElMessage.success('已上传并用作拼接输入')
+      rows.value = []
+      visible.value = false
+      return
+    }
     if (isSlot.value) {
       const row = completed.value[0]
       const data = await setRelightSlot(props.caseName as string, props.slotRole!, {
@@ -356,7 +376,7 @@ onUnmounted(() => {
 <template>
   <el-dialog
     v-model="visible"
-    :title="isSource ? sourceTitle : isSlot ? slotTitle : '上传素材'"
+    :title="isSource ? sourceTitle : isSlot || isMergeInput ? dialogTitle : '上传素材'"
     width="720px"
     :close-on-click-modal="false"
     :before-close="beforeClose"
@@ -370,7 +390,9 @@ onUnmounted(() => {
       @click="fileInput?.click()"
     >
       <el-icon :size="30"><UploadFilled /></el-icon>
-      <p>把视频或图片拖到这里，或点击选择文件</p>
+      <p>
+        把{{ isMergeInput ? '图片（21:9 画布图）' : '视频或图片' }}拖到这里，或点击选择文件
+      </p>
       <p class="muted">单文件最大 10 GB；分片 8 MB，失败自动重试三次，刷新后可续传。</p>
       <input
         ref="fileInput"
@@ -418,7 +440,9 @@ onUnmounted(() => {
             ? `${sourceButton}（${completed.length}）`
             : isSlot
               ? `放进槽位（${completed.length}）`
-              : `加入素材库（${completed.length}）`
+              : isMergeInput
+                ? `上传并用作拼接输入（${completed.length}）`
+                : `加入素材库（${completed.length}）`
         }}
       </el-button>
     </template>

@@ -1,7 +1,7 @@
-"""roles.json 契约快照：本地词表必须与它一致，快照内容由 SHA256 钉住。
+"""roles.json 濂戠害蹇収锛氭湰鍦拌瘝琛ㄥ繀椤讳笌瀹冧竴鑷达紝蹇収鍐呭鐢?SHA256 閽変綇銆?
 
-``roles.json`` 是根仓库 ``docs/roles.json`` 的逐字节副本。改角色时三份文件
-一起改，并同步更新本文件的 ``CONTRACT_SHA256``，否则这里会红。
+``roles.json`` 鏄牴浠撳簱 ``docs/roles.json`` 鐨勯€愬瓧鑺傚壇鏈€傛敼瑙掕壊鏃朵笁浠芥枃浠?
+涓€璧锋敼锛屽苟鍚屾鏇存柊鏈枃浠剁殑 ``CONTRACT_SHA256``锛屽惁鍒欒繖閲屼細绾€?
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from vrstudio import case as case_mod
 from vrstudio import roles
 
 SPEC = Path(roles.__file__).with_name("roles.json")
-CONTRACT_SHA256 = "4c7a53dde440e76a9208ea898e7bfb442dab092f8b4265c2df15b4b8bc451a1f"
+CONTRACT_SHA256 = "c304e5f5374c6d5c9e55f888d6007ee684ab909140ae90b8174d3b05870c7a82"
 
 
 def _entries() -> list[dict]:
