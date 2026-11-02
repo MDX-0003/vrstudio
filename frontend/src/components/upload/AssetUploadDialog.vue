@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, UploadFilled } from '@element-plus/icons-vue'
-import { addAssetsByUploads } from '@/api/case'
+import { addAssetsByUploads, setRelightSlot } from '@/api/case'
 import {
   cancelUpload,
   cancelUploadKeepalive,
@@ -31,8 +31,16 @@ interface Row {
 const props = defineProps<{
   modelValue: boolean
   caseName?: string
-  /** assets = 加入素材库（默认，需 caseName）；source = 用作新建 case 的源视频。 */
-  destination?: 'assets' | 'source'
+  /**
+   * assets = 加入素材库（默认，需 caseName）；
+   * source = 用作新建 case 的源视频/源图片；
+   * slot = 放进 relight 的一个固定槽位（需 caseName 与 slotRole）。
+   */
+  destination?: 'assets' | 'source' | 'slot'
+  /** 源文件类型：视频流程收视频，图片流程收图片；加入素材库时忽略。 */
+  sourceKind?: 'video' | 'image'
+  /** slot 目的地的角色：relight_gt 收视频或图片，relight_atmo 只收图片。 */
+  slotRole?: 'relight_gt' | 'relight_atmo'
 }>()
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
@@ -41,6 +49,29 @@ const emit = defineEmits<{
 }>()
 
 const isSource = computed(() => props.destination === 'source')
+const isSlot = computed(() => props.destination === 'slot')
+/** 槽位与源文件都一次只收一个文件：槽位只有一个位置。 */
+const singleFile = computed(() => isSource.value || isSlot.value)
+const slotAcceptsVideo = computed(() => props.slotRole === 'relight_gt')
+const slotTitle = computed(() =>
+  props.slotRole === 'relight_atmo' ? '上传氛围图' : '上传重打光底版',
+)
+const sourceKind = computed<'video' | 'image'>(() => props.sourceKind ?? 'video')
+const sourceAccept = computed(() =>
+  sourceKind.value === 'image'
+    ? '.png,.jpg,.jpeg,.webp'
+    : '.mp4,.mov,.mkv,.avi',
+)
+const sourceTitle = computed(() => (sourceKind.value === 'image' ? '上传源图片' : '上传源视频'))
+const sourceButton = computed(() => (sourceKind.value === 'image' ? '用作源图片' : '用作源视频'))
+
+/** 对话框收哪些扩展名：槽位按角色收，源文件按流程收，素材库两种都收。 */
+const accept = computed(() => {
+  if (isSlot.value) {
+    return slotAcceptsVideo.value ? '.mp4,.mov,.mkv,.avi,.png,.jpg,.jpeg,.webp' : '.png,.jpg,.jpeg,.webp'
+  }
+  return isSource.value ? sourceAccept.value : '.mp4,.mov,.mkv,.avi,.png,.jpg,.jpeg,.webp'
+})
 
 const visible = computed({
   get: () => props.modelValue,
@@ -171,9 +202,21 @@ function addFiles(files: File[]): void {
       ElMessage.warning(`${file.name}：只支持 mp4/mov/mkv/avi 与 png/jpg/webp`)
       continue
     }
+    if (isSource.value && kind !== sourceKind.value) {
+      ElMessage.warning(
+        sourceKind.value === 'image'
+          ? `${file.name}：源图片只支持 png/jpg/webp`
+          : `${file.name}：源视频只支持 mp4/mov/mkv/avi`,
+      )
+      continue
+    }
+    if (isSlot.value && kind === 'video' && !slotAcceptsVideo.value) {
+      ElMessage.warning(`${file.name}：氛围图只支持 png/jpg/webp`)
+      continue
+    }
     if (rows.value.some((row) => row.key === storageKey(file))) continue
-    if (isSource.value) {
-      // 源视频一次一个：替换列表（取消未完成的上传）。
+    if (singleFile.value) {
+      // 源文件与槽位都一次一个：替换列表（取消未完成的上传）。
       cancelUploadingRows(false)
       rows.value = []
     }
@@ -254,6 +297,17 @@ async function confirmAdd(): Promise<void> {
       visible.value = false
       return
     }
+    if (isSlot.value) {
+      const row = completed.value[0]
+      const data = await setRelightSlot(props.caseName as string, props.slotRole!, {
+        uploadId: row.uploadId as string,
+      })
+      emit('added', data)
+      ElMessage.success('已放进槽位')
+      rows.value = []
+      visible.value = false
+      return
+    }
     const data = await addAssetsByUploads(
       props.caseName as string,
       completed.value.map((row) => row.uploadId as string),
@@ -302,7 +356,7 @@ onUnmounted(() => {
 <template>
   <el-dialog
     v-model="visible"
-    :title="isSource ? '上传源视频' : '上传素材'"
+    :title="isSource ? sourceTitle : isSlot ? slotTitle : '上传素材'"
     width="720px"
     :close-on-click-modal="false"
     :before-close="beforeClose"
@@ -321,8 +375,8 @@ onUnmounted(() => {
       <input
         ref="fileInput"
         type="file"
-        :multiple="!isSource"
-        :accept="isSource ? '.mp4,.mov,.mkv,.avi' : '.mp4,.mov,.mkv,.avi,.png,.jpg,.jpeg,.webp'"
+        :multiple="!singleFile"
+        :accept="accept"
         class="file-input"
         @change="onPick"
       />
@@ -359,7 +413,13 @@ onUnmounted(() => {
         :disabled="!canAdd"
         @click="confirmAdd"
       >
-        {{ isSource ? `用作源视频（${completed.length}）` : `加入素材库（${completed.length}）` }}
+        {{
+          isSource
+            ? `${sourceButton}（${completed.length}）`
+            : isSlot
+              ? `放进槽位（${completed.length}）`
+              : `加入素材库（${completed.length}）`
+        }}
       </el-button>
     </template>
   </el-dialog>

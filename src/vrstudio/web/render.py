@@ -23,6 +23,7 @@ import cv2
 import numpy as np
 
 from .. import case as case_mod
+from ..media.imageio import read_image
 from ..patch.projection import erp_to_rect
 from .logging import PREVIEW_LOGGER
 from .proxy import proxy_identity, proxy_path, proxy_ready
@@ -58,26 +59,41 @@ class PreviewStore:
         self.case = case_mod.load(name, cases_root)   # 失败抛 CaseError（404/400 由上层映射）
         self.dir = self.case.dir(cases_root) / "derived" / "pick"
         self.dir.mkdir(parents=True, exist_ok=True)
-        self.proxy_file = proxy_path(self.case, cases_root)
-        if proxy_ready(self.case, cases_root):
-            self.source_kind = "proxy"
-            identity = proxy_identity(self.case, cases_root) or "ready"
-            self.source_key = f"proxy:{identity}"
+        self._erp_lru: dict[int, np.ndarray] = {}
+        self.is_image = self.case.flow in case_mod.IMAGE_FLOWS
+        if self.is_image:
+            # 图片流程的源是单张 2:1 ERP：只解一次，解码结果直接当第 0 帧的
+            # 工作副本，之后所有视口预览都从这份 medium 重投影。
+            self.proxy_file = Path(self.case.source_path)
+            self.source_kind = "image"
+            self.source_key = "image"
+            frame = read_image(Path(self.case.source_path))
+            self.source_size = (int(frame.shape[1]), int(frame.shape[0]))
+            self.frame_count = 1
+            self.fps = 0.0
+            self.duration_s = 0.0
+            self._erp_lru[0] = self._medium_of(frame)
+            del frame
         else:
-            self.source_kind = "source"
-            self.source_key = "source"
-        # 元数据以源片为准：代理与源片帧数/帧率必须一致，滑块的帧号才不漂。
-        cap = cv2.VideoCapture(str(Path(self.case.source_path)))
-        self.frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-        self.source_size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
-        cap.release()
-        self.duration_s = (self.frame_count / self.fps
-                           if self.fps and self.frame_count else 0.0)
+            self.proxy_file = proxy_path(self.case, cases_root)
+            if proxy_ready(self.case, cases_root):
+                self.source_kind = "proxy"
+                identity = proxy_identity(self.case, cases_root) or "ready"
+                self.source_key = f"proxy:{identity}"
+            else:
+                self.source_kind = "source"
+                self.source_key = "source"
+            # 元数据以源片为准：代理与源片帧数/帧率必须一致，滑块的帧号才不漂。
+            cap = cv2.VideoCapture(str(Path(self.case.source_path)))
+            self.frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+            self.source_size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                                int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+            cap.release()
+            self.duration_s = (self.frame_count / self.fps
+                               if self.fps and self.frame_count else 0.0)
         self.key = self._new_key()
         self._vp_bytes: tuple | None = None
-        self._erp_lru: dict[int, np.ndarray] = {}
 
     # ── 几何读写（统一 case 模型）────────────────────────────────────────
 
@@ -260,6 +276,8 @@ class PreviewStore:
         return frame
 
     def _erp_medium(self, frame: int) -> np.ndarray:
+        if self.is_image and frame != 0:
+            raise ValueError("图片流程只有一帧（frame 0）")
         med = self._erp_lru.get(frame)
         if med is not None:
             self._erp_lru.pop(frame)

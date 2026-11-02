@@ -15,8 +15,12 @@ const props = withDefaults(
     roleHelp?: Record<string, string>
     selectedCount: number
     disabled?: boolean
+    /** 面板标题；图片流程用「本次图片提交」。 */
+    title?: string
+    /** 装配器自动附带的角色，不出现在下拉里（图片流程的基图）。 */
+    excludeRoles?: readonly string[]
   }>(),
-  { roleHelp: () => ({}), disabled: false },
+  { roleHelp: () => ({}), disabled: false, title: '本次视频提交' },
 )
 
 const emit = defineEmits<{
@@ -26,17 +30,23 @@ const emit = defineEmits<{
   role: [asset: string, role: string]
 }>()
 
-const roleOptions = computed(() => optionsFor(props.roles, { mode: props.mode }))
+const roleOptions = computed(() =>
+  optionsFor(props.roles, { mode: props.mode, exclude: props.excludeRoles }),
+)
 
 function roleOptionsFor(row: ReferenceRow): RoleOption[] {
-  return optionsFor(props.roles, { kind: row.kind, mode: props.mode }, row.role)
+  return optionsFor(
+    props.roles,
+    { kind: row.kind, mode: props.mode, exclude: props.excludeRoles },
+    row.role,
+  )
 }
 </script>
 
 <template>
   <section class="panel">
     <div class="panel-head">
-      <h2 class="panel-title">本次视频提交</h2>
+        <h2 class="panel-title">{{ title }}</h2>
       <div class="head-actions">
         <span class="muted">{{ selectedCount }} 项已选</span>
       </div>

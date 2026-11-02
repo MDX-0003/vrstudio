@@ -46,6 +46,7 @@ const startFrame = ref(frames.value.start)
 const endFrame = ref(frames.value.end)
 
 const erpVideo = ref<HTMLVideoElement | null>(null)
+const erpImage = ref<HTMLImageElement | null>(null)
 const vpImage = ref<HTMLImageElement | null>(null)
 const frame = ref(frames.value.start)
 const playing = ref(false)
@@ -56,6 +57,9 @@ const vpVersion = ref(Date.now())
 let proxyTimer: ReturnType<typeof setInterval> | null = null
 let joystickTimer: ReturnType<typeof setInterval> | null = null
 let joystickInFlight = false
+
+/** patchimg 的源是单张 2:1 ERP 图：没有时间轴、代理由源图直出。 */
+const isImage = computed(() => props.info.flow === 'patchimg')
 
 const frameCount = computed(() => {
   if (props.info.frame_count) return props.info.frame_count
@@ -73,6 +77,9 @@ const erpSource = computed(() =>
 const vpUrl = computed(() => {
   const base = props.info.previews.vp ?? `/img/${props.caseName}/vp.png`
   const separator = base.includes('?') ? '&' : '?'
+  // 图片流程只有一帧：不带 frame，直接走服务端的第 0 帧重投影；
+  // 带 frame=0 也能用，但会让缓存多走一条单帧路径。
+  if (isImage.value) return `${base}${separator}t=${vpVersion.value}`
   return `${base}${separator}frame=${frame.value}&t=${vpVersion.value}`
 })
 const viewportReady = computed(() => Boolean(viewport.value?.width))
@@ -150,9 +157,10 @@ function onSlider(value: number | number[]): void {
 }
 
 async function onErpClick(event: MouseEvent): Promise<void> {
-  const video = erpVideo.value
-  if (!video) return
-  const box = video.getBoundingClientRect()
+  // 图片流程与视频共用同一套点选定位：点击点在全景面上的 0..1 分数。
+  const media = isImage.value ? erpImage.value : erpVideo.value
+  if (!media) return
+  const box = media.getBoundingClientRect()
   if (!box.width || !box.height) return
   const fx = (event.clientX - box.left) / box.width
   const fy = (event.clientY - box.top) / box.height
@@ -345,7 +353,17 @@ onUnmounted(() => {
       </div>
       <div class="panel-body">
         <div class="erp-wrap">
+          <img
+            v-if="isImage"
+            ref="erpImage"
+            :src="info.source_file?.open_url ?? ''"
+            alt="源 ERP 全景图"
+            class="erp-image"
+            draggable="false"
+            @click="onErpClick"
+          />
           <video
+            v-else
             ref="erpVideo"
             :src="erpSource"
             muted
@@ -370,7 +388,7 @@ onUnmounted(() => {
           />
         </div>
 
-        <div class="scrub">
+        <div v-if="!isImage" class="scrub">
           <el-button :icon="playing ? undefined : VideoPlay" size="small" @click="togglePlay">
             {{ playing ? '暂停' : '播放' }}
           </el-button>
@@ -393,7 +411,7 @@ onUnmounted(() => {
           <span>yaw {{ yawText }}°</span>
           <span>pitch {{ pitchText }}°</span>
           <span>视口 {{ viewportLabel }}</span>
-          <span class="proxy-state">
+          <span v-if="!isImage" class="proxy-state">
             预览代理：{{ proxyState }}
             <el-button
               v-if="!proxyReady"
@@ -411,7 +429,7 @@ onUnmounted(() => {
 
     <aside class="panel">
       <div class="panel-head">
-        <h2 class="panel-title">选区与抽帧范围</h2>
+        <h2 class="panel-title">{{ isImage ? '选区' : '选区与抽帧范围' }}</h2>
         <el-button link type="primary" :icon="Refresh" @click="resetToExtract">重置选区</el-button>
       </div>
       <div class="panel-body">
@@ -540,7 +558,7 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div class="frames-row">
+        <div v-if="!isImage" class="frames-row">
           <label class="ctl">
             <span>抽取范围</span>
             <el-input-number
@@ -581,7 +599,8 @@ onUnmounted(() => {
   background: var(--color-video-bg);
 }
 
-.erp-wrap video {
+.erp-wrap video,
+.erp-wrap .erp-image {
   display: block;
   width: 100%;
   max-height: 420px;

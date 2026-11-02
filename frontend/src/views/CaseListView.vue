@@ -1,12 +1,18 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Search, UploadFilled } from '@element-plus/icons-vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import AssetUploadDialog from '@/components/upload/AssetUploadDialog.vue'
-import { createCaseRequest, fetchCases, fetchModes, fetchSources } from '@/api/cases'
-import { flowMeta } from '@/constants/flow'
+import {
+  createCaseRequest,
+  deleteCaseRequest,
+  fetchCases,
+  fetchModes,
+  fetchSources,
+} from '@/api/cases'
+import { flowMeta, flowOptions } from '@/constants/flow'
 import { nextStepForFlow } from '@/utils/caseFlow'
 import type { CaseBrief, CaseRow, Flow, ModeOption, TaskStatus } from '@/types/case'
 
@@ -15,8 +21,15 @@ const router = useRouter()
 const rows = ref<CaseRow[]>([])
 const loading = ref(false)
 const error = ref('')
-const sources = ref<string[]>([])
+const sourceVideos = ref<string[]>([])
+const sourceImages = ref<string[]>([])
 const modes = ref<ModeOption[]>([])
+
+const IMAGE_FLOWS: Flow[] = ['patchimg', 'fullRedrawImg']
+
+function isImageFlow(flow: Flow): boolean {
+  return IMAGE_FLOWS.includes(flow)
+}
 
 const keyword = ref('')
 const flowFilter = ref<Flow | 'all'>('all')
@@ -79,21 +92,41 @@ const form = reactive<{ name: string; flow: Flow; mode: string; source: string }
 const sourceUploadOpen = ref(false)
 const lastUploaded = ref<{ uploadId: string; name: string } | null>(null)
 
+const createImageFlow = computed(() => isImageFlow(form.flow))
+/** relight 建 case 不绑源文件：GT 与氛围图进 case 之后在素材步选定。 */
+const createNoSource = computed(() => form.flow === 'gen' || form.flow === 'relight')
+/** 弹窗要不要选源文件：gen 与 relight 都不需要。 */
+const needsSource = computed(() => !createNoSource.value)
+/** 新建弹窗只列当前 flow 能用的源：视频流程看 videos，图片流程看 images。 */
+const createSources = computed(() =>
+  createImageFlow.value ? sourceImages.value : sourceVideos.value,
+)
+
+watch(
+  () => form.flow,
+  () => {
+    form.source = createSources.value[0] ?? ''
+  },
+)
+
 function onSourceUploaded(file: { uploadId: string; name: string }): void {
   lastUploaded.value = file
-  if (!sources.value.includes(file.name)) sources.value = [...sources.value, file.name]
+  const target = /\.(png|jpe?g|webp)$/i.test(file.name) ? sourceImages : sourceVideos
+  if (!target.value.includes(file.name)) target.value = [...target.value, file.name]
   form.source = file.name
 }
 
 async function loadCreateOptions(): Promise<void> {
   try {
     const [sourceData, modeData] = await Promise.all([fetchSources(), fetchModes()])
-    sources.value = sourceData.files ?? []
+    const files = sourceData.files ?? []
+    sourceVideos.value = sourceData.videos ?? files.filter((name) => !/\.(png|jpe?g|webp)$/i.test(name))
+    sourceImages.value = sourceData.images ?? files.filter((name) => /\.(png|jpe?g|webp)$/i.test(name))
     modes.value = modeData.modes ?? []
-    if (!form.source && sources.value.length) form.source = sources.value[0]
+    form.source = createSources.value[0] ?? ''
     if (!form.mode && modes.value.length) form.mode = modes.value[0].value
   } catch (err) {
-    ElMessage.warning(err instanceof Error ? err.message : '读取源视频或模式失败')
+    ElMessage.warning(err instanceof Error ? err.message : '读取源文件或模式失败')
   }
 }
 
@@ -116,8 +149,8 @@ async function createCase(): Promise<void> {
     ElMessage.warning('先给 case 取一个名字')
     return
   }
-  if (form.flow !== 'gen' && !form.source) {
-    ElMessage.warning('sources/ 里还没有可选视频')
+  if (needsSource.value && !form.source) {
+    ElMessage.warning(createImageFlow.value ? 'sources/ 里还没有可选图片' : 'sources/ 里还没有可选视频')
     return
   }
   if (form.flow === 'gen' && !form.mode) {
@@ -130,11 +163,13 @@ async function createCase(): Promise<void> {
     const result = await createCaseRequest({
       flow: form.flow,
       name,
-      ...(form.flow === 'gen'
-        ? { mode: form.mode }
-        : useUpload
+      ...(needsSource.value
+        ? useUpload
           ? { upload_id: lastUploaded.value!.uploadId }
-          : { video: form.source }),
+          : { video: form.source }
+        : form.flow === 'gen'
+          ? { mode: form.mode }
+          : {}),
     })
     createOpen.value = false
     lastUploaded.value = null
@@ -151,6 +186,43 @@ async function createCase(): Promise<void> {
 
 function statusClass(status: CaseRow['taskStatus']): string {
   return status === 'idle' ? '' : status
+}
+
+const deleting = ref('')
+
+function isTaskActive(row: CaseRow): boolean {
+  return row.taskStatus === 'running' || row.taskStatus === 'queued'
+}
+
+async function removeCase(row: CaseRow): Promise<void> {
+  if (isTaskActive(row)) {
+    ElMessage.warning('case 有运行中或排队任务，等任务结束后再删')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `将删除 cases/${row.name}/ 与 vrgen_runs/${row.name}/ 下的全部文件，不可恢复。`,
+      `删除 case「${row.name}」`,
+      {
+        type: 'warning',
+        confirmButtonText: '删除',
+        confirmButtonClass: 'el-button--danger',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
+  deleting.value = row.name
+  try {
+    await deleteCaseRequest(row.name)
+    ElMessage.success(`已删除 ${row.name}`)
+    await loadCases()
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '删除 case 失败')
+  } finally {
+    deleting.value = ''
+  }
 }
 
 function flowInfo(flow: string): (typeof flowMeta)[Flow] {
@@ -183,11 +255,14 @@ onMounted(loadCases)
         clearable
         style="width: 240px"
       />
-      <el-select v-model="flowFilter" style="width: 150px">
+      <el-select v-model="flowFilter" style="width: 180px">
         <el-option label="全部流程" value="all" />
-        <el-option label="局部重绘" value="patch" />
-        <el-option label="全画幅重绘" value="fullredraw" />
-        <el-option label="简单生成" value="gen" />
+        <el-option
+          v-for="option in flowOptions"
+          :key="option.value"
+          :label="option.label"
+          :value="option.value"
+        />
       </el-select>
       <el-select v-model="ownerFilter" style="width: 130px">
         <el-option label="全部负责人" value="all" />
@@ -227,9 +302,18 @@ onMounted(loadCases)
             <span class="mono">{{ row.outputs }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="" width="90" align="right">
+        <el-table-column label="" width="150" align="right">
           <template #default="{ row }">
             <el-button link type="primary" @click.stop="openCase(row)">打开</el-button>
+            <el-button
+              link
+              type="danger"
+              :loading="deleting === row.name"
+              :disabled="isTaskActive(row)"
+              @click.stop="removeCase(row)"
+            >
+              删除
+            </el-button>
           </template>
         </el-table-column>
         <template #empty>
@@ -245,25 +329,38 @@ onMounted(loadCases)
         </el-form-item>
         <el-form-item label="流程">
           <el-radio-group v-model="form.flow">
-            <el-radio-button value="patch">局部重绘</el-radio-button>
-            <el-radio-button value="fullredraw">全画幅重绘</el-radio-button>
+            <el-radio-button value="patch">视频·局部重绘</el-radio-button>
+            <el-radio-button value="fullredraw">视频·全画幅重绘</el-radio-button>
             <el-radio-button value="gen">简单生成</el-radio-button>
+            <el-radio-button value="patchimg">图片·局部重绘</el-radio-button>
+            <el-radio-button value="fullRedrawImg">图片·全幅重绘</el-radio-button>
+            <el-radio-button value="relight">重打光</el-radio-button>
           </el-radio-group>
         </el-form-item>
-        <el-form-item v-if="form.flow !== 'gen'" label="源视频" required>
+        <el-form-item v-if="needsSource" :label="createImageFlow ? '源图片' : '源视频'" required>
           <div class="source-row">
             <el-select
               v-model="form.source"
-              placeholder="选择 sources/ 里的视频"
+              :placeholder="createImageFlow ? '选择 sources/ 里的图片' : '选择 sources/ 里的视频'"
               style="flex: 1"
-              :disabled="!sources.length"
+              :disabled="!createSources.length"
             >
-              <el-option v-for="file in sources" :key="file" :label="file" :value="file" />
+              <el-option v-for="file in createSources" :key="file" :label="file" :value="file" />
             </el-select>
-            <el-button :icon="UploadFilled" @click="sourceUploadOpen = true">上传视频</el-button>
+            <el-button :icon="UploadFilled" @click="sourceUploadOpen = true">
+              {{ createImageFlow ? '上传图片' : '上传视频' }}
+            </el-button>
           </div>
-          <div v-if="!sources.length" class="field-hint">
-            sources/ 目录里还没有视频；可点击「上传视频」直接上传本机文件。
+          <div v-if="!createSources.length" class="field-hint">
+            sources/ 目录里还没有{{ createImageFlow ? '图片（2:1 ERP）' : '视频' }}；可点击「{{
+              createImageFlow ? '上传图片' : '上传视频'
+            }}」直接上传本机文件。
+          </div>
+        </el-form-item>
+        <el-form-item v-else-if="form.flow === 'relight'" label="下一步">
+          <div class="field-hint">
+            重打光 case 建完进入「素材」步：在那里选定底版（视频或图片）与氛围图，
+            再运行重打光。建 case 这一步不绑任何源文件。
           </div>
         </el-form-item>
         <el-form-item v-else label="生成模式" required>
@@ -292,6 +389,7 @@ onMounted(loadCases)
     <AssetUploadDialog
       v-model="sourceUploadOpen"
       destination="source"
+      :source-kind="createImageFlow ? 'image' : 'video'"
       @uploaded="onSourceUploaded"
     />
   </div>

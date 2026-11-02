@@ -20,9 +20,10 @@ vi.mock('@/api/tasks', () => ({
 }))
 
 import GenerateStep from '@/views/wizard/GenerateStep.vue'
+import GenerateSubmitBar from '@/components/generate/GenerateSubmitBar.vue'
 import { runOperation, saveParams } from '@/api/case'
 import type { RoundSummary } from '@/types/case-info'
-import type { AssetDetail, CaseInfo } from '@/types/case-info'
+import type { AssetDetail, CaseInfo, OutputOption } from '@/types/case-info'
 
 function asset(id: string, role: string, name: string): AssetDetail {
   return {
@@ -149,7 +150,22 @@ function info(): CaseInfo {
         project_id: 0,
         episode: 0,
       },
-      fixed: { model_id: 37, duration_s: 10, num: 1 },
+      fixed: {
+        video_model_id: 37,
+        image_model_id: 44,
+        duration_s: 10,
+        num: 1,
+      },
+      models: [
+        { id: 22, name: 'Seedance 4.0', description: '' },
+        { id: 37, name: 'Seedance 2.5', description: '' },
+        { id: 39, name: 'Seedance 5.0 Pro', description: '' },
+      ],
+      image_models: [
+        { id: 44, name: '专业图片-2.5', description: '' },
+        { id: 46, name: '万能编辑2.1', description: '' },
+      ],
+      image_models_error: null,
       saved: true,
     },
     step_files: {},
@@ -213,19 +229,36 @@ describe('GenerateStep', () => {
     wrapper.unmount()
   })
 
-  it('switches to the 4K preset with model 22', async () => {
+  it('saves both model ids when the submit bar changes them', async () => {
     vi.mocked(saveParams).mockResolvedValue(info())
-    const wrapper = await mountStep()
-    const button = wrapper.findAll('button').find((item) => item.text().includes('切到 4K'))
-    expect(button).toBeTruthy()
-    await button!.trigger('click')
+    const data = info()
+    data.gates.generate = { ok: true, ready: true, reason: '' }
+    const wrapper = await mountStep(data)
+    const bar = wrapper.findComponent(GenerateSubmitBar)
+    bar.vm.$emit('update:videoModelId', 39)
+    bar.vm.$emit('update:imageModelId', 46)
     await flushPromises()
-    expect(saveParams).toHaveBeenCalledWith('p1', {
-      model_id: 22,
-      mode: 'firstLastFrame',
-      resolution: '4K',
-      aspect_ratio: '16:9',
-    })
+    const submit = wrapper.findAll('button').find((item) => item.text().includes('提交生成'))
+    expect(submit?.attributes('disabled')).toBeUndefined()
+    await submit!.trigger('click')
+    await flushPromises()
+    expect(saveParams).toHaveBeenCalledWith(
+      'p1',
+      expect.objectContaining({ video_model_id: 39, image_model_id: 46 }),
+    )
+    wrapper.unmount()
+  })
+
+  it('keeps a saved model visible when it is missing from the list', async () => {
+    const data = info()
+    data.generation_params!.models = [{ id: 22, name: 'Seedance 4.0', description: '' }]
+    data.generation_params!.fixed.video_model_id = 37
+    const wrapper = await mountStep(data)
+    const bar = wrapper.findComponent(GenerateSubmitBar)
+    expect(bar.props('videoModelOptions')).toEqual([
+      { id: 37, name: '模型 #37', description: '不在当前清单里' },
+      { id: 22, name: 'Seedance 4.0', description: '' },
+    ])
     wrapper.unmount()
   })
 
@@ -262,5 +295,65 @@ describe('GenerateStep', () => {
     expect(wrapper.text()).toContain('已采用')
     expect(wrapper.text()).toContain('当前采用轮次：gen-a')
     wrapper.unmount()
+  })
+
+  it('refreshes the output tiers right after the model changes, without a reload', async () => {
+    vi.useFakeTimers()
+    try {
+      const fresh = info()
+      fresh.generation_params = {
+        ...fresh.generation_params!,
+        output: [
+          { value: '480p', width: 854, height: 480 },
+          { value: '720p', width: 1280, height: 720 },
+          { value: '1080p', width: 1920, height: 1080 },
+          { value: '4K', width: 3840, height: 2160 },
+        ],
+        fixed: { ...fresh.generation_params!.fixed, video_model_id: 22 },
+      }
+      vi.mocked(saveParams).mockResolvedValue(fresh)
+      const wrapper = await mountStep()
+      const bar = wrapper.findComponent(GenerateSubmitBar)
+      expect(bar.props('resolutionOptions')).toHaveLength(1)
+
+      bar.vm.$emit('update:videoModelId', 22)
+      await vi.advanceTimersByTimeAsync(400)
+      await flushPromises()
+
+      const values = (bar.props('resolutionOptions') as OutputOption[]).map(
+        (item) => item.value,
+      )
+      expect(values).toEqual(['480p', '720p', '1080p', '4K'])
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('falls back to a supported tier when the new model drops the saved one', async () => {
+    vi.useFakeTimers()
+    try {
+      const fresh = info()
+      fresh.generation_params = {
+        ...fresh.generation_params!,
+        output: [
+          { value: '480p', width: 854, height: 480 },
+          { value: '720p', width: 1280, height: 720 },
+        ],
+        fixed: { ...fresh.generation_params!.fixed, video_model_id: 23 },
+      }
+      vi.mocked(saveParams).mockResolvedValue(fresh)
+      const wrapper = await mountStep()
+      const bar = wrapper.findComponent(GenerateSubmitBar)
+
+      bar.vm.$emit('update:videoModelId', 23)
+      await vi.advanceTimersByTimeAsync(400)
+      await flushPromises()
+
+      expect(bar.props('resolution')).toBe('480p')
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

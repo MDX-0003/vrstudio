@@ -209,6 +209,12 @@ class TaskQueue:
             rows = [row for row in rows if row["case"] == case]
         return rows
 
+    def active_for(self, case: str) -> list[Task]:
+        """正在跑或排队的该 case 任务；删除 case 前用它拒绝。"""
+        with self._lock:
+            tasks = ([self.current] if self.current is not None else []) + self.pending
+            return [task for task in tasks if task.case == case]
+
     def _drain(self):
         while True:
             with self._lock:

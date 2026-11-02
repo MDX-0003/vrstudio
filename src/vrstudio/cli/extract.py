@@ -22,10 +22,10 @@ import typer
 
 from ..patch.case import Case, load_case, set_extract_version
 from ..patch.sidecar import (Sidecar, Segment, Viewport, InnerRect, save_sidecar,
-                             StillGeometry, save_still)
+                             ImageGeometry, save_image)
 from ..patch.extract import extract_viewport_frame, open_writer, make_mask_image
 from ..redraw.geometry import aspect_label
-from ..redraw.still import StillError, pad_still, plan_still
+from ..redraw.image import ImageFlowError, pad_image, plan_image
 from ..progress import PhaseLog as Log, PhaseRateMeter as RateMeter, open_log_file
 from .. import __version__, case as case_mod, config as config_mod
 from ..media.imageio import ImageError, read_image, write_gray_png, write_png
@@ -144,8 +144,8 @@ def from_case(
         fh.close()
 
 
-def _extract_still(case, src: Path, cases_dir, log: Log) -> None:
-    """patchimg 的视口裁剪：2:1 ERP -> 16:9 视口图 + inner mask + still.json。
+def _extract_image(case, src: Path, cases_dir, log: Log) -> None:
+    """patchimg 的视口裁剪：2:1 ERP -> 16:9 视口图 + inner mask + image.json。
 
     模型只重绘这张透视视口图。视口跨 ERP 接缝时由 ``build_view_map`` 的环绕
     采样先拼成连续图像，因此不需要全幅冗余画布，也没有上传降采样。
@@ -154,7 +154,7 @@ def _extract_still(case, src: Path, cases_dir, log: Log) -> None:
     erp_h, erp_w = image.shape[:2]
     viewport = Viewport(**case.viewport)
     inner = InnerRect(**case.inner)
-    geo = StillGeometry(erp_width=erp_w, erp_height=erp_h,
+    geo = ImageGeometry(erp_width=erp_w, erp_height=erp_h,
                         viewport=viewport, inner=inner)
 
     clip = extract_viewport_frame(image, viewport)
@@ -165,15 +165,15 @@ def _extract_still(case, src: Path, cases_dir, log: Log) -> None:
     vdir.mkdir(parents=True, exist_ok=True)
     write_png(vdir / "clip.png", clip)
     write_gray_png(vdir / "clip_mask.png", mask)
-    save_still(geo, vdir / "still.json")
+    save_image(geo, vdir / "image.json")
     case_mod.set_extract_current(case.name, version, root=cases_dir)
 
     derived = case.dir(cases_dir) / "derived"
     derived.mkdir(parents=True, exist_ok=True)
-    for name in ("clip.png", "clip_mask.png", "still.json"):
+    for name in ("clip.png", "clip_mask.png", "image.json"):
         shutil.copyfile(vdir / name, derived / name)
 
-    log.phase(f"still extract version: {version}")
+    log.phase(f"image extract version: {version}")
     log.info(f"viewport {viewport.width}x{viewport.height}  yaw {viewport.yaw_deg} "
              f"pitch {viewport.pitch_deg}  fov {viewport.fov_h_deg}")
     log.info(f"inner {inner.width}x{inner.height} at {inner.x},{inner.y}  "
@@ -181,14 +181,14 @@ def _extract_still(case, src: Path, cases_dir, log: Log) -> None:
 
 
 def _extract_full_redraw_img(case, src: Path, cases_dir, log: Log, conf) -> None:
-    """fullRedrawImg：2:1 ERP -> 21:9 冗余画布 + mask + still_pad.json。
+    """fullRedrawImg：2:1 ERP -> 21:9 冗余画布 + mask + image_pad.json。
 
     整幅交给图片模型重绘；冗余带留作 recompose 的配准锚点，mask 白区就是它们。
     没有视口、没有关键区块，几何完全由 pad 决定。
     """
     image = read_image(src)
     erp_h, erp_w = image.shape[:2]
-    plan = plan_still(
+    plan = plan_image(
         (erp_w, erp_h),
         target_aspect=str(conf.get("pad.target_aspect", "21:9")),
         even_dimensions=bool(conf.get("pad.even_dimensions", True)),
@@ -196,7 +196,7 @@ def _extract_full_redraw_img(case, src: Path, cases_dir, log: Log, conf) -> None
         pre_roll=conf.get("pad.pre_roll", "auto"),
     )
     pipeline = list(conf.get("pad.pipeline.transforms", ["pre_roll", "pad_h"]))
-    padded = pad_still(
+    padded = pad_image(
         image, plan, source_path=src,
         pipeline=pipeline,
         mask_strategy=str(conf.get("mask.strategy", "redundant_white")),
@@ -213,7 +213,7 @@ def _extract_full_redraw_img(case, src: Path, cases_dir, log: Log, conf) -> None
     compression = int(conf.get("mask.png_compression", 0))
     write_png(vdir / "padded.png", padded.padded, compression=compression)
     write_gray_png(vdir / "padded_mask.png", padded.mask, compression=compression)
-    padded.manifest.save(vdir / "still_pad.json")
+    padded.manifest.save(vdir / "image_pad.json")
     case_mod.set_extract_current(case.name, version, root=cases_dir)
 
     log.phase(f"fullRedrawImg extract version: {version}")
@@ -228,8 +228,8 @@ def from_case_name(
     """Extract by unified case name: 草稿冻结进 extracts/<版本>。
 
     patch 冻结成 clip.json + clip.mp4 + clip_mask.png；patchimg 冻结成
-    still.json + clip.png + clip_mask.png（视口局部）；fullRedrawImg 冻结成
-    still_pad.json + padded.png + padded_mask.png（整幅画布）。三者共用源路径/
+    image.json + clip.png + clip_mask.png（视口局部）；fullRedrawImg 冻结成
+    image_pad.json + padded.png + padded_mask.png（整幅画布）。三者共用源路径/
     哈希守卫与 extracts 版本目录。
     """
     case = case_mod.load(case_name, cases_dir)
@@ -252,8 +252,8 @@ def from_case_name(
         log.phase(f"case: {case.name} (source sha256 verified)")
         if case.flow == "patchimg":
             try:
-                _extract_still(case, src, cases_dir, log)
-            except (ImageError, ValueError, TypeError) as exc:
+                _extract_image(case, src, cases_dir, log)
+            except (ImageFlowError, ValueError, TypeError) as exc:
                 typer.secho(f"extract: {exc}", fg=typer.colors.RED, err=True)
                 raise typer.Exit(2) from exc
             log.phase(f"log -> {log_path}")
@@ -262,7 +262,7 @@ def from_case_name(
             try:
                 _extract_full_redraw_img(case, src, cases_dir, log,
                                          config_mod.load())
-            except (ImageError, StillError, ValueError, TypeError) as exc:
+            except (ImageFlowError, ImageError, ValueError, TypeError) as exc:
                 typer.secho(f"extract: {exc}", fg=typer.colors.RED, err=True)
                 raise typer.Exit(2) from exc
             log.phase(f"log -> {log_path}")

@@ -41,7 +41,8 @@ export function savePromptVar(name: string, key: string, value: string): Promise
 }
 
 export interface SaveParamsPayload {
-  model_id?: number
+  video_model_id?: number
+  image_model_id?: number
   mode?: string
   aspect_ratio?: string
   resolution?: string
@@ -56,7 +57,14 @@ export function saveParams(name: string, payload: SaveParamsPayload): Promise<Ca
 }
 
 export type RunOperation =
-  'dry_run' | 'submit' | 'adopt' | 'extract' | 'merge' | 'pad' | 'recompose'
+  | 'dry_run'
+  | 'submit'
+  | 'adopt'
+  | 'extract'
+  | 'merge'
+  | 'pad'
+  | 'recompose'
+  | 'relight'
 
 export interface RunPayload {
   mode?: string
@@ -66,6 +74,27 @@ export interface RunPayload {
   duration?: number
   round?: string
   allow_crop?: boolean
+  /** 图片流程：候选张数 1..4。 */
+  num?: number
+  /** 图片流程：图片模型 id。 */
+  image_model_id?: number
+  /** 图片流程：项目生成会话 id（计费对象）。 */
+  session_id?: number
+  /** 图片流程 adopt：候选序号（从 1 开始）。 */
+  index?: number
+  /** relight：打光参数（与 CLI 同名）。 */
+  scene?: 'night' | 'day'
+  strength?: number
+  local_shading?: number
+  highlight_clip?: boolean
+  clip_knee?: number
+  clip_max?: number
+  /** relight 视频：对齐与估光场用的帧（0 起）。 */
+  ref_frame?: number
+  /** relight 视频：编码质量。 */
+  crf?: number
+  /** relight 视频：只出 N 帧小样，不编码整段。 */
+  sample?: number
 }
 
 export function runOperation(
@@ -90,6 +119,40 @@ export function addAssetsByUploads(
 
 export function removeAsset(name: string, id: string): Promise<CaseInfo> {
   return postJson<CaseInfo>(`${casePath(name)}/assets`, { op: 'remove', id })
+}
+
+/** relight 参数面板的持久值：写进 case.toml 的 [relight] 段。 */
+export function saveRelightDraft(
+  name: string,
+  values: Record<string, string | number | boolean>,
+): Promise<CaseInfo> {
+  return postJson<CaseInfo>(`${casePath(name)}/relight`, values)
+}
+
+/** relight 的槽位：上传或指定一份文件，加一条候选并选中它。 */
+export function setRelightSlot(
+  name: string,
+  role: 'relight_gt' | 'relight_atmo',
+  target: { uploadId?: string; path?: string },
+): Promise<CaseInfo> {
+  return postJson<CaseInfo>(`${casePath(name)}/assets`, {
+    op: 'slot',
+    role,
+    ...(target.uploadId ? { upload_ids: [target.uploadId] } : { path: target.path }),
+  })
+}
+
+/** relight 的槽位：只改指针，选中库里已有的一条候选。 */
+export function pickRelightSlot(
+  name: string,
+  role: 'relight_gt' | 'relight_atmo',
+  assetId: string,
+): Promise<CaseInfo> {
+  return postJson<CaseInfo>(`${casePath(name)}/assets`, {
+    op: 'slot',
+    role,
+    asset_id: assetId,
+  })
 }
 
 export function reorderAssets(name: string, ids: string[]): Promise<CaseInfo> {

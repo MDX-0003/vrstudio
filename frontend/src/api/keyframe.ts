@@ -7,7 +7,7 @@ export interface KeyframeRound {
   key: string
   stage: string
   step: string
-  model_id: number | null
+  image_model_id: number | null
   num: number | null
   gate: Record<string, unknown>
   results: ({ index: number; url: string } & FileInfo)[]
@@ -19,7 +19,6 @@ export interface KeyframeRounds {
 
 export interface KeyframeRunPayload {
   step: 'first' | 'last'
-  model_id?: number
   resolution?: string
   num?: number
 }
@@ -42,6 +41,11 @@ export function pickKeyframe(
   index: number,
 ): Promise<CaseInfo> {
   return postJson<CaseInfo>(`${casePath(name)}/keyframe/pick`, { role, round, index })
+}
+
+/** 直接用当前抽取的原始帧当定稿：不重绘、不花额度。 */
+export function useRawKeyframe(name: string, step: 'first' | 'last'): Promise<CaseInfo> {
+  return postJson<CaseInfo>(`${casePath(name)}/keyframe/use-raw`, { step })
 }
 
 export function fetchKeyframePrompt(name: string, step: 'first' | 'last'): Promise<PromptPayload> {

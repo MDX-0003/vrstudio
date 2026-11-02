@@ -34,6 +34,31 @@ export function nextStepForFlow(flow: Flow, gates: Gates = {}): NextStep {
     return { key: 'compare', label: '可以对比', actionable: true }
   }
 
+  if (flow === 'relight') {
+    if (!gates.assets?.ok) return { key: 'assets', label: '等待选定底版与氛围图', actionable: true }
+    if (!gates.relight?.ok) return { key: 'relight', label: '可以重打光', actionable: true }
+    return { key: 'compare', label: '可以对比', actionable: true }
+  }
+
+  if (flow === 'patchimg' || flow === 'fullRedrawImg') {
+    const patchimg = flow === 'patchimg'
+    if (patchimg && !gates.pick?.ok) return { key: 'pick', label: '等待选区', actionable: true }
+    if (!gates.extract?.ok) return { key: 'extract', label: '可以抽取', actionable: true }
+    // 图片流程生成结果的完成标志是「采用了一张候选」，不是任务跑完。
+    if (!gates.generate?.ok) {
+      return gates.generate?.ready
+        ? { key: 'generate', label: '可以生成', actionable: true }
+        : { key: 'generate', label: '等待选用', actionable: false }
+    }
+    if (!gates.merge?.ready) {
+      return { key: 'generate', label: '等待选用', actionable: true }
+    }
+    if (!gates.merge?.ok) {
+      return { key: 'merge', label: patchimg ? '可以贴回' : '可以拼接', actionable: true }
+    }
+    return { key: 'compare', label: '可以对比', actionable: true }
+  }
+
   if (!gates.pick?.ok) return { key: 'pick', label: '等待选区', actionable: true }
   if (!gates.extract?.ok) return { key: 'extract', label: '可以抽取', actionable: true }
 

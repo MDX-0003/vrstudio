@@ -8,7 +8,13 @@ const props = defineProps<{
   modelValue: boolean
   caseName: string
   info: CaseInfo
-  mode: 'video' | 'keyframe'
+  mode: 'video' | 'keyframe' | 'image'
+  /** 覆盖标题：relight 的槽位选择不是「加入提交」，默认文案会误导。 */
+  title?: string
+  /** 覆盖副标题。 */
+  hint?: string
+  /** 覆盖确认按钮文案。 */
+  confirmText?: string
 }>()
 
 const emit = defineEmits<{
@@ -33,7 +39,7 @@ const joinedIds = computed(() => {
 const rows = computed(() => {
   const query = search.value.trim().toLowerCase()
   return (props.info.assets ?? []).filter((asset) => {
-    if (props.mode === 'keyframe' && asset.kind !== 'image') return false
+    if (props.mode !== 'video' && asset.kind !== 'image') return false
     if (kind.value !== 'all' && asset.kind !== kind.value) return false
     if (hideJoined.value && joinedIds.value.has(asset.id)) return false
     if (query) {
@@ -89,7 +95,7 @@ watch(
   (open) => {
     if (!open) return
     search.value = ''
-    kind.value = props.mode === 'keyframe' ? 'image' : 'all'
+    kind.value = props.mode === 'video' ? 'all' : 'image'
     hideJoined.value = false
     selected.value = []
   },
@@ -108,13 +114,23 @@ watch(
     <template #header>
       <div>
         <h3 class="picker-title">
-          {{ mode === 'video' ? '添加素材到本次视频提交' : '添加参考图到首尾帧' }}
+          {{
+            title ??
+            (mode === 'video'
+              ? '添加素材到本次视频提交'
+              : mode === 'image'
+                ? '添加素材到本次图片提交'
+                : '添加参考图到首尾帧')
+          }}
         </h3>
         <p class="picker-sub muted">
           {{
-            mode === 'video'
+            hint ??
+            (mode === 'video'
               ? '从素材库选择；勾选顺序就是加入顺序。加入后在提交清单里设置角色。'
-              : '从素材库选择图片；第一张在缺少人物三视图时成为主三视图，其余默认细节参考。'
+              : mode === 'image'
+                ? '图片流程只引用图片素材；勾选顺序就是提示词里 @ImageN 的顺序。'
+                : '从素材库选择图片；第一张在缺少人物三视图时成为主三视图，其余默认细节参考。')
           }}
         </p>
       </div>
@@ -125,7 +141,7 @@ watch(
       <el-select
         v-model="kind"
         size="small"
-        :disabled="mode === 'keyframe'"
+        :disabled="mode !== 'video'"
         style="width: 110px"
       >
         <el-option label="全部类型" value="all" />
@@ -186,7 +202,7 @@ watch(
         <span class="spacer" />
         <el-button size="small" @click="close">取消</el-button>
         <el-button size="small" type="primary" :disabled="!selectedCount" @click="confirm">
-          添加
+          {{ confirmText ?? '添加' }}
         </el-button>
       </div>
     </template>

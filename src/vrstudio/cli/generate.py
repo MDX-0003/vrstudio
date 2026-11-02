@@ -34,16 +34,17 @@ from ..config import REPO_ROOT
 from ..config import load as load_config
 from ..media.imageio import read_image, write_gray_png, write_png
 from ..media.videoio import VideoIOError, probe
-from ..patch.sidecar import STILL_RATIO_LABEL, load_still
+from ..patch.sidecar import IMAGE_RATIO_LABEL, load_image
 from ..procenv import decode_text, utf8_env
-from ..redraw.manifest import Manifest, StillManifest
+from ..redraw.manifest import ImageManifest, Manifest
 
 app = typer.Typer(add_completion=False, no_args_is_help=True,
                   help="组装提交清单 → 调 vrgen 生成/注册 → adopt 结果落 case")
 
 #: 每个 flow 首轮 submit 用的模板 id（模板本体在 vrgen templates/）。
 TEMPLATE_BY_FLOW = {"fullredraw": "360-closure", "patch": "character-repaint",
-                    "gen": "gen-multi"}
+                    "gen": "gen-multi", "patchimg": "img360-local",
+                    "fullRedrawImg": "fullRedrawImg"}
 
 #: 内部控制图：由流程产物提供，装配器自动追加，不进候选也不进 selected。
 MASK_ID = {"patch": "mask", "fullredraw": "pad_mask"}
@@ -361,14 +362,14 @@ def assemble(case: case_mod.Case, root: str | Path | None = None,
 
 
 @dataclass(frozen=True)
-class StillSubmission:
+class ImageSubmission:
     """patchimg 的图片生成输入：视口图 + inner mask + 可选参考图。"""
 
     base: Path
     mask: Path
     refs: tuple[Candidate, ...]
     ratio: str
-    template: str = "still360-local"
+    template: str = TEMPLATE_BY_FLOW["patchimg"]
 
 
 def _upload_inputs(base: Path, mask: Path | None,
@@ -409,8 +410,8 @@ def _upload_inputs(base: Path, mask: Path | None,
     return upload, upload_mask
 
 
-def assemble_still(case: case_mod.Case,
-                   root: str | Path | None = None) -> StillSubmission:
+def assemble_image(case: case_mod.Case,
+                   root: str | Path | None = None) -> ImageSubmission:
     """按 ``[submit] selected`` 组装 patchimg 的图片提交；视口图与 mask 自动附带。"""
     if not case.extract_current:
         raise GenError(
@@ -422,13 +423,13 @@ def assemble_still(case: case_mod.Case,
     if not base.is_file() or not mask.is_file():
         raise GenError(f"{d} 缺 clip.png/clip_mask.png——重跑 extract")
     try:
-        load_still(d / "still.json")
+        load_image(d / "image.json")
     except (OSError, ValueError, TypeError) as exc:
-        raise GenError(f"{d}/still.json 不合法：{exc}") from exc
+        raise GenError(f"{d}/image.json 不合法：{exc}") from exc
 
-    return StillSubmission(base=base, mask=mask,
+    return ImageSubmission(base=base, mask=mask,
                            refs=tuple(_selected_refs(case, root)),
-                           ratio=STILL_RATIO_LABEL)
+                           ratio=IMAGE_RATIO_LABEL)
 
 
 @dataclass(frozen=True)
@@ -445,7 +446,7 @@ class FullSubmission:
     ratio: str
     canvas_size: tuple[int, int]
     source_size: tuple[int, int]
-    template: str = "fullRedrawImg"
+    template: str = TEMPLATE_BY_FLOW["fullRedrawImg"]
 
 
 def _selected_refs(case: case_mod.Case,
@@ -476,7 +477,7 @@ def assemble_full(case: case_mod.Case, root: str | Path | None = None, *,
     """按 ``[submit] selected`` 组装 fullRedrawImg 的图片提交。
 
     顺序固定为 基图 → mask → 用户参考图。mask 是 ``redundant_white``：两条冗余
-    带白、主内容黑；它把接缝锚点冻在源图像素上，`stitch_still` 的配准因此稳定。
+    带白、主内容黑；它把接缝锚点冻在源图像素上，`stitch_image` 的配准因此稳定。
     代价是横跨接缝的那条带不参与重绘，这是"保证无接缝"选择的已知成本。
     """
     if not case.extract_current:
@@ -489,9 +490,9 @@ def assemble_full(case: case_mod.Case, root: str | Path | None = None, *,
     if not base.is_file() or not mask.is_file():
         raise GenError(f"{d} 缺 padded.png/padded_mask.png——重跑 extract")
     try:
-        manifest = StillManifest.load(d / "still_pad.json")
+        manifest = ImageManifest.load(d / "image_pad.json")
     except (OSError, ValueError, TypeError) as exc:
-        raise GenError(f"{d}/still_pad.json 不合法：{exc}") from exc
+        raise GenError(f"{d}/image_pad.json 不合法：{exc}") from exc
 
     base, mask = _upload_inputs(base, mask, int(upload_max_side))
     refs = _selected_refs(case, root)
@@ -542,8 +543,19 @@ def _load_case(name: str, cases_dir) -> case_mod.Case:
         raise GenError(str(exc)) from exc
 
 
-def _submit_still(case: case_mod.Case, cases_dir, conf, *,
-                  variables, model_id, resolution, num, session_id,
+IMAGE_RESOLUTIONS = ("1K", "2K", "4K")
+
+
+def _check_image_resolution(flow: str, resolution: str | None) -> None:
+    """图片档只能取 1K/2K/4K：平台对别的值只会回一个不指向参数的错。"""
+    if resolution is not None and resolution not in IMAGE_RESOLUTIONS:
+        _fail(GenError(
+            f"{flow} 的 --resolution 只能是 {'/'.join(IMAGE_RESOLUTIONS)}，"
+            f"收到 {resolution}"))
+
+
+def _submit_image(case: case_mod.Case, cases_dir, conf, *,
+                  variables, image_model_id, resolution, num, session_id,
                   mode, duration, aspect_ratio, scale, dry_run, check) -> None:
     """patchimg 的提交：vrgen image submit，底图 + mask + 可选参考图。"""
     if mode or duration is not None or aspect_ratio or scale:
@@ -551,19 +563,19 @@ def _submit_still(case: case_mod.Case, cases_dir, conf, *,
     if variables:
         _fail(GenError("patchimg 不接受 --var：请把变量写进 job 的 prompt-vars.toml"))
     try:
-        still = assemble_still(case, cases_dir)
+        submission = assemble_image(case, cases_dir)
     except GenError as exc:
         _fail(exc)
 
     argv = [_vrgen_exe(conf), "image", "submit", "--job", case.name,
-            "--template", still.template,
-            "--image", str(still.base), "--image-role", "edit_master",
-            "--image", str(still.mask), "--image-role", "mask"]
-    for candidate in still.refs:
+            "--template", submission.template,
+            "--image", str(submission.base), "--image-role", "edit_master",
+            "--image", str(submission.mask), "--image-role", "mask"]
+    for candidate in submission.refs:
         argv += ["--image", str(candidate.path), "--image-role", candidate.role]
-    argv += ["--ratio", still.ratio]
-    if model_id is not None:
-        argv += ["--model-id", str(model_id)]
+    argv += ["--ratio", submission.ratio]
+    if image_model_id is not None:
+        argv += ["--image-model-id", str(image_model_id)]
     if resolution is not None:
         argv += ["--resolution", str(resolution)]
     if num is not None:
@@ -582,7 +594,7 @@ def _submit_still(case: case_mod.Case, cases_dir, conf, *,
 
 
 def _submit_full(case: case_mod.Case, cases_dir, conf, *,
-                 variables, model_id, resolution, num, session_id,
+                 variables, image_model_id, resolution, num, session_id,
                  mode, duration, aspect_ratio, scale, dry_run, check) -> None:
     """fullRedrawImg 的提交：基图 + mask + 氛围参考图。"""
     if mode or duration is not None or aspect_ratio or scale:
@@ -606,8 +618,8 @@ def _submit_full(case: case_mod.Case, cases_dir, conf, *,
     argv += ["--canvas", f"{full.canvas_size[0]}x{full.canvas_size[1]}",
              "--source", f"{full.source_size[0]}x{full.source_size[1]}"]
     argv += ["--ratio", full.ratio]
-    if model_id is not None:
-        argv += ["--model-id", str(model_id)]
+    if image_model_id is not None:
+        argv += ["--image-model-id", str(image_model_id)]
     if resolution is not None:
         argv += ["--resolution", str(resolution)]
     if num is not None:
@@ -630,8 +642,12 @@ def submit(
     case_name: str = typer.Option(..., "--case", help="case 名（= vrgen job 名）。"),
     variables: list[str] = typer.Option(None, "--var",
                                         help="提示词变量 k=v，透传给 vrgen submit --set。"),
-    model_id: int = typer.Option(None, "--model-id",
-                                 help="透传 vrgen submit --model-id（← mglc --model-id）。"),
+    video_model_id: int = typer.Option(
+        None, "--video-model-id",
+        help="透传 vrgen submit --video-model-id（← mglc --model-id）。"),
+    image_model_id: int = typer.Option(
+        None, "--image-model-id",
+        help="图片流（patchimg/fullRedrawImg）的模型；视频流不接受该参数。"),
     mode: str = typer.Option(None, "--mode",
                              help="透传 vrgen submit --mode（← mglc --type）。"),
     resolution: str = typer.Option(
@@ -658,20 +674,30 @@ def submit(
     """组装提交清单并提交生成（mglc 后端，M1 起可用；--dry-run 现在就能看 argv）。"""
     conf = load_config(overrides=overrides or [])
     case = _load_case(case_name, cases_dir)
+    if num is not None and not 1 <= int(num) <= 4:
+        _fail(GenError(f"--num 必须是 1..4，收到 {num}"))
     if case.flow == "patchimg":
-        _submit_still(case, cases_dir, conf, variables=variables,
-                      model_id=model_id, resolution=resolution, num=num,
+        if video_model_id is not None:
+            _fail(GenError("patchimg 是图片流，用 --image-model-id"))
+        _check_image_resolution(case.flow, resolution)
+        _submit_image(case, cases_dir, conf, variables=variables,
+                      image_model_id=image_model_id, resolution=resolution, num=num,
                       session_id=session_id, mode=mode, duration=duration,
                       aspect_ratio=aspect_ratio, scale=scale,
                       dry_run=dry_run, check=check)
         return
     if case.flow == "fullRedrawImg":
+        if video_model_id is not None:
+            _fail(GenError("fullRedrawImg 是图片流，用 --image-model-id"))
+        _check_image_resolution(case.flow, resolution)
         _submit_full(case, cases_dir, conf, variables=variables,
-                     model_id=model_id, resolution=resolution, num=num,
+                     image_model_id=image_model_id, resolution=resolution, num=num,
                      session_id=session_id, mode=mode, duration=duration,
                      aspect_ratio=aspect_ratio, scale=scale,
                      dry_run=dry_run, check=check)
         return
+    if image_model_id is not None:
+        _fail(GenError(f"{case.flow} 是视频流，用 --video-model-id"))
     try:
         submission = assemble(case, cases_dir, mode=mode)
     except GenError as exc:
@@ -687,8 +713,8 @@ def submit(
             "--source", f"{submission.source_size[0]}x{submission.source_size[1]}"]
     for item in variables or []:
         argv += ["--set", item]
-    if model_id is not None:
-        argv += ["--model-id", str(model_id)]
+    if video_model_id is not None:
+        argv += ["--video-model-id", str(video_model_id)]
     if mode is not None:
         argv += ["--mode", mode]
     if resolution is not None:

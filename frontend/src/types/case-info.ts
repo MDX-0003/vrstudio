@@ -62,11 +62,20 @@ export interface ModeInfo {
   duration: { type: string; min?: number; max?: number }
 }
 
+export interface ModelOption {
+  id: number
+  name: string
+  description: string
+}
+
 export interface GenerationParams {
   output: OutputOption[]
   input: InputOption[]
   job: string
   modes: ModeInfo[]
+  models: ModelOption[]
+  image_models: ModelOption[]
+  image_models_error?: string | null
   current: {
     resolution: string
     scale: string
@@ -76,7 +85,12 @@ export interface GenerationParams {
     project_id: number
     episode: number
   }
-  fixed: { model_id: number; duration_s: number; num: number }
+  fixed: {
+    video_model_id: number
+    image_model_id: number
+    duration_s: number
+    num: number
+  }
   saved: boolean
   auto_duration_s?: number
   error?: string
@@ -84,8 +98,9 @@ export interface GenerationParams {
 
 export interface OutputFile extends FileInfo {
   file: string
-  proxy_url: string
-  proxy_state: string
+  /** 视频交付物才有代理；图片流程的 PNG 成片不带这两个字段。 */
+  proxy_url?: string
+  proxy_state?: string
   proxy_width?: number | null
   version?: string
   partial?: boolean
@@ -170,6 +185,79 @@ export interface ExtractVersion {
   has_result: boolean
 }
 
+/** 图片轮次里的一张候选；index 就是 adopt 请求要带的下标（从 1 开始）。 */
+export interface ImageCandidate {
+  index: number
+  name: string
+  exists: boolean
+  url: string
+}
+
+/** 图片流程的生成轮次（最新在前）；adopted 表示这一轮被采用。 */
+export interface ImageRound {
+  round: string
+  stage?: string
+  gate?: string
+  adopted: boolean
+  results: ImageCandidate[]
+}
+
+/** patchimg 的贴回报告。 */
+export interface PatchImageReport {
+  erp: [number, number]
+  viewport: Record<string, unknown>
+  inner: Record<string, unknown>
+  normalize: { from: [number, number]; to: [number, number]; allow_crop: boolean }
+  local: { support_pixels: number; changed_inside: number; maxdiff_outside: number }
+  output: string
+}
+
+/** fullRedrawImg 的拼接报告。 */
+export interface FullRedrawImageReport {
+  source: [number, number]
+  canvas: [number, number]
+  registration: { d_star: number; correlation: number; quality: number; mae_min: number }
+  gate: string
+  seam: Record<string, unknown>
+  verdict: string
+  reasons: string[]
+  aspect_drift_pct: number
+  output: string
+}
+
+export type ImageReport = PatchImageReport | FullRedrawImageReport
+
+/** relight 的一个槽位：没填时为 null。 */
+export interface RelightSlot {
+  asset: string
+  kind: 'video' | 'image'
+  path: string
+  sha256: string | null
+  size: number | null
+  entry: FileInfo
+}
+
+/** relight 面板数据：两个槽位、草稿参数、当前成片与小样。 */
+export interface RelightPayload {
+  gt: RelightSlot | null
+  atmo: RelightSlot | null
+  /** 底版的媒体类型；两个槽位都空时为 null。 */
+  media: 'video' | 'image' | null
+  draft: {
+    current?: string
+    scene?: string
+    strength?: number
+    local_shading?: number
+    highlight_clip?: boolean
+    clip_knee?: number
+    clip_max?: number
+    ref_frame?: number
+  }
+  current: FileInfo | null
+  current_report: FileInfo | null
+  samples: FileInfo[]
+}
+
 export interface StepFiles {
   inputs: FileInfo[]
   outputs: FileInfo[]
@@ -179,6 +267,8 @@ export interface KeyframePick {
   round: string
   index: number
   asset: string
+  /** raw = 直接用当前抽取的原始帧定稿（未重绘）；generated = 从候选里挑的。 */
+  source?: 'raw' | 'generated'
   file?: FileInfo | null
 }
 
@@ -256,6 +346,14 @@ export interface CaseInfo {
   proxy: { state: string; url: string; width?: number | null } | null
   extract_current: string | null
   adopt_round: string | null
+  /** 图片流程采用的候选序号；视频流程为 null。 */
+  adopt_index?: number | null
+  /** 图片流程的生成轮次（最新在前）；视频流程为空数组。 */
+  image_rounds?: ImageRound[]
+  /** 图片流程 merge 的 report.json；还没出片时为 null。 */
+  image_report?: ImageReport | null
+  /** relight 的槽位、草稿与当前成片；其他流程为 null。 */
+  relight?: RelightPayload | null
   assets: AssetDetail[]
   raw_frames: RawFrame[]
   keyframe: KeyframeState

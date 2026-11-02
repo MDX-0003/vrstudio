@@ -3,9 +3,46 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { FullScreen, Refresh, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import { ensureProxy, fetchProxy } from '@/api/workflow'
 import { Erp360Compare } from '@/legacy/Erp360Compare'
-import type { CaseInfo, OutputFile } from '@/types/case-info'
+import type { CaseInfo, FullRedrawImageReport, OutputFile } from '@/types/case-info'
 
 const props = defineProps<{ caseName: string; info: CaseInfo }>()
+
+/** 图片流程（patchimg / fullRedrawImg）用并排静态图对比，不走 WebGL 视频对比。 */
+const isImageFlow = computed(
+  () => props.info.flow === 'patchimg' || props.info.flow === 'fullRedrawImg',
+)
+const isRelight = computed(() => props.info.flow === 'relight')
+/** relight 的媒体由底版决定：图片底版走静态并排，视频底版走 360 对比器。 */
+const relightStill = computed(
+  () => isRelight.value && props.info.relight?.media === 'image',
+)
+/** 「静态并排」这一类：图片两条流程与图片底版的 relight。 */
+const isStill = computed(() => isImageFlow.value || relightStill.value)
+const isPatchImg = computed(() => props.info.flow === 'patchimg')
+const sourceImageUrl = computed(() =>
+  relightStill.value
+    ? (props.info.relight?.gt?.entry.open_url ?? '')
+    : (props.info.source_file?.open_url ?? ''),
+)
+const imageOutput = computed(() =>
+  isRelight.value
+    ? (props.info.relight?.current ?? null)
+    : (props.info.outputs[0] ?? null),
+)
+const outputImageUrl = computed(() => imageOutput.value?.open_url ?? '')
+/** 左路标签：relight 播/比的是底版，不是「源片」。 */
+const leftLabel = computed(() => (isRelight.value ? '底版' : '源片'))
+const fullReport = computed<FullRedrawImageReport | null>(() =>
+  props.info.flow === 'fullRedrawImg'
+    ? ((props.info.image_report as FullRedrawImageReport) ?? null)
+    : null,
+)
+const zoom = ref(100)
+const diffOn = ref(false)
+const diffBusy = ref(false)
+const paneA = ref<HTMLElement | null>(null)
+const paneB = ref<HTMLElement | null>(null)
+const diffCanvas = ref<HTMLCanvasElement | null>(null)
 
 const selectedFile = ref<string>('')
 const sourceProxy = ref(props.info.proxy?.state ?? 'missing')
@@ -56,9 +93,21 @@ function proxySuffix(state: string, width: number | null): string {
   return width ? `（${width} 代理）` : '（代理）'
 }
 
-const sourceLabel = computed(() => `源片${proxySuffix(sourceProxy.value, sourceProxyWidth.value)}`)
+const sourceLabel = computed(
+  () =>
+    `${isRelight.value ? '底版' : '源片'}${proxySuffix(sourceProxy.value, sourceProxyWidth.value)}`,
+)
+/** 代理状态是内部词（ready/missing/building…），页面上不能直接露出英文。 */
+function proxyWord(state: string): string {
+  if (state === 'ready') return '代理'
+  if (state === 'building') return '代理生成中'
+  return '原始分辨率'
+}
+
 const outputLabel = computed(() =>
-  outputProxy.value === 'ready' ? `${outputProxyWidth.value ?? ''} 代理`.trim() : outputProxy.value,
+  outputProxy.value === 'ready'
+    ? `${outputProxyWidth.value ?? ''} 代理`.trim()
+    : proxyWord(outputProxy.value),
 )
 
 function selectOutput(file: string): void {
@@ -246,6 +295,77 @@ function initViewer(): void {
   viewer.setSplit(split.value / 100)
 }
 
+/** 左右两栏共用缩放倍数与滚动位置，保证同一坐标在两边指的是同一个画面点。 */
+function syncPaneScroll(event: Event): void {
+  const from = event.target as HTMLElement
+  const other = from === paneA.value ? paneB.value : paneA.value
+  if (!other) return
+  other.scrollLeft = from.scrollLeft
+  other.scrollTop = from.scrollTop
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('图片加载失败'))
+    image.src = src
+  })
+}
+
+/** 差异高亮：两张同源同尺寸图按显示尺寸采样后逐像素求差并着色，避免整图放大占内存。 */
+async function drawDiff(): Promise<void> {
+  const canvasEl = diffCanvas.value
+  if (!diffOn.value || !canvasEl || !sourceImageUrl.value || !outputImageUrl.value) return
+  diffBusy.value = true
+  try {
+    const [a, b] = await Promise.all([
+      loadImage(sourceImageUrl.value),
+      loadImage(outputImageUrl.value),
+    ])
+    const width = Math.min(1200, a.naturalWidth || 1200)
+    const scale = width / (a.naturalWidth || width)
+    const height = Math.max(1, Math.round((a.naturalHeight || 1) * scale))
+    canvasEl.width = width
+    canvasEl.height = height
+    const ctx = canvasEl.getContext('2d')
+    if (!ctx) return
+    ctx.drawImage(a, 0, 0, width, height)
+    const base = ctx.getImageData(0, 0, width, height)
+    const tmp = document.createElement('canvas')
+    tmp.width = width
+    tmp.height = height
+    const tctx = tmp.getContext('2d')
+    if (!tctx) return
+    tctx.drawImage(b, 0, 0, width, height)
+    const other = tctx.getImageData(0, 0, width, height)
+    const data = base.data
+    const ref = other.data
+    for (let i = 0; i < data.length; i += 4) {
+      const diff = Math.max(
+        Math.abs(data[i] - ref[i]),
+        Math.abs(data[i + 1] - ref[i + 1]),
+        Math.abs(data[i + 2] - ref[i + 2]),
+      )
+      if (diff <= 10) continue
+      const alpha = Math.min(0.85, 0.2 + diff / 255)
+      // 差异越大越偏红：小差异偏黄，大差异直接压成红色。
+      data[i] = Math.round(data[i] * (1 - alpha) + 255 * alpha)
+      data[i + 1] = Math.round(data[i + 1] * (1 - alpha) + (diff > 96 ? 40 : 200) * alpha)
+      data[i + 2] = Math.round(data[i + 2] * (1 - alpha) + 40 * alpha)
+    }
+    ctx.putImageData(base, 0, 0)
+  } catch {
+    // 差异视图只是辅助信息；取图失败就保留原图。
+  } finally {
+    diffBusy.value = false
+  }
+}
+
+watch([diffOn, outputImageUrl, sourceImageUrl], () => {
+  if (diffOn.value) void nextTick(drawDiff)
+})
+
 watch(
   () => props.info.outputs,
   (rows) => {
@@ -261,6 +381,7 @@ watch(
 )
 
 watch(selectedFile, () => {
+  if (isStill.value) return
   outputProxy.value = 'missing'
   outputWasReady = false
   void ensureOutputProxy()
@@ -269,6 +390,10 @@ watch(selectedFile, () => {
 
 onMounted(async () => {
   await nextTick()
+  if (isStill.value) {
+    if (selected.value) selectedFile.value = selected.value.file
+    return
+  }
   if (selected.value) {
     selectedFile.value = selected.value.file
   }
@@ -285,6 +410,7 @@ onUnmounted(() => {
 })
 
 function onKeydown(event: KeyboardEvent): void {
+  if (isStill.value) return
   // 空格切播放/暂停；焦点在按钮等控件上时让控件自己处理，避免双触发。
   if (event.code === 'Space') {
     const tag = (event.target as HTMLElement | null)?.tagName ?? ''
@@ -306,6 +432,70 @@ function onKeydown(event: KeyboardEvent): void {
     <div v-if="!outputs.length" class="panel">
       <el-empty description="还没有可对比的成片；先完成生成与合并" />
     </div>
+
+    <template v-else-if="isStill">
+      <div class="compare-top">
+        <span class="muted">{{ leftLabel }}</span>
+        <span class="muted">{{ imageOutput?.name ?? '交付图缺失' }}</span>
+        <label class="ctl">
+          <span>缩放</span>
+          <el-slider v-model="zoom" class="zoom-slider" :min="100" :max="400" :step="10" />
+          <span class="mono zoom-value">{{ zoom }}%</span>
+        </label>
+        <el-switch
+          v-if="isPatchImg"
+          v-model="diffOn"
+          active-text="差异高亮"
+          :loading="diffBusy"
+        />
+      </div>
+
+      <div v-if="!outputImageUrl" class="panel">
+        <el-empty description="交付图还没有生成；先在拼接步出片" />
+      </div>
+      <div v-else-if="diffOn && isPatchImg" class="diff-wrap">
+        <canvas ref="diffCanvas" class="diff-canvas" />
+        <p class="muted hint">
+          差异图以源图为底，差异越大越偏红；同源同尺寸逐像素比较，按显示宽度采样。
+        </p>
+      </div>
+      <div v-else class="image-compare">
+        <div ref="paneA" class="image-pane" @scroll="syncPaneScroll">
+          <img
+            v-if="sourceImageUrl"
+            :src="sourceImageUrl"
+            alt="源图"
+            :style="{ width: `${zoom}%` }"
+            draggable="false"
+          />
+          <span v-else class="muted">{{ leftLabel }}直开地址缺失</span>
+        </div>
+        <div ref="paneB" class="image-pane" @scroll="syncPaneScroll">
+          <img
+            :src="outputImageUrl"
+            alt="交付图"
+            :style="{ width: `${zoom}%` }"
+            draggable="false"
+          />
+        </div>
+      </div>
+
+      <div v-if="fullReport" class="seam-box">
+        <div class="seam-head">
+          <span>接缝结论</span>
+          <el-tag size="small" effect="light" :type="fullReport.verdict === 'ok' ? 'success' : fullReport.verdict === 'bad' ? 'danger' : 'warning'">
+            {{ fullReport.verdict }}
+          </el-tag>
+          <el-tag size="small" effect="light" :type="fullReport.gate === 'ok' ? 'success' : 'warning'">
+            gate={{ fullReport.gate }}
+          </el-tag>
+          <span class="mono muted">宽高漂移 {{ fullReport.aspect_drift_pct.toFixed(1) }}%</span>
+        </div>
+        <p class="muted hint">
+          {{ fullReport.reasons.length ? fullReport.reasons.join('；') : '没有接缝告警。' }}
+        </p>
+      </div>
+    </template>
 
     <template v-else>
       <div class="compare-top">
@@ -507,6 +697,74 @@ function onKeydown(event: KeyboardEvent): void {
 .hint {
   margin: 0;
   font-size: var(--text-xs);
+}
+
+.image-compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+}
+
+.image-pane {
+  height: min(66vh, 720px);
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-video-bg);
+}
+
+.image-pane img {
+  display: block;
+  max-width: none;
+  cursor: zoom-in;
+}
+
+.diff-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.diff-canvas {
+  display: block;
+  width: 100%;
+  border-radius: var(--radius-lg);
+  background: var(--color-video-bg);
+}
+
+.zoom-slider {
+  width: 160px;
+}
+
+.zoom-value {
+  min-width: 48px;
+  font-size: var(--text-xs);
+}
+
+.seam-box {
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.seam-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.seam-box .hint {
+  margin-top: var(--space-2);
+}
+
+@media (max-width: 900px) {
+  .image-compare {
+    grid-template-columns: 1fr;
+  }
 }
 
 .compare-page:fullscreen {

@@ -10,9 +10,13 @@ out_lin  = GT_lin × Ws × gY^strength × V^(local_shading × strength)
 ``strength=0`` 时 ``Ws`` 退化为单位矩阵、两个指数都是 0，输出与 GT 逐位一致；
 这是验收基线，不是巧合。``local_shading`` 只作用在可见度项上：0 表示只用低频
 光场，1 表示完全跟随 AI 画出的局部明暗。
+
+视频版（决策 56）把光场与强度折成 ``LightCompose`` 一次，逐帧只调 ``apply``。
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -20,20 +24,49 @@ import numpy as np
 from .fields import LightFields, linear_to_srgb8, srgb_to_linear
 
 
+@dataclass(frozen=True)
+class LightCompose:
+    """固定强度下的光场，已放大到原尺寸：逐帧合成只做乘算。
+
+    ``relight`` 每调一次都要用 LUT 把 2K 光场放大到原尺寸一次，再逐通道求幂；一段
+    视频几帧到几百帧，同一份光场放大同样的次数没有意义。这里把三个场预先放大、
+    把强度与局部明暗折进指数与矩阵，则 ``apply`` 与 ``relight`` 逐位一致。
+    """
+
+    gain: np.ndarray          # gY^strength，(H, W) float32
+    visibility: np.ndarray    # V^(local_shading × strength)，(H, W) float32
+    white_balance: np.ndarray # (1 - strength) I + strength W，3×3 float32
+
+    def apply(self, gt8: np.ndarray) -> np.ndarray:
+        """把光场乘到一帧上，返回同尺寸 8-bit BGR。"""
+        gt_linear = srgb_to_linear(gt8).astype(np.float32)
+        out_linear = (np.einsum("...k,ck->...c", gt_linear, self.white_balance)
+                      * self.gain[..., None]
+                      * self.visibility[..., None])
+        return linear_to_srgb8(np.clip(out_linear, 0.0, 1.0))
+
+
+def light_compose(fields: LightFields, size: tuple[int, int],
+                  strength: float, local_shading: float) -> LightCompose:
+    """把 2K 光场放大到 ``size`` 并折进强度参数，得到逐帧可复用的 ``LightCompose``。"""
+    width, height = size
+    gain = cv2.resize(fields.gain, (width, height), interpolation=cv2.INTER_LINEAR)
+    visibility = cv2.resize(fields.visibility, (width, height),
+                            interpolation=cv2.INTER_LINEAR)
+    white_balance = ((1.0 - strength) * np.eye(3, dtype=np.float32)
+                     + strength * fields.white_balance)
+    return LightCompose(
+        gain=np.power(gain, strength).astype(np.float32),
+        visibility=np.power(visibility, local_shading * strength).astype(np.float32),
+        white_balance=white_balance.astype(np.float32),
+    )
+
+
 def relight(gt8: np.ndarray, fields: LightFields,
             strength: float, local_shading: float) -> np.ndarray:
     """把 ``fields`` 乘到 GT 上，返回与 GT 同尺寸的 8-bit BGR 图。"""
     height, width = gt8.shape[:2]
-    gain = cv2.resize(fields.gain, (width, height), interpolation=cv2.INTER_LINEAR)
-    visibility = cv2.resize(fields.visibility, (width, height),
-                            interpolation=cv2.INTER_LINEAR)
-    gt_linear = srgb_to_linear(gt8).astype(np.float32)
-    white_balance = ((1.0 - strength) * np.eye(3, dtype=np.float32)
-                     + strength * fields.white_balance)
-    out_linear = (np.einsum("...k,ck->...c", gt_linear, white_balance)
-                  * (gain[..., None] ** strength)
-                  * (visibility[..., None] ** (local_shading * strength)))
-    return linear_to_srgb8(np.clip(out_linear, 0.0, 1.0))
+    return light_compose(fields, (width, height), strength, local_shading).apply(gt8)
 
 
 def soft_clip(bgr8: np.ndarray, knee: float = 0.72, max_out: float = 0.98) -> np.ndarray:

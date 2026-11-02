@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Refresh } from '@element-plus/icons-vue'
-import type { InputOption, ModeInfo, OutputOption } from '@/types/case-info'
+import type { InputOption, ModeInfo, ModelOption, OutputOption } from '@/types/case-info'
 import type { EpisodeOption, ProjectOption, SessionOption } from '@/types/session'
 
 const mode = defineModel<string>('mode', { required: true })
@@ -8,6 +8,8 @@ const ratio = defineModel<string>('ratio', { required: true })
 const resolution = defineModel<string>('resolution', { required: true })
 const scale = defineModel<string>('scale', { required: true })
 const duration = defineModel<string>('duration', { required: true })
+const videoModelId = defineModel<number | null>('videoModelId', { required: true })
+const imageModelId = defineModel<number | null>('imageModelId', { required: true })
 const selectedProject = defineModel<string>('selectedProject', { required: true })
 const selectedEpisode = defineModel<string>('selectedEpisode', { required: true })
 const selectedSession = defineModel<string>('selectedSession', { required: true })
@@ -17,6 +19,9 @@ defineProps<{
   ratioOptions: string[]
   resolutionOptions: OutputOption[]
   scaleOptions: InputOption[]
+  videoModelOptions: ModelOption[]
+  imageModelOptions: ModelOption[]
+  imageModelsError: string
   durationOptions: { value: string; label: string }[]
   projects: ProjectOption[]
   episodes: EpisodeOption[]
@@ -32,13 +37,10 @@ defineProps<{
   running: boolean
   activeKind: 'dry_run' | 'submit' | 'adopt' | null
   runBlockReason: string
-  showPresets: boolean
 }>()
 
 const emit = defineEmits<{
   'refresh-sessions': []
-  'preset-4k': []
-  'preset-1080p': []
   'dry-run': []
   submit: []
 }>()
@@ -68,6 +70,24 @@ function scaleLabel(option: InputOption): string {
   <div class="submit-bar">
     <div class="submit-inner">
       <div class="submit-row">
+        <label class="ctl">
+          <span>视频模型</span>
+          <el-select
+            v-model="videoModelId"
+            size="small"
+            class="w-video-model"
+            placeholder="选择视频模型"
+          >
+            <el-option
+              v-for="item in videoModelOptions"
+              :key="item.id"
+              :label="item.name"
+              :value="item.id"
+              :title="`${item.name}（#${item.id}）${item.description ? '：' + item.description : ''}`"
+            />
+            <el-option v-if="!videoModelOptions.length" label="清单不可用" :value="-1" disabled />
+          </el-select>
+        </label>
         <label class="ctl">
           <span>模式</span>
           <el-select v-model="mode" size="small" class="w-mode">
@@ -115,6 +135,28 @@ function scaleLabel(option: InputOption): string {
           </el-select>
         </label>
         <label class="ctl">
+          <span>图片模型</span>
+          <el-select
+            v-model="imageModelId"
+            size="small"
+            class="w-image-model"
+            placeholder="选择图片模型"
+            :title="imageModelsError || undefined"
+          >
+            <el-option
+              v-for="item in imageModelOptions"
+              :key="item.id"
+              :label="item.name"
+              :value="item.id"
+              :title="`${item.name}（#${item.id}）${item.description ? '：' + item.description : ''}`"
+            />
+            <el-option v-if="!imageModelOptions.length" label="清单不可用" :value="-1" disabled />
+          </el-select>
+        </label>
+        <span v-if="paramsError" class="session-error">{{ paramsError }}</span>
+      </div>
+      <div class="submit-row">
+        <label class="ctl">
           <span>时长</span>
           <el-select v-model="duration" size="small" class="w-duration">
             <el-option
@@ -125,27 +167,6 @@ function scaleLabel(option: InputOption): string {
             />
           </el-select>
         </label>
-        <div v-if="showPresets" class="preset-actions">
-          <el-button
-            size="small"
-            :loading="paramsSaving"
-            title="Seedance 2.0 · firstLastFrame / allMediaRef · 4K"
-            @click="emit('preset-4k')"
-          >
-            切到 4K
-          </el-button>
-          <el-button
-            size="small"
-            :loading="paramsSaving"
-            title="Seedance 2.5 · videoEdit · 1080p"
-            @click="emit('preset-1080p')"
-          >
-            切回 1080p
-          </el-button>
-        </div>
-        <span v-if="paramsError" class="session-error">{{ paramsError }}</span>
-      </div>
-      <div class="submit-row">
         <label class="ctl">
           <span>项目</span>
           <el-select
@@ -294,6 +315,14 @@ function scaleLabel(option: InputOption): string {
   width: 180px;
 }
 
+.w-video-model {
+  width: 220px;
+}
+
+.w-image-model {
+  width: 220px;
+}
+
 .w-ratio {
   width: 110px;
 }
@@ -308,11 +337,6 @@ function scaleLabel(option: InputOption): string {
 
 .w-duration {
   width: 150px;
-}
-
-.preset-actions {
-  display: flex;
-  gap: var(--space-1);
 }
 
 .w-project {

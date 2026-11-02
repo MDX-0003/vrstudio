@@ -1,4 +1,4 @@
-"""patchimg: 2:1 ERP image -> 16:9 viewport crop -> inner mask -> still.json."""
+"""patchimg: 2:1 ERP image -> 16:9 viewport crop -> inner mask -> image.json."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from vrstudio.cli import generate as generate_cli
 from vrstudio.cli import merge as merge_cli
 from vrstudio.media.imageio import read_image, write_gray_png, write_png
 from vrstudio.patch.composite import SegmentMaps
-from vrstudio.patch.sidecar import InnerRect, Viewport, load_still
+from vrstudio.patch.sidecar import InnerRect, Viewport, load_image
 
 runner = CliRunner()
 
@@ -155,15 +155,15 @@ def test_patchimg_extract_writes_the_viewport_artifacts(tmp_path):
     _prepared_case(tmp_path)
     version = _version_dir(tmp_path)
 
-    for name in ("clip.png", "clip_mask.png", "still.json"):
+    for name in ("clip.png", "clip_mask.png", "image.json"):
         assert (version / name).is_file(), name
     assert not (version / "padded.png").exists()
-    assert not (version / "still_pad.json").exists()
+    assert not (version / "image_pad.json").exists()
     derived = case_mod.case_dir("p", tmp_path) / "derived"
-    for name in ("clip.png", "clip_mask.png", "still.json"):
+    for name in ("clip.png", "clip_mask.png", "image.json"):
         assert (derived / name).is_file(), name
 
-    geo = load_still(version / "still.json")
+    geo = load_image(version / "image.json")
     assert (geo.erp_width, geo.erp_height) == (384, 192)
     assert (geo.viewport.width, geo.viewport.height) == (384, 216)
     assert (geo.inner.x, geo.inner.y, geo.inner.width, geo.inner.height) == \
@@ -275,7 +275,7 @@ def test_patchimg_merge_writes_the_erp_png_bit_identically(tmp_path):
     assert result.exit_code == 0, result.output
 
     out = (case_mod.case_dir("p", tmp_path) / "out"
-           / f"{case.extract_current}_still.png")
+           / f"{case.extract_current}_image.png")
     assert out.is_file()
     merged = read_image(out)
     source = read_image(src)
@@ -328,7 +328,7 @@ def test_patchimg_merge_pastes_a_viewport_across_the_erp_seam(tmp_path):
     assert result.exit_code == 0, result.output
 
     merged = read_image(case_mod.case_dir("p", tmp_path) / "out"
-                        / f"{case.extract_current}_still.png")
+                        / f"{case.extract_current}_image.png")
     source = read_image(src)
     support = _support(source, Viewport(**case.viewport), InnerRect(**case.inner))
 

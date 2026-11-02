@@ -18,13 +18,31 @@ import shutil
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from uuid import uuid4
 
 from .config import REPO_ROOT
 from .media.imageio import read_image
 from .roles import RESERVED_ROLES, ROLES, check_kinds
 
 SCHEMA = 1
-FLOWS = ("patch", "patchimg", "fullRedrawImg", "fullredraw", "gen")
+FLOWS = ("patch", "patchimg", "fullRedrawImg", "fullredraw", "gen", "relight")
+
+#: 图片流程：源是单张 2:1 ERP 图，产物是单帧（image.json / image_pad.json），
+#: 没有时间轴、没有 mp4 交付，采用时必须显式给候选下标。
+IMAGE_FLOWS = ("patchimg", "fullRedrawImg")
+
+#: relight 的素材角色：底版候选与氛围图候选。库里可以有多条同角色的候选（美术每改一版
+#: 都传一份），``[relight]`` 的 ``gt``/``atmo`` 用素材 id 指向当前选中的那一条。
+RELIGHT_GT = "relight_gt"
+RELIGHT_ATMO = "relight_atmo"
+
+#: ``[relight]`` 是这条流程唯一的草稿段：``current`` 指当前成片，``gt``/``atmo`` 指两个
+#: 槽位选中的素材 id，其余是上次运行的参数。
+_RELIGHT_KEYS = ("current", "gt", "atmo", "scene", "strength", "local_shading",
+                 "highlight_clip", "clip_knee", "clip_max", "ref_frame")
+
+#: ``[relight]`` 里指向素材的两把指针，以及各自要求的素材角色。
+_RELIGHT_SLOTS = {"gt": RELIGHT_GT, "atmo": RELIGHT_ATMO}
 
 #: 与 vrgen 的 job 名同一套约束：case 名是 cases/ 下的目录名。
 _CASE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -108,6 +126,8 @@ class Case:
     # ── adopt 指针：vrgen 台账里被采用的轮次 ──
     adopt_round: str | None = None
     adopt_index: int | None = None
+    # ── 仅 flow = relight：``[relight]`` 草稿与当前成片指针 ──
+    relight: dict | None = None
 
     def dir(self, root: str | Path | None = None) -> Path:
         return case_dir(self.name, root)
@@ -120,6 +140,12 @@ class Case:
 
     def master(self) -> Asset | None:
         """提示词几何与上传基准：按契约的回退链取第一条可用素材。"""
+        if self.flow == "relight":
+            # 预览几何要跟底版走：通用回退链在「图片 GT + 图片氛围图」时会先取到
+            # 氛围图（它是第一条图片），预览就会用错尺寸。
+            gt, _atmo = self.relight_slots()
+            if gt is not None:
+                return gt
         videos = [a for a in self.assets if a.kind == "video"]
         for item in videos:
             if item.role == "edit_master":
@@ -144,6 +170,12 @@ class Case:
         except CaseError:
             return None
 
+    def relight_slots(self) -> tuple[Asset | None, Asset | None]:
+        """relight 当前选中的两个槽位：(底版, 氛围图)；没选或指向的素材不存在时是 None。"""
+        relight = self.relight or {}
+        by_id = {asset.id: asset for asset in self.assets}
+        return by_id.get(relight.get("gt")), by_id.get(relight.get("atmo"))
+
 
 # ── 创建 ─────────────────────────────────────────────────────────────────
 
@@ -161,7 +193,7 @@ def create(name: str, flow: str, source: str | Path | None = None,
             src = Path(source)
             if not src.is_file():
                 raise CaseError(f"源视频不存在：{src}")
-            if _kind_of(src) != "video":
+            if kind_of(src) != "video":
                 raise CaseError(f"gen 的 --source 必须是视频：{src.name}")
         case = Case(name=name, flow=flow)
         save(case, root)
@@ -169,13 +201,21 @@ def create(name: str, flow: str, source: str | Path | None = None,
             # 新建 gen 仍接受 --source：复制为 v1/edit_master，与素材步骤同一条路。
             return add_assets(name, [(source, "edit_master")], root=root)
         return case
+    if flow == "relight":
+        # 建 case 不绑源文件：GT 与氛围图进 case 之后在素材步用两个固定槽位选定。
+        # 给了 --source 就明确拒绝，避免建出一个「有源但没有槽位」的半定义 case。
+        if source is not None:
+            raise CaseError(
+                f"relight 建 case 不绑源文件：{Path(source).name} 请在 case 的素材步"
+                f"用 {RELIGHT_GT} 槽位加入")
+        return save(Case(name=name, flow=flow), root)
     if source is None:
         wanted = "图片" if flow in ("patchimg", "fullRedrawImg") else "源视频"
         raise CaseError(f"flow={flow} 必须指定{wanted}")
     src = Path(source)
     if not src.is_file():
         raise CaseError(f"源文件不存在：{src}")
-    kind = _kind_of(src)
+    kind = kind_of(src)
     if flow in ("patchimg", "fullRedrawImg"):
         if kind != "image":
             raise CaseError(f"{flow} 的 --source 必须是图片：{src.name}")
@@ -193,6 +233,39 @@ def create(name: str, flow: str, source: str | Path | None = None,
                                ("patch", "patchimg", "fullRedrawImg")) else None
     case = Case(name=name, flow=flow, source_path=str(src), sha256=sha)
     return save(case, root)
+
+
+# ── 删除 ─────────────────────────────────────────────────────────────────
+
+
+def delete(name: str, root: str | Path | None = None) -> Path:
+    """删除整个 case 目录。只碰 cases/<name>/；vrgen 台账与 sources/ 由调用方负责。
+
+    先直接删；Windows 下浏览器或代理可能还握着视频句柄，整棵删不掉时改名移进
+    ``cases/.trash/`` 再删，让 case 名立刻从列表消失。墓碑目录不在
+    ``*/case.toml`` 的扫描范围内；仍然删不动就把占用原因报出来，留给人工处理。
+    """
+    target = case_dir(name, root)
+    if not case_toml(name, root).is_file():
+        raise CaseError(f"case 不存在：{name}")
+    try:
+        shutil.rmtree(target)
+        return target
+    except OSError:
+        trash = cases_root(root) / ".trash"
+        trash.mkdir(parents=True, exist_ok=True)
+        tomb = trash / f"{name}-{uuid4().hex[:8]}"
+        try:
+            target.rename(tomb)
+        except OSError as exc:
+            raise CaseError(f"case 目录被占用，删除失败：{exc}") from exc
+        try:
+            shutil.rmtree(tomb)
+        except OSError as exc:
+            raise CaseError(
+                f"case 已移出 {target}，但仍有文件被占用：{exc}；"
+                f"残留目录 {tomb} 可稍后手工删除") from exc
+        return target
 
 
 # ── 读写 ─────────────────────────────────────────────────────────────────
@@ -238,8 +311,13 @@ def load(name: str, root: str | Path | None = None) -> Case:
             raise CaseError(f"{path}: flow={flow} 不该有 [{section}]（patch 专属段）")
     if flow != "gen" and raw.get("gen") is not None:
         raise CaseError(f"{path}: [gen] 只属于 flow=gen")
-    if flow != "gen" and not case.source_path:
+    if flow != "relight" and raw.get("relight") is not None:
+        raise CaseError(f"{path}: [relight] 只属于 flow=relight")
+    if flow != "gen" and flow != "relight" and not case.source_path:
         raise CaseError(f"{path}: [source] 缺 path")
+    if flow == "relight":
+        case.relight = _parse_relight(raw.get("relight"), path)
+        _check_relight_assets(case, path)
     if flow == "gen":
         case = _migrate_gen(case, references, path, root)
     return case
@@ -279,6 +357,14 @@ def save(case: Case, root: str | Path | None = None) -> Case:
         lines += ["", "[adopt]", f"round = {_s(case.adopt_round)}"]
         if case.adopt_index is not None:
             lines.append(f"index = {int(case.adopt_index)}")
+    if case.flow == "relight":
+        # 槽位约束在每次写盘时检查，所以「多挂一条别的角色」在 add_assets 就失败，
+        # 不会等到下次 load 才暴露。
+        _check_relight_assets(case, case_toml(case.name, root))
+        if case.relight:
+            lines += ["", "[relight]"]
+            lines += [_kv(key, value) for key, value in case.relight.items()
+                      if key in _RELIGHT_KEYS]
     path = case_toml(case.name, root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -403,6 +489,77 @@ def _validate_asset(asset: Asset, path: Path) -> None:
 # ── 旧 gen case 迁移 ─────────────────────────────────────────────────────
 
 
+def _parse_relight(raw, path: Path) -> dict | None:
+    """``[relight]`` 段：只认 ``_RELIGHT_KEYS``，键名写错按真实原因拒绝。
+
+    这里只校验形状（键名、类型、``current`` 是 case 内的相对路径），不重复校验数值
+    区间——强度、局部明暗与软裁切的允许范围只有 relight 引擎一处权威。
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise CaseError(f"{path}: [relight] 必须是表")
+    unknown = sorted(set(raw) - set(_RELIGHT_KEYS))
+    if unknown:
+        raise CaseError(
+            f"{path}: [relight] 不认识的键 {unknown}；可用：{'、'.join(_RELIGHT_KEYS)}")
+    out: dict = {}
+    for key in _RELIGHT_KEYS:
+        if key not in raw:
+            continue
+        value = raw[key]
+        if key == "current":
+            if not isinstance(value, str) or not value:
+                raise CaseError(f"{path}: [relight] current 必须是非空字符串")
+            rel = Path(value)
+            if rel.is_absolute() or ".." in rel.parts:
+                raise CaseError(
+                    f"{path}: [relight] current 必须是 case 目录内的相对路径")
+        elif key in _RELIGHT_SLOTS:
+            if not isinstance(value, str) or not re.fullmatch(r"[vi]\d+", value):
+                raise CaseError(
+                    f"{path}: [relight] {key} 必须是素材 id（v1、i2…），收到 {value!r}")
+        elif key == "highlight_clip":
+            if not isinstance(value, bool):
+                raise CaseError(f"{path}: [relight] highlight_clip 必须是布尔值")
+        elif key == "scene":
+            if not isinstance(value, str):
+                raise CaseError(f"{path}: [relight] scene 必须是字符串")
+        elif key == "ref_frame":
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise CaseError(f"{path}: [relight] ref_frame 必须是整数")
+        elif isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise CaseError(f"{path}: [relight] {key} 必须是数字")
+        out[key] = value
+    return out
+
+
+def _check_relight_assets(case: Case, path: Path) -> None:
+    """relight 的素材只承担两个角色，且 ``[relight]`` 的指针必须指对角色。
+
+    库里可以有多条同角色候选（氛围图每改一版就多一条），这是「从素材库挑」能成立的
+    前提；槽位是 ``[relight]`` 里的两把指针，不是角色本身。
+    """
+    stray = [a.id for a in case.assets if a.role not in (RELIGHT_GT, RELIGHT_ATMO)]
+    if stray:
+        raise CaseError(
+            f"{path}: relight 的素材只能是 {RELIGHT_GT} 或 {RELIGHT_ATMO}，"
+            f"这些素材用了别的角色：{'、'.join(stray)}")
+    relight = case.relight or {}
+    by_id = {asset.id: asset for asset in case.assets}
+    for key, role in _RELIGHT_SLOTS.items():
+        chosen = relight.get(key)
+        if chosen is None:
+            continue
+        asset = by_id.get(chosen)
+        if asset is None:
+            raise CaseError(f"{path}: [relight] {key} 指向不存在的素材 {chosen}")
+        if asset.role != role:
+            raise CaseError(
+                f"{path}: [relight] {key} 指向的 {chosen} 角色是 {asset.role}，"
+                f"应为 {role}")
+
+
 def _migrate_gen(case: Case, references: list[str] | None, path: Path,
                  root: str | Path | None) -> Case:
     """旧 ``[source]`` 与 ``[gen] reference_images`` → assets，并落盘一次。
@@ -459,7 +616,7 @@ def _add_assets_to(case: Case, pairs: list[tuple[str | Path, str]],
         src = Path(raw_path)
         if not src.is_file():
             raise CaseError(f"素材不存在：{src}")
-        kind = _kind_of(src)
+        kind = kind_of(src)
         if role not in ROLES:
             raise CaseError(f"素材 {src.name} 的角色 {role!r} 不合约；可选：{', '.join(ROLES)}")
         if role in RESERVED_ROLES:
@@ -536,7 +693,7 @@ def reorder_assets(name: str, ids: list[str], root: str | Path | None = None) ->
     return save(case, root)
 
 
-def _kind_of(path: Path) -> str:
+def kind_of(path: Path) -> str:
     suffix = path.suffix.lower()
     if suffix in _VIDEO_EXTS:
         return "video"
@@ -676,6 +833,76 @@ def draft_ready(case: Case) -> str | None:
         if not getattr(case, section):
             return section
     return None
+
+
+def set_relight(name: str, values: dict, root: str | Path | None = None) -> Case:
+    """写 ``[relight]``：只改传入的键，未知键拒绝，值传 ``None`` 表示删掉该键。
+
+    合并后的整段再走一遍 ``_parse_relight``，所以类型错在写盘之前就被拒绝，不会留下
+    一个下次打开才报错的 case.toml。
+    """
+    case = load(name, root)
+    if case.flow != "relight":
+        raise CaseError(f"case {name} 是 {case.flow} 流，没有 [relight] 草稿")
+    unknown = sorted(set(values) - set(_RELIGHT_KEYS))
+    if unknown:
+        raise CaseError(
+            f"[relight] 不认识的键 {unknown}；可用：{'、'.join(_RELIGHT_KEYS)}")
+    merged = dict(case.relight or {})
+    for key, value in values.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
+    case.relight = _parse_relight(merged, case_toml(name, root)) or None
+    return save(case, root)
+
+
+def add_relight_candidate(name: str, role: str, path: str | Path,
+                          root: str | Path | None = None) -> tuple[Case, str]:
+    """把一份文件加进 relight 的素材库（底版或氛围图候选），并选中它。
+
+    库里可以有多条同角色候选：美术每改一版氛围图就多一条，挑哪条由 ``[relight]`` 的
+    指针决定。返回加入后的 case 与新素材 id。
+    """
+    if role not in (RELIGHT_GT, RELIGHT_ATMO):
+        raise CaseError(f"relight 没有 {role!r} 角色；只有 {RELIGHT_GT} 与 {RELIGHT_ATMO}")
+    case = load(name, root)
+    if case.flow != "relight":
+        raise CaseError(f"case {name} 是 {case.flow} 流，没有 relight 素材")
+    src = Path(path)
+    if not src.is_file():
+        raise CaseError(f"文件不存在：{src}")
+    digest = file_sha256(src)
+    same = next((a for a in case.assets
+                 if a.role == role and a.sha256 == digest), None)
+    if same is not None:
+        # 同一个文件重复加入没有意义，直接指向已有的那一条。
+        case = set_relight_pick(name, "gt" if role == RELIGHT_GT else "atmo",
+                                same.id, root)
+        return case, same.id
+    count = len(case.assets)
+    case = _add_assets_to(case, [(src, role)], root)
+    asset_id = case.assets[count].id
+    case = set_relight_pick(name, "gt" if role == RELIGHT_GT else "atmo",
+                            asset_id, root)
+    return case, asset_id
+
+
+def set_relight_pick(name: str, slot: str, asset_id: str,
+                     root: str | Path | None = None) -> Case:
+    """把 ``[relight]`` 的 ``gt``/``atmo`` 指向库里某一条候选。"""
+    if slot not in _RELIGHT_SLOTS:
+        raise CaseError(f"relight 没有 {slot!r} 槽位；只有 gt 与 atmo")
+    case = load(name, root)
+    if case.flow != "relight":
+        raise CaseError(f"case {name} 是 {case.flow} 流，没有 relight 槽位")
+    wanted = _RELIGHT_SLOTS[slot]
+    asset = case.asset(asset_id)
+    if asset.role != wanted:
+        raise CaseError(
+            f"素材 {asset_id} 的角色是 {asset.role}，不能放进 {slot} 槽位（应 {wanted}）")
+    return set_relight(name, {slot: asset_id}, root)
 
 
 def set_extract_current(name: str, version: str, root: str | Path | None = None) -> Case:

@@ -8,13 +8,13 @@ import numpy as np
 import pytest
 
 from vrstudio.media.imageio import read_image, write_png
-from vrstudio.redraw.still import StillError, pad_still, plan_still, stitch_still
+from vrstudio.redraw.image import ImageFlowError, pad_image, plan_image, stitch_image
 
 ASPECT = Fraction(21, 9)
 
 
 def _plan(erp: np.ndarray):
-    return plan_still((erp.shape[1], erp.shape[0]), target_aspect=ASPECT)
+    return plan_image((erp.shape[1], erp.shape[0]), target_aspect=ASPECT)
 
 
 def test_plan_matches_the_video_two_to_one_case(erp):
@@ -24,9 +24,9 @@ def test_plan_matches_the_video_two_to_one_case(erp):
     assert plan.wrap_pair == (31, 32)
 
 
-def test_pad_still_geometry_and_manifest(erp):
+def test_pad_image_geometry_and_manifest(erp):
     plan = _plan(erp)
-    pad = pad_still(erp, plan, source_path="synthetic.png", write_hash=False)
+    pad = pad_image(erp, plan, source_path="synthetic.png", write_hash=False)
 
     assert pad.padded.shape == (192, 448, 3)
     assert pad.mask.shape == (192, 448)
@@ -38,17 +38,17 @@ def test_pad_still_geometry_and_manifest(erp):
 
 def test_identity_pad_stitch_is_the_source(erp):
     """pre_roll + pad_h + stitch(d*=0) must return the source bit-exactly."""
-    pad = pad_still(erp, _plan(erp), source_path="synthetic.png", write_hash=False)
-    stitched = stitch_still(pad.padded, pad.manifest)
+    pad = pad_image(erp, _plan(erp), source_path="synthetic.png", write_hash=False)
+    stitched = stitch_image(pad.padded, pad.manifest)
 
     assert stitched.gate == "ok"
     assert stitched.image.shape == erp.shape
     assert np.array_equal(stitched.image, erp)
 
 
-def test_still_manifest_roundtrip(erp, tmp_path):
-    pad = pad_still(erp, _plan(erp), source_path="synthetic.png", write_hash=False)
-    path = pad.manifest.save(tmp_path / "still_pad.json")
+def test_image_manifest_roundtrip(erp, tmp_path):
+    pad = pad_image(erp, _plan(erp), source_path="synthetic.png", write_hash=False)
+    path = pad.manifest.save(tmp_path / "image_pad.json")
     loaded = type(pad.manifest).load(path)
 
     assert loaded.canvas == pad.manifest.canvas
@@ -59,19 +59,19 @@ def test_still_manifest_roundtrip(erp, tmp_path):
 
 
 def test_stitch_rejects_a_reframed_canvas(erp):
-    pad = pad_still(erp, _plan(erp), source_path="synthetic.png", write_hash=False)
+    pad = pad_image(erp, _plan(erp), source_path="synthetic.png", write_hash=False)
     bad = pad.padded.copy()
     bad[:, _plan(erp).W:] = 0              # flatten the right redundant band
 
-    with pytest.raises(StillError, match="premise"):
-        stitch_still(bad, pad.manifest)
+    with pytest.raises(ImageFlowError, match="premise"):
+        stitch_image(bad, pad.manifest)
 
 
 def test_local_mask_is_accepted(erp):
     plan = _plan(erp)
     mask = np.full((plan.H, plan.Wc), 255, np.uint8)
     mask[60:130, 200:300] = 0
-    pad = pad_still(erp, plan, source_path="synthetic.png", mask=mask,
+    pad = pad_image(erp, plan, source_path="synthetic.png", mask=mask,
                     mask_strategy="local", write_hash=False)
 
     assert pad.mask.shape == mask.shape

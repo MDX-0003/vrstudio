@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 import typer
 
-from ..patch.sidecar import InnerRect, load_still
+from ..patch.sidecar import InnerRect, load_image
 from ..patch.case import load_sidecar_single_segment
 from ..patch.composite import SegmentMaps, normalize_ai_frame
 from ..patch.framealign import index_map, short_by
@@ -28,8 +28,8 @@ from ..media.imageio import read_image, write_png
 from ..progress import PhaseLog as Log, PhaseRateMeter as RateMeter, format_duration, open_log_file
 from ..patch.restore import resolve_ai_clip
 from ..patch import scalefit
-from ..redraw.manifest import StillManifest
-from ..redraw.still import StillError, stitch_still
+from ..redraw.manifest import ImageManifest
+from ..redraw.image import ImageFlowError, stitch_image
 from .. import case as case_mod
 from .. import config as config_mod
 
@@ -139,7 +139,7 @@ class AiFrameSource:
         self.cap.release()
 
 
-def _merge_still(case, cases_dir, *, feather: int, levels: int,
+def _merge_image(case, cases_dir, *, feather: int, levels: int,
                  report: Path | None, quiet: bool, progress_every: int,
                  allow_crop: bool = False) -> None:
     """patchimg 的贴回：AI 视口结果归一 → composite_frame → 只写 inner。
@@ -152,7 +152,7 @@ def _merge_still(case, cases_dir, *, feather: int, levels: int,
     if not case.extract_current:
         raise typer.Exit("merge: patchimg 还没有 extract 版本——先 extract")
     d = case.dir(cases_dir) / "extracts" / case.extract_current
-    geometry_path = d / "still.json"
+    geometry_path = d / "image.json"
     result_path = d / "result.png"
     if not geometry_path.is_file():
         raise typer.Exit(f"merge: 缺 {geometry_path.name}——重跑 extract")
@@ -162,11 +162,11 @@ def _merge_still(case, cases_dir, *, feather: int, levels: int,
             f"`vrstudio generate adopt --case {case.name} --index N`")
     src = case_mod.check_source(case, cases_dir)
     try:
-        geo = load_still(geometry_path)
+        geo = load_image(geometry_path)
     except (OSError, ValueError, TypeError) as exc:
         raise typer.Exit(f"merge: {geometry_path.name} 不合法：{exc}") from exc
 
-    fh, log_path = open_log_file(f"merge_{case.name}_still")
+    fh, log_path = open_log_file(f"merge_{case.name}_image")
     log = Log(every=progress_every, quiet=quiet, fh=fh)
     typer.echo(f"log -> {log_path}")
     try:
@@ -174,7 +174,7 @@ def _merge_still(case, cases_dir, *, feather: int, levels: int,
         erp_h, erp_w = source.shape[:2]
         if (erp_w, erp_h) != (geo.erp_width, geo.erp_height):
             raise typer.Exit(
-                f"merge: 源图 {erp_w}x{erp_h} 与 still.json 记录的 "
+                f"merge: 源图 {erp_w}x{erp_h} 与 image.json 记录的 "
                 f"{geo.erp_width}x{geo.erp_height} 不一致——源图换过？")
         generated = read_image(result_path)
         try:
@@ -199,7 +199,7 @@ def _merge_still(case, cases_dir, *, feather: int, levels: int,
 
         out_dir = case.dir(cases_dir) / "out"
         out_dir.mkdir(parents=True, exist_ok=True)
-        out = out_dir / f"{case.extract_current}_still.png"
+        out = out_dir / f"{case.extract_current}_image.png"
         write_png(out, out_image)
 
         data = {
@@ -235,7 +235,7 @@ def _merge_still(case, cases_dir, *, feather: int, levels: int,
                   f"inner {geo.inner.width}x{geo.inner.height}")
         log.info(f"support {int(support.sum())} px  changed {changed}  "
                  f"outside maxdiff 0（只写 inner）")
-        typer.echo(f"still    {out}  changed {changed}/{int(support.sum())}  "
+        typer.echo(f"image    {out}  changed {changed}/{int(support.sum())}  "
                    f"outside maxdiff 0")
         typer.echo(f"report   {target}")
     finally:
@@ -247,12 +247,12 @@ def _merge_full(case, cases_dir, *, report: Path | None, quiet: bool,
     """fullRedrawImg 的收口：把 4K 21:9 结果 stitch 回 2:1 的源图尺寸。
 
     与 fullredraw 的视频 recompose 同一条单帧核心；模型裁画布或重构图时
-    ``stitch_still`` 按冗余带相关性拒绝出片。
+    ``stitch_image`` 按冗余带相关性拒绝出片。
     """
     if not case.extract_current:
         raise typer.Exit("merge: fullRedrawImg 还没有 extract 版本——先 extract")
     d = case.dir(cases_dir) / "extracts" / case.extract_current
-    manifest_path = d / "still_pad.json"
+    manifest_path = d / "image_pad.json"
     result_path = d / "result.png"
     if not manifest_path.is_file():
         raise typer.Exit(f"merge: 缺 {manifest_path.name}——重跑 extract")
@@ -263,7 +263,7 @@ def _merge_full(case, cases_dir, *, report: Path | None, quiet: bool,
     src = case_mod.check_source(case, cases_dir)
     conf = config_mod.load()
     try:
-        manifest = StillManifest.load(manifest_path)
+        manifest = ImageManifest.load(manifest_path)
     except (OSError, ValueError, TypeError) as exc:
         raise typer.Exit(f"merge: {manifest_path.name} 不合法：{exc}") from exc
 
@@ -277,7 +277,7 @@ def _merge_full(case, cases_dir, *, report: Path | None, quiet: bool,
             conf.get("recompose.boundary_repair_pct", 15.0)) / 100.0)))
             if repair == "feather" else 0)
         try:
-            stitched = stitch_still(
+            stitched = stitch_image(
                 generated, manifest,
                 search_pct=float(conf.get("recompose.search_pct", 25.0)),
                 max_sample_rows=int(conf.get("recompose.max_sample_rows", 256)),
@@ -292,7 +292,7 @@ def _merge_full(case, cases_dir, *, report: Path | None, quiet: bool,
                 max_wrap_percentile=float(conf.get("verify.max_wrap_percentile", 95)),
                 worst_interior_tol=float(conf.get("verify.worst_interior_tol", 1.0)),
             )
-        except StillError as exc:
+        except ImageFlowError as exc:
             raise typer.Exit(f"merge: {exc}") from exc
 
         width, height = manifest.source.size
@@ -303,7 +303,7 @@ def _merge_full(case, cases_dir, *, report: Path | None, quiet: bool,
 
         out_dir = case.dir(cases_dir) / "out"
         out_dir.mkdir(parents=True, exist_ok=True)
-        out = out_dir / f"{case.extract_current}_still.png"
+        out = out_dir / f"{case.extract_current}_image.png"
         write_png(out, stitched.image)
 
         data = {
@@ -337,7 +337,7 @@ def _merge_full(case, cases_dir, *, report: Path | None, quiet: bool,
         if abs(stitched.aspect_drift_pct) > 2.0:
             log.info(f"WARNING: the model's aspect differs from the canvas by "
                      f"{stitched.aspect_drift_pct:+.1f}%")
-        typer.echo(f"still    {out}")
+        typer.echo(f"image    {out}")
         typer.echo(f"report   {target}")
     finally:
         fh.close()
@@ -385,7 +385,7 @@ def merge(
             if input_video or ai or sidecar or output:
                 raise typer.Exit("merge: --case 与 --input/--ai/--sidecar/--output 互斥"
                                  "（--case 模式全部自动定位）")
-            _merge_still(case, cases_dir, feather=feather, levels=levels,
+            _merge_image(case, cases_dir, feather=feather, levels=levels,
                          report=report, quiet=quiet,
                          progress_every=progress_every, allow_crop=allow_crop)
             return

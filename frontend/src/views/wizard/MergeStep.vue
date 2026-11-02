@@ -7,7 +7,7 @@ import FileRow from '@/components/common/FileRow.vue'
 import { useCaseTasks } from '@/composables/useCaseTasks'
 import { gateBlocked } from '@/utils/gates'
 import { taskStatusMeta } from '@/constants/taskStatus'
-import type { CaseInfo } from '@/types/case-info'
+import type { FullRedrawImageReport, CaseInfo, PatchImageReport } from '@/types/case-info'
 
 const props = defineProps<{ caseName: string; info: CaseInfo }>()
 const emit = defineEmits<{ updated: [data: CaseInfo] }>()
@@ -21,6 +21,11 @@ const allowCrop = ref(false)
 let startedAt = 0
 
 const isPatch = computed(() => props.info.flow === 'patch')
+const isImageFlow = computed(
+  () => props.info.flow === 'patchimg' || props.info.flow === 'fullRedrawImg',
+)
+const isPatchImg = computed(() => props.info.flow === 'patchimg')
+const imageMergeLabel = computed(() => (isPatchImg.value ? '贴回' : '拼接'))
 const mergeGate = computed(() => props.info.gates.merge)
 const padGate = computed(() => props.info.gates.pad)
 const recomposeGate = computed(() => props.info.gates.recompose)
@@ -28,6 +33,21 @@ const patchFiles = computed(() => props.info.step_files.merge)
 const padFiles = computed(() => props.info.step_files.pad)
 const recomposeFiles = computed(() => props.info.step_files.recompose)
 const outputs = computed(() => props.info.outputs)
+const patchReport = computed<PatchImageReport | null>(() =>
+  props.info.flow === 'patchimg' ? ((props.info.image_report as PatchImageReport) ?? null) : null,
+)
+const fullReport = computed<FullRedrawImageReport | null>(() =>
+  props.info.flow === 'fullRedrawImg'
+    ? ((props.info.image_report as FullRedrawImageReport) ?? null)
+    : null,
+)
+const imageOutputs = computed(() => outputs.value.filter((file) => file.open_url))
+
+function verdictType(value: string | undefined): 'success' | 'warning' | 'danger' {
+  if (value === 'ok') return 'success'
+  if (value === 'bad') return 'danger'
+  return 'warning'
+}
 
 onMounted(() => start())
 
@@ -36,7 +56,8 @@ async function runOp(op: 'merge' | 'pad' | 'recompose'): Promise<void> {
   running.value = op
   startedAt = Date.now()
   try {
-    await runOperation(props.caseName, op, op === 'merge' ? { allow_crop: allowCrop.value } : {})
+    const payload = op === 'merge' && !isImageFlow.value ? { allow_crop: allowCrop.value } : {}
+    await runOperation(props.caseName, op, payload)
     start()
   } catch (err) {
     running.value = ''
@@ -63,11 +84,86 @@ watch(latest, async (task) => {
   <div class="merge-layout">
     <section class="panel">
       <div class="panel-head">
-        <h2 class="panel-title">{{ isPatch ? '合并与时间拼接' : '扩充与裁回' }}</h2>
+        <h2 class="panel-title">
+          {{ isImageFlow ? `${imageMergeLabel}成片` : isPatch ? '合并与时间拼接' : '扩充与裁回' }}
+        </h2>
         <el-button link type="primary" :icon="Refresh" @click="start()">刷新任务</el-button>
       </div>
       <div class="panel-body">
-        <template v-if="isPatch">
+        <template v-if="isImageFlow">
+          <div class="flow-line">
+            <span class="node">抽取</span>
+            <span class="muted">→</span>
+            <span class="node">生成并选用一张候选</span>
+            <span class="muted">→</span>
+            <span class="node">{{ imageMergeLabel }}成片</span>
+          </div>
+          <el-alert
+            v-if="mergeGate && !mergeGate.ready"
+            type="warning"
+            :closable="false"
+            :title="mergeGate.reason || '先在生成步选用一张候选'"
+            class="gate-alert"
+          />
+          <div class="action-row">
+            <el-button
+              type="primary"
+              size="small"
+              :icon="VideoPlay"
+              :loading="running === 'merge'"
+              :disabled="gateBlocked(mergeGate)"
+              @click="runOp('merge')"
+            >
+              开始{{ imageMergeLabel }}
+            </el-button>
+            <span v-if="mergeGate?.ok" class="muted">
+              已有成片；再跑一次会覆盖同名文件
+            </span>
+          </div>
+
+          <div v-if="patchReport || fullReport" class="report-box">
+            <h3>{{ imageMergeLabel }}报告</h3>
+            <div v-if="patchReport" class="report-grid mono">
+              <span>改动像素（选区外为 0）</span>
+              <span>{{ patchReport.local.changed_inside }} / {{ patchReport.local.support_pixels }}</span>
+              <span>选区外最大差异</span>
+              <span>{{ patchReport.local.maxdiff_outside }}</span>
+              <span>ERP 尺寸</span>
+              <span>{{ patchReport.erp[0] }}×{{ patchReport.erp[1] }}</span>
+            </div>
+            <div v-if="fullReport" class="report-grid mono">
+              <span>配准相关性</span>
+              <span>{{ fullReport.registration.correlation.toFixed(3) }}</span>
+              <span>闸门 / 结论</span>
+              <span>
+                <el-tag size="small" effect="light" :type="verdictType(fullReport.gate)">
+                  {{ fullReport.gate }}
+                </el-tag>
+                <el-tag size="small" effect="light" :type="verdictType(fullReport.verdict)">
+                  {{ fullReport.verdict }}
+                </el-tag>
+              </span>
+              <span>宽高漂移</span>
+              <span>{{ fullReport.aspect_drift_pct.toFixed(1) }}%</span>
+              <span>接缝原因</span>
+              <span>{{ fullReport.reasons.length ? fullReport.reasons.join('；') : '无' }}</span>
+            </div>
+          </div>
+
+          <div class="file-groups">
+            <div class="file-group">
+              <h3>{{ imageMergeLabel }}输入</h3>
+              <FileRow v-for="file in patchFiles?.inputs ?? []" :key="file.path" :entry="file" />
+            </div>
+            <div class="file-group">
+              <h3>{{ imageMergeLabel }}输出</h3>
+              <FileRow v-for="file in patchFiles?.outputs ?? []" :key="file.path" :entry="file" />
+              <span v-if="!(patchFiles?.outputs ?? []).length" class="muted">还没有输出</span>
+            </div>
+          </div>
+        </template>
+
+        <template v-else-if="isPatch">
           <div class="flow-line">
             <span class="node">空间合并</span>
             <span class="muted">→</span>
@@ -180,17 +276,32 @@ watch(latest, async (task) => {
         <div v-if="!outputs.length" class="empty">
           <el-empty description="还没有成片" :image-size="72" />
         </div>
-        <div v-for="file in outputs" :key="file.file" class="output-row">
-          <div class="output-main">
-            <div class="mono">{{ file.file }}</div>
-            <div class="muted">
-              {{ file.partial ? '仅中间段（时间拼接未完成）' : '整片' }}
+        <template v-else-if="isImageFlow">
+          <a
+            v-for="file in imageOutputs"
+            :key="file.file"
+            :href="file.open_url ?? ''"
+            target="_blank"
+            class="image-output"
+            :aria-label="`打开 ${file.file}`"
+          >
+            <img :src="file.open_url ?? ''" :alt="file.file" />
+            <span class="mono image-output-name">{{ file.file }}</span>
+          </a>
+        </template>
+        <template v-else>
+          <div v-for="file in outputs" :key="file.file" class="output-row">
+            <div class="output-main">
+              <div class="mono">{{ file.file }}</div>
+              <div class="muted">
+                {{ file.partial ? '仅中间段（时间拼接未完成）' : '整片' }}
+              </div>
             </div>
+            <el-link :href="file.open_url ?? ''" target="_blank" type="primary" underline="never">
+              <el-icon><Download /></el-icon>播放
+            </el-link>
           </div>
-          <el-link :href="file.open_url ?? ''" target="_blank" type="primary" underline="never">
-            <el-icon><Download /></el-icon>播放
-          </el-link>
-        </div>
+        </template>
       </div>
     </section>
 
@@ -301,6 +412,52 @@ watch(latest, async (task) => {
 .output-main {
   min-width: 0;
   font-size: var(--text-sm);
+}
+
+.report-box {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.report-box h3 {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.report-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-1) var(--space-3);
+  font-size: var(--text-xs);
+}
+
+.report-grid > span:nth-child(odd) {
+  color: var(--color-text-muted);
+}
+
+.report-grid .el-tag + .el-tag {
+  margin-left: var(--space-1);
+}
+
+.image-output {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  text-decoration: none;
+}
+
+.image-output img {
+  width: 100%;
+  border-radius: var(--radius-md);
+  background: var(--color-video-bg);
+}
+
+.image-output-name {
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  word-break: break-all;
 }
 
 @media (max-width: 1280px) {

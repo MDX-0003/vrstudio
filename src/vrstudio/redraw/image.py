@@ -1,15 +1,15 @@
-"""Still-image pad/stitch: the single-frame form of the fullredraw auxiliary.
+"""Image pad/stitch: the single-frame form of the fullredraw auxiliary.
 
-The geometry is not re-derived here. ``plan_still`` wraps
-:func:`vrstudio.redraw.geometry.plan_pad`; ``pad_still`` runs the same
-``pre_roll`` + ``pad_h`` chain as ``vrstudio pad``; ``stitch_still`` runs the same
+The geometry is not re-derived here. ``plan_image`` wraps
+:func:`vrstudio.redraw.geometry.plan_pad`; ``pad_image`` runs the same
+``pre_roll`` + ``pad_h`` chain as ``vrstudio pad``; ``stitch_image`` runs the same
 ``restore_canvas`` -> ``circular_translate`` -> ``recompose`` -> ``finalize``
 sequence as ``vrstudio recompose``. Only the I/O and the manifest differ, which is
 why a still image does not need a second implementation of the seam arithmetic.
 
-Two still-specific decisions:
+Two image-specific decisions:
 
-* ``P == 0`` is an error, not a warning. The still flows exist to close a 360
+* ``P == 0`` is an error, not a warning. The image flows exist to close a 360
   seam; a canvas with no redundancy cannot do that and should fail before spending
   a generation call.
 * The stitched image is the *whole* 2:1 panorama. For a local redraw the caller
@@ -27,7 +27,7 @@ import numpy as np
 from .blend import endpoint_lock_px
 from .geometry import (PadPlan, PadSpec, parse_aspect, plan_pad, resolve_aspect,
                        restore_height)
-from .manifest import LocalInfo, StillManifest, from_still_plan
+from .manifest import ImageManifest, LocalInfo, from_image_plan
 from .mask import make_mask
 from .pipeline import TransformContext, apply_chain, build_chain
 from .recompose_core import (RecomposeSpec, finalize, recompose, restore_canvas,
@@ -37,19 +37,23 @@ from .registration import (RegistrationResult, circular_translate,
 from .verify_core import SeamMetrics, seam_metrics, verdict
 
 
-class StillError(ValueError):
-    """A still pad/stitch input cannot satisfy the geometry or the gate."""
+class ImageFlowError(ValueError):
+    """A pad/stitch input cannot satisfy the geometry or the gate.
+
+    Named apart from ``media.imageio.ImageError``（读图失败），because ``extract``
+    and ``merge`` need both in one ``except`` clause.
+    """
 
 
 @dataclass(frozen=True)
-class StillPad:
+class ImagePad:
     padded: np.ndarray
     mask: np.ndarray
-    manifest: StillManifest
+    manifest: ImageManifest
 
 
 @dataclass(frozen=True)
-class StillStitch:
+class ImageStitch:
     image: np.ndarray
     registration: RegistrationResult
     gate: str                    # the canvas-premise gate: ok | warn | fail
@@ -59,7 +63,7 @@ class StillStitch:
     aspect_drift_pct: float
 
 
-def plan_still(
+def plan_image(
     size: tuple[int, int],
     *,
     target_aspect: str | Fraction = "21:9",
@@ -70,7 +74,7 @@ def plan_still(
     """Plan the 21:9 canvas for one ERP image (same arithmetic as ``vrstudio pad``)."""
     width, height = int(size[0]), int(size[1])
     if width <= 0 or height <= 0:
-        raise StillError(f"bad image size {width}x{height}")
+        raise ImageFlowError(f"bad image size {width}x{height}")
     if isinstance(target_aspect, Fraction):
         aspect = target_aspect
     elif str(target_aspect).strip().lower() == "auto":
@@ -84,7 +88,7 @@ def plan_still(
     )
 
 
-def pad_still(
+def pad_image(
     image: np.ndarray,
     plan: PadPlan,
     *,
@@ -100,20 +104,20 @@ def pad_still(
     ratio_label: str = "",
     tool_version: str = "",
     write_hash: bool = True,
-) -> StillPad:
-    """Apply the pad chain to one image and build its ``still_pad.json``.
+) -> ImagePad:
+    """Apply the pad chain to one image and build its ``image_pad.json``.
 
     ``mask`` lets the caller supply a local-edit mask (``patchimg``); when omitted
     the standard band mask is built with ``mask_strategy`` (``img2video``).
     """
     if image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:
-        raise StillError(
+        raise ImageFlowError(
             f"expected uint8 BGR (H, W, 3), got {image.dtype} {image.shape}")
     expected_w, expected_h = plan.source_size
     if image.shape[1] != expected_w or image.shape[0] != expected_h:
         # plan_pad trims odd dimensions for yuv420p; crop the same way it planned.
         if image.shape[1] < expected_w or image.shape[0] < expected_h:
-            raise StillError(
+            raise ImageFlowError(
                 f"image {image.shape[1]}x{image.shape[0]} is smaller than the plan's "
                 f"source {expected_w}x{expected_h}")
         image = image[:expected_h, :expected_w]
@@ -121,7 +125,7 @@ def pad_still(
     chain = build_chain(list(pipeline))
     padded = apply_chain(image, chain, TransformContext(plan=plan))
     if padded.shape[:2] != (plan.H, plan.Wc):
-        raise StillError(
+        raise ImageFlowError(
             f"padded image is {padded.shape[1]}x{padded.shape[0]}, "
             f"plan says {plan.Wc}x{plan.H}")
 
@@ -130,12 +134,12 @@ def pad_still(
                          feather_px=mask_feather_px)
     mask = np.asarray(mask)
     if mask.shape != (plan.H, plan.Wc):
-        raise StillError(
+        raise ImageFlowError(
             f"mask is {mask.shape[1]}x{mask.shape[0]}, canvas says {plan.Wc}x{plan.H}")
     if mask.dtype != np.uint8:
         mask = np.clip(np.rint(mask), 0, 255).astype(np.uint8)
 
-    manifest = from_still_plan(
+    manifest = from_image_plan(
         plan,
         source_path=source_path,
         write_hash=write_hash,
@@ -149,7 +153,7 @@ def pad_still(
         ratio_label=ratio_label,
         tool_version=tool_version,
     )
-    return StillPad(padded=padded, mask=mask, manifest=manifest)
+    return ImagePad(padded=padded, mask=mask, manifest=manifest)
 
 
 def map_erp_mask_to_canvas(
@@ -164,20 +168,20 @@ def map_erp_mask_to_canvas(
     same canvas pixels as the padded image, including the wrap and the roll.
     """
     if erp_mask.ndim != 2 or erp_mask.shape != (plan.H, plan.W):
-        raise StillError(
+        raise ImageFlowError(
             f"ERP mask is {erp_mask.shape}, plan source is {(plan.H, plan.W)}")
     chain = build_chain(list(pipeline))
     mapped = apply_chain(np.ascontiguousarray(erp_mask), chain,
                          TransformContext(plan=plan))
     if mapped.shape != (plan.H, plan.Wc):
-        raise StillError(
+        raise ImageFlowError(
             f"canvas mask is {mapped.shape}, canvas is {(plan.H, plan.Wc)}")
     return np.ascontiguousarray(mapped)
 
 
-def stitch_still(
+def stitch_image(
     generated: np.ndarray,
-    manifest: StillManifest,
+    manifest: ImageManifest,
     *,
     search_pct: float = 25.0,
     max_sample_rows: int = 256,
@@ -191,19 +195,19 @@ def stitch_still(
     interior_band: tuple[float, float] = (0.25, 0.75),
     max_wrap_percentile: float = 95.0,
     worst_interior_tol: float = 1.0,
-) -> StillStitch:
+) -> ImageStitch:
     """Turn one generated 21:9 canvas into a closed 2:1 panorama.
 
-    Raises :class:`StillError` when the model reframed the canvas (band
+    Raises :class:`ImageFlowError` when the model reframed the canvas (band
     correlation below the threshold) or the manifest has no redundancy. A flat
     cost curve is only a warning: ``d*`` may be a coincidental match.
     """
     if generated.ndim != 3 or generated.shape[2] != 3:
-        raise StillError(
+        raise ImageFlowError(
             f"expected an (H, W, 3) generated image, got {generated.shape}")
     plan = manifest.to_pad_plan()
     if plan.P <= 0:
-        raise StillError(
+        raise ImageFlowError(
             "P == 0: the canvas has no horizontal redundancy, so the 360 seam "
             "cannot be closed; use a target aspect wider than the source (21:9)")
 
@@ -220,7 +224,7 @@ def stitch_still(
     reg = circular_translate(G, B, search_px, max_sample_rows)
     gate = gate_registration(reg, min_band_correlation, warn_quality)
     if gate == "fail":
-        raise StillError(
+        raise ImageFlowError(
             f"canvas premise failed: the two redundant bands correlate at "
             f"{reg.correlation:.3f} (< {min_band_correlation:.2f}); the model "
             f"likely cropped or reframed the canvas, so slicing would put the seam "
@@ -232,7 +236,7 @@ def stitch_still(
                               worst_interior_tol)
     implied_h = restore_height((generated.shape[1], generated.shape[0]), plan.Wc)
     drift = 100.0 * (implied_h / plan.H - 1.0) if plan.H else 0.0
-    return StillStitch(
+    return ImageStitch(
         image=out,
         registration=reg,
         gate=gate,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { defaultRole } from '@/constants/assetRoles'
-import { optionsFor } from '@/utils/roles'
+import { IMAGE_AUTO_ROLES, IMAGE_ROLE_MODE, optionsFor } from '@/utils/roles'
 import type { RoleSpec } from '@/types/case-info'
 
 const ROLES: RoleSpec[] = [
@@ -94,6 +94,18 @@ describe('submit role options', () => {
       (option) => option.value,
     )
     expect(firstLast).toEqual(['first_frame', 'last_frame'])
+  })
+
+  it('offers only reference roles for image flows', () => {
+    const names = optionsFor(ROLES, {
+      kind: 'image',
+      mode: IMAGE_ROLE_MODE,
+      exclude: IMAGE_AUTO_ROLES,
+    }).map((option) => option.value)
+    expect(names).toContain('lighting_ref')
+    expect(names).toContain('subject_ref')
+    expect(names).not.toContain('edit_master')
+    expect(names).not.toContain('first_frame')
   })
 
   it('keeps the current role visible as a legacy option', () => {

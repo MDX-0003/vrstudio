@@ -157,7 +157,7 @@ function round(name: string, step: string, count = 1) {
     key: name,
     stage: 'checked',
     step,
-    model_id: null,
+    image_model_id: null,
     num: count,
     gate: {},
     results: Array.from({ length: count }, (_, i) => ({
@@ -301,7 +301,7 @@ describe('KeyframeStep 候选图入口', () => {
         key: 'k',
         stage: 'checked',
         step: 'first',
-        model_id: null,
+        image_model_id: null,
         num: 4,
         gate: {},
         results: [

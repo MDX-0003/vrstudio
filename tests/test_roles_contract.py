@@ -14,7 +14,7 @@ from vrstudio import case as case_mod
 from vrstudio import roles
 
 SPEC = Path(roles.__file__).with_name("roles.json")
-CONTRACT_SHA256 = "3260f36f2a55e405c186ac53c57875f9d5e20b219fa275b077e2fb2bba79ae61"
+CONTRACT_SHA256 = "4c7a53dde440e76a9208ea898e7bfb442dab092f8b4265c2df15b4b8bc451a1f"
 
 
 def _entries() -> list[dict]:

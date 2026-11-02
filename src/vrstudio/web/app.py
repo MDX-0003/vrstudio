@@ -20,7 +20,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -54,9 +54,10 @@ from ..cli.generate import (
     template_for,
 )
 from ..media.videoio import VideoIOError
+from ..patch import sidecar as sidecar_mod
 from ..patch.projection import viewport_erp_rects, viewport_erp_size
 from ..procenv import decode_text, utf8_env
-from ..redraw.manifest import Manifest
+from ..redraw.manifest import ImageManifest, Manifest
 from . import case_meta
 from .identity import (
     MAX_NAME_LENGTH,
@@ -367,7 +368,14 @@ async def video_source(request):
         case = case_mod.load(request.path_params["name"], _ctx["cases_root"])
     except CaseError:
         return JSONResponse({"error": "no such case"}, status_code=404)
-    p = Path(case.source_path)
+    # relight 没有 [source]：对比页左路要播的是底版槽位里的视频。
+    if case.flow == "relight":
+        gt, _atmo = case.relight_slots()
+        if gt is None or gt.kind != "video":
+            return JSONResponse({"error": "relight 没有视频底版"}, status_code=404)
+        p = gt.resolved(case, _ctx["cases_root"])
+    else:
+        p = Path(case.source_path)
     if not p.is_file():
         return JSONResponse({"error": "source video missing"}, status_code=404)
     return FileResponse(str(p), media_type="video/mp4")
@@ -505,6 +513,44 @@ def _round_files(round_dir: Path) -> dict:
     return {"result": file_entry(result), "run_json": file_entry(run_json)}
 
 
+def _image_rounds(case: case_mod.Case) -> list[dict]:
+    """图片轮次与候选下标：``run.json`` 的 results 顺序就是 adopt 的下标。"""
+    root = _workdir() / case.name
+    if not root.is_dir():
+        return []
+    rows: list[dict] = []
+    for directory in sorted((p for p in root.glob("img-*") if p.is_dir()),
+                            key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            blob = json.loads((directory / "run.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        results = []
+        for index, raw in enumerate(blob.get("results") or [], start=1):
+            path = Path(raw)
+            results.append({"index": index, "name": path.name,
+                            "exists": path.is_file(),
+                            "url": f"/img/round/{case.name}/{directory.name}/{index}"})
+        # 图片轮次的 gate 是对象（verdict/kind/images），页面只显示判定词。
+        gate = blob.get("gate")
+        verdict = gate.get("verdict") if isinstance(gate, dict) else gate
+        rows.append({"round": directory.name, "stage": blob.get("stage"),
+                     "gate": verdict, "results": results,
+                     "adopted": directory.name == case.adopt_round})
+    return rows
+
+
+def _image_report(case: case_mod.Case) -> dict | None:
+    """图片流程的 merge 报告：patchimg 的选区外统计、fullRedrawImg 的接缝闸门。"""
+    if not case.extract_current:
+        return None
+    path = case.dir(_ctx["cases_root"]) / "extracts" / case.extract_current / "report.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
 def _rounds(name: str) -> dict:
     """问 vrgen 要轮次列表（子进程，跨仓库只走 CLI 契约）。
     vrgen 不在（未装/路径未配）不炸页面——轮次区显示提示。"""
@@ -567,16 +613,56 @@ def _refs_payload(submission) -> dict:
     return submission.payload()
 
 
+def _image_geometry_sizes(case: case_mod.Case) -> tuple[tuple[int, int],
+                                                        tuple[int, int]] | None:
+    """图片流程的画布与源尺寸：展开模板几何占位符用，只读 sidecar 不写盘。"""
+    if not case.extract_current:
+        return None
+    d = case.dir(_ctx["cases_root"]) / "extracts" / case.extract_current
+    try:
+        if case.flow == "patchimg":
+            geo = sidecar_mod.load_image(d / "image.json")
+            return ((int(geo.viewport.width), int(geo.viewport.height)),
+                    (int(geo.erp_width), int(geo.erp_height)))
+        manifest = ImageManifest.load(d / "image_pad.json")
+        return ((int(manifest.canvas.size[0]), int(manifest.canvas.size[1])),
+                (int(manifest.source.size[0]), int(manifest.source.size[1])))
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
 def _prompt_preview_args(name: str, mode: str | None = None) -> tuple[list[str], Path | None]:
     """提示词展开所需的 CLI 参数：几何尺寸 + 提交清单临时文件。
 
     拿不到候选或几何时不报错，只返回已能拿到的部分；vrgen 会把缺的占位符
     报成 render_error，页面显示具体缺什么，而不是干瞪占位符。
+
+    图片流程不用 ``--refs``：它的输入是「基图 + mask + 参考图」的固定顺序，
+    按 ``--image-role`` 逐张报给 vrgen 就够展开 ``image_roles``。
     """
     args: list[str] = []
     refs_file: Path | None = None
     try:
         case = case_mod.load(name, _ctx["cases_root"])
+    except CaseError:
+        return args, None
+    if case.flow in case_mod.IMAGE_FLOWS:
+        roles = ["edit_master", "mask"]
+        by_id = {c.id: c for c in candidates(case, _ctx["cases_root"])}
+        for item in case.submit_selected or []:
+            candidate = by_id.get(item)
+            if candidate is None:
+                continue
+            roles.append(case.submit_role(item) or candidate.role)
+        for role in roles:
+            args += ["--image-role", role]
+        sizes = _image_geometry_sizes(case)
+        if sizes is not None:
+            (canvas_w, canvas_h), (source_w, source_h) = sizes
+            args += ["--canvas", f"{canvas_w}x{canvas_h}",
+                     "--source", f"{source_w}x{source_h}"]
+        return args, None
+    try:
         submission = assemble(case, _ctx["cases_root"], mode=mode)
     except (CaseError, GenError, KeyError, ValueError, OSError):
         return args, None
@@ -593,7 +679,13 @@ def _prompt_preview_args(name: str, mode: str | None = None) -> tuple[list[str],
 
 
 def _prompt(name: str, flow: str, mode: str | None = None) -> dict:
-    """提示词模板 + 变量草稿 + 展开后的完整正文（决策 18；契约 case-model.md §4）。"""
+    """提示词模板 + 变量草稿 + 展开后的完整正文（决策 18；契约 case-model.md §4）。
+
+    relight 不调 vrgen、也没有提示词模板：在这里统一短路，所有调用方都不必各自判断
+    （否则 ``template_for`` 会以 ``KeyError: 'relight'`` 炸成 500）。
+    """
+    if flow == "relight":
+        return {}
     if mode is None:
         mode = _current_mode(name)
     argv = ["prompt", "show", "--job", name,
@@ -631,7 +723,14 @@ def _generation_params(name: str) -> dict:
 
     先不带 ``--refs`` 读模式与当前草稿；提交集齐了才带上清单计算档位。这样
     纯图片 case 与空白 case 都不会撞上 `params show` 的“不接受输入视频”闸门。
+    relight 不调 vrgen，所以直接给空表，不 spawn 子进程。
     """
+    try:
+        flow = case_mod.load(name, _ctx["cases_root"]).flow
+    except CaseError:
+        flow = None
+    if flow == "relight":
+        return {}
     base = _vrgen_json(["params", "show", "--job", name,
                         "--workdir", str(_workdir())])
     if "error" in base:
@@ -676,19 +775,33 @@ def _generation_params(name: str) -> dict:
             refs_file.unlink(missing_ok=True)
 
 
+#: 抽取版本的完成标记与被采用结果的文件名，按 flow 取。图片流程的交付是单帧。
+_EXTRACT_FILES = {
+    "patch": ("clip.json", "result.mp4"),
+    "patchimg": ("image.json", "result.png"),
+    "fullRedrawImg": ("image_pad.json", "result.png"),
+}
+
+
 def _extracts(case: case_mod.Case) -> list[dict]:
+    marker, result_name = _EXTRACT_FILES.get(case.flow, ("clip.json", "result.mp4"))
     vroot = case.dir(_ctx["cases_root"]) / "extracts"
     out = []
     if vroot.is_dir():
         for vdir in sorted(p for p in vroot.iterdir() if p.is_dir()):
             out.append({"version": vdir.name,
-                        "extracted": (vdir / "clip.json").is_file(),
-                        "has_result": (vdir / "result.mp4").is_file()})
+                        "extracted": (vdir / marker).is_file(),
+                        "has_result": (vdir / result_name).is_file()})
     return out
 
 
 def _output_entry(case: case_mod.Case, path: Path) -> dict:
-    """成片条目：文件信息 + 预览代理状态；打开走 open_url（原片）。"""
+    """成片条目：文件信息 + 预览代理状态；打开走 open_url（原片）。
+
+    图片交付物没有代理，直接列文件——浏览器按原图打开就是它该有的样子。
+    """
+    if path.suffix.lower() != ".mp4":
+        return {"file": path.name, **file_entry(path)}
     return {
         "file": path.name,
         **file_entry(path),
@@ -707,6 +820,13 @@ def _outputs(case: case_mod.Case) -> list[dict]:
     odir = case.dir(_ctx["cases_root"]) / "out"
     if not odir.is_dir():
         return []
+    if case.flow in case_mod.IMAGE_FLOWS:
+        return [_output_entry(case, p) for p in sorted(odir.glob("*.png"))]
+    if case.flow == "relight":
+        # 底版可能是视频也可能是图片，交付物两种后缀都会出现；小样在 out/samples/
+        # 子目录里，不是 out/ 的直接子文件，所以这里不会误收。
+        return [_output_entry(case, p) for p in sorted(odir.iterdir())
+                if p.is_file() and p.suffix.lower() in _RELICHT_OUT_SUFFIXES]
     files = sorted(odir.glob("*.mp4"))
     if case.flow != "patch":
         return [_output_entry(case, p) for p in files]
@@ -900,8 +1020,22 @@ def _asset_details(case: case_mod.Case) -> list[dict]:
 
 
 DEFAULT_KEYFRAME_PRESERVE = (
-    "机位、构图、透视、场景建筑、背景人物、光照与色温保持图1原样；"
-    "除指定人物外不新增、不删除任何物体。")
+    "机位、镜头与透视、构图与地平线高度保持图1原样；场景建筑、地面、背景人物与陈设、"
+    "光照方向与色温不变；除【编辑对象】外不新增、不删除、不移动任何东西。")
+
+#: 模板新增槽位时的默认值。键不必覆盖全部槽位：缺失时按空字符串补，正文仍可展开；
+#: 这里只放“有合理通用值”的那几个。真正的槽位清单以模板占位符为准。
+DEFAULT_KEYFRAME_VARS = {
+    "target": "人物",
+    "source_first": "",
+    "source_last": "",
+    "figure": "",
+    "subject_last": "",
+    "pose_first": "",
+    "pose_last": "",
+    "preserve": DEFAULT_KEYFRAME_PRESERVE,
+    "cleanup": "",
+}
 
 
 def _pick_row(pick: keyframe_mod.Pick | None,
@@ -916,6 +1050,7 @@ def _pick_row(pick: keyframe_mod.Pick | None,
     if row is None:
         return None
     return {"round": pick.round, "index": pick.index, "asset": pick.asset,
+            "source": "raw" if pick.round == RAW_PICK_ROUND else "generated",
             "file": {key: row.get(key) for key in
                      ("name", "rel", "path", "exists", "mtime", "size", "open_url")}}
 
@@ -1122,6 +1257,66 @@ def _patch_step_files(case: case_mod.Case, cdir: Path) -> dict:
     return steps
 
 
+def _patchimg_step_files(case: case_mod.Case, cdir: Path) -> dict:
+    """patchimg：源图 → 视口裁剪 → 采用结果 → 贴回成片（单帧，没有时间轴）。"""
+    source = [file_entry(Path(case.source_path))] if case.source_path else []
+    steps = {
+        "extract": {"inputs": source, "outputs": []},
+        "generate": {"inputs": [], "outputs": []},
+        "merge": {"inputs": source, "outputs": []},
+    }
+    if not case.extract_current:
+        return steps
+    d = cdir / "extracts" / case.extract_current
+    clip = d / "clip.png"
+    mask = d / "clip_mask.png"
+    sidecar = d / "image.json"
+    result = d / "result.png"
+    out = cdir / "out" / f"{case.extract_current}_image.png"
+    steps["extract"] = {
+        "inputs": source,
+        "outputs": [file_entry(clip), file_entry(mask), file_entry(sidecar)],
+    }
+    steps["generate"] = _generation_groups(
+        case, [file_entry(clip), file_entry(mask), file_entry(sidecar)], result)
+    steps["merge"] = {
+        "inputs": [*source, file_entry(result), file_entry(sidecar), file_entry(clip)],
+        "outputs": [file_entry(out), file_entry(d / "report.json")],
+    }
+    return steps
+
+
+def _fullredraw_img_step_files(case: case_mod.Case, cdir: Path) -> dict:
+    """fullRedrawImg：源图 → 21:9 画布与 mask → 采用结果 → stitch 还原 2:1。"""
+    source = [file_entry(Path(case.source_path))] if case.source_path else []
+    steps = {
+        "extract": {"inputs": source, "outputs": []},
+        "generate": {"inputs": [], "outputs": []},
+        "merge": {"inputs": [], "outputs": []},
+    }
+    if not case.extract_current:
+        return steps
+    d = cdir / "extracts" / case.extract_current
+    padded = d / "padded.png"
+    mask = d / "padded_mask.png"
+    manifest = d / "image_pad.json"
+    upload = d / "upload.png"
+    upload_mask = d / "upload_mask.png"
+    result = d / "result.png"
+    out = cdir / "out" / f"{case.extract_current}_image.png"
+    steps["extract"] = {
+        "inputs": source,
+        "outputs": [file_entry(padded), file_entry(mask), file_entry(manifest)],
+    }
+    steps["generate"] = _generation_groups(
+        case, [file_entry(upload), file_entry(upload_mask)], result)
+    steps["merge"] = {
+        "inputs": [file_entry(result), file_entry(manifest)],
+        "outputs": [file_entry(out), file_entry(d / "report.json")],
+    }
+    return steps
+
+
 def _gen_step_files(case: case_mod.Case, cdir: Path) -> dict:
     """gen：素材副本是输入；采用后的副本落在 case/result.mp4。"""
     files = [file_entry(a.resolved(case, _ctx["cases_root"])) for a in case.assets]
@@ -1131,16 +1326,73 @@ def _gen_step_files(case: case_mod.Case, cdir: Path) -> dict:
     }
 
 
+#: relight 的交付物扩展名：底版是视频出 mp4，是图片出 png。
+_RELICHT_OUT_SUFFIXES = (".mp4", ".png")
+
+
+def _relight_current(case: case_mod.Case, cdir: Path) -> Path | None:
+    """当前成片：``[relight] current`` 指得到就用它，否则取 ``out/`` 下最新的交付物。
+
+    后端不写 ``current``（写回需要任务完成回调，而 relight 的产物名字已经带时间戳），
+    所以这里退一步按修改时间取最新；用户想钉住某一版就写 ``[relight] current``。
+    """
+    raw = (case.relight or {}).get("current")
+    if raw:
+        pinned = cdir / raw
+        if pinned.is_file():
+            return pinned
+    odir = cdir / "out"
+    if not odir.is_dir():
+        return None
+    candidates = [p for p in odir.iterdir()
+                  if p.is_file() and p.suffix.lower() in _RELICHT_OUT_SUFFIXES]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _relight_samples(case: case_mod.Case, cdir: Path) -> list[dict]:
+    """最近一次小样的缩略图清单：``out/samples/<时间戳>/sample_*.png``。"""
+    root = cdir / "out" / "samples"
+    if not root.is_dir():
+        return []
+    dirs = sorted((p for p in root.iterdir() if p.is_dir()),
+                  key=lambda p: p.name, reverse=True)
+    if not dirs:
+        return []
+    return [file_entry(p) for p in sorted(dirs[0].glob("sample_*.png"))]
+
+
+def _relight_step_files(case: case_mod.Case, cdir: Path) -> dict:
+    """relight：两个槽位是输入；产物在 out/，当前成片由 ``_relight_current`` 决定。"""
+    gt, atmo = case.relight_slots()
+    slots = [file_entry(a.resolved(case, _ctx["cases_root"]))
+             for a in (gt, atmo) if a is not None]
+    current = _relight_current(case, cdir)
+    result = [file_entry(current)] if current is not None else []
+    return {
+        "assets": {"inputs": [], "outputs": slots},
+        "relight": {"inputs": slots, "outputs": result},
+        "compare": {"inputs": [*slots, *result], "outputs": []},
+    }
+
+
 def _step_files(case: case_mod.Case) -> dict:
-    """三条 flow 的文件规范完全不同，这里显式分流，禁止共用一张表。"""
+    """每条 flow 的文件规范都不同，这里显式分流，禁止共用一张表。"""
     cdir = case.dir(_ctx["cases_root"])
     if case.flow == "fullredraw":
         return _fullredraw_step_files(case, cdir)
     if case.flow == "patch":
         return _patch_step_files(case, cdir)
+    if case.flow == "patchimg":
+        return _patchimg_step_files(case, cdir)
+    if case.flow == "fullRedrawImg":
+        return _fullredraw_img_step_files(case, cdir)
     if case.flow == "gen":
         return _gen_step_files(case, cdir)
-    return {}
+    if case.flow == "relight":
+        return _relight_step_files(case, cdir)
+    raise ValueError(f"未知 flow：{case.flow}")
 
 
 def _gates(case: case_mod.Case, extracts: list[dict],
@@ -1238,7 +1490,52 @@ def _gates(case: case_mod.Case, extracts: list[dict],
                         "reason": "" if has_out else "裁回原尺寸出片后，在这里对比",
                         "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}"},
         }
-    else:
+    elif case.flow in case_mod.IMAGE_FLOWS:
+        cur = cdir / "extracts" / (case.extract_current or "")
+        result_png = cur / "result.png"
+        picked = bool(case.adopt_round) and result_png.is_file()
+        patchimg = case.flow == "patchimg"
+        produced = (("clip.png", "clip_mask.png", "image.json") if patchimg
+                    else ("padded.png", "padded_mask.png", "image_pad.json"))
+        steps = {}
+        if patchimg:
+            steps["pick"] = {
+                "ok": missing is None,
+                "reason": (f"case.toml 里缺 [{missing}] 段，补齐后才能抽取"
+                           if missing else ""),
+                "evidence": (f"草稿两段（viewport/inner）都在 "
+                             f"{case_mod.case_toml(case.name, _ctx['cases_root'])} 里"),
+            }
+        steps["extract"] = {
+            "ok": extracted,
+            "ready": (missing is None) if patchimg else True,
+            "reason": "" if extracted else (
+                "先完成选区并运行抽取" if patchimg
+                else "运行抽取：整幅 pad 成 21:9 并生成冗余带 mask"),
+            "evidence": (f"在 {cur}\\ 检测到 {' / '.join(produced)}，当前抽取版本是 "
+                         f"{case.extract_current}；重新抽取会生成新版本，旧版本不动"
+                         if extracted else ""),
+        }
+        steps["generate"] = {
+            "ok": picked,
+            "ready": extracted,
+            "reason": "" if extracted else "抽取之后才能送生成",
+            "evidence": (f"在 {cur}\\result.png 检测到已采用的第 {case.adopt_index} 张候选"
+                         f"（来自 Session {case.adopt_round}）" if picked else ""),
+        }
+        steps["merge"] = {
+            "ok": has_out,
+            "ready": extracted and picked,
+            "reason": "" if has_out else (
+                "采用一张候选后才能贴回" if patchimg else "采用一张候选后才能拼回 2:1"),
+            "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}；每次合并都会覆盖同名文件",
+        }
+        steps["compare"] = {
+            "ok": has_out,
+            "reason": "" if has_out else "合并出片后可以在这里对比",
+            "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}",
+        }
+    elif case.flow == "gen":
         roles_ok = bool(case.assets) and all(a.role in case_mod.ROLES for a in case.assets)
         assets_ok = bool(case.assets) and roles_ok
         if not case.assets:
@@ -1260,6 +1557,45 @@ def _gates(case: case_mod.Case, extracts: list[dict],
                                       f"（来自 Session {case.adopt_round}）；想换一个，回到上面点别的「选用」"
                                       if result_file else "")},
         }
+    elif case.flow == "relight":
+        gt, atmo = case.relight_slots()
+        slots_ok = gt is not None and atmo is not None
+        if not case.assets:
+            asset_reason = "先在素材步选定底版与氛围图"
+        elif gt is None:
+            asset_reason = "还缺底版：选一个 2:1 ERP 的视频或图片"
+        elif atmo is None:
+            asset_reason = "还缺氛围图：上传或选一张与底版同宽高的图片"
+        else:
+            asset_reason = ""
+        current = _relight_current(case, cdir)
+        steps = {
+            "assets": {
+                "ok": slots_ok,
+                "reason": asset_reason,
+                "evidence": (f"在 {cdir}\\assets\\ 检测到底版 {gt.path} 与氛围图 "
+                             f"{atmo.path}，两个槽位已写入 case.toml" if slots_ok else ""),
+            },
+            "relight": {
+                "ok": current is not None,
+                "ready": slots_ok,
+                "reason": ("" if current is not None
+                           else ("运行重打光：视频可以先出几帧小样看看" if slots_ok
+                                 else asset_reason)),
+                "evidence": (f"在 {current} 检测到当前成片；再跑一次会写出新的时间戳文件"
+                             if current is not None else ""),
+            },
+            "compare": {
+                "ok": current is not None,
+                "reason": "" if current is not None else "出片后可以在这里对比",
+                "evidence": (f"在 {current} 检测到当前成片"
+                             if current is not None else ""),
+            },
+        }
+    else:
+        # FLOWS 是闭集，落到这里说明加了 flow 却没写门链——直接报出来，
+        # 不能让页面拿到别的流程的门。
+        raise ValueError(f"未知 flow：{case.flow}（_gates 没有它的分支）")
     return steps
 
 
@@ -1270,9 +1606,11 @@ def _derived(case: case_mod.Case) -> list[dict]:
     """
     rows: list[dict] = []
     cdir = case.dir(_ctx["cases_root"])
+    image_flow = case.flow in case_mod.IMAGE_FLOWS
     if case.source_path:
         rows.append({
-            "kind": "video", "role": "source", "label": "源视频",
+            "kind": "image" if image_flow else "video", "role": "source",
+            "label": "源图" if image_flow else "源视频",
             "editable": False, "submit": "流程输入，不作为生成候选",
             **_file_info(Path(case.source_path)),
         })
@@ -1296,6 +1634,17 @@ def _derived(case: case_mod.Case) -> list[dict]:
             rows.append({"kind": "file", "role": "derived", "label": "manifest",
                          "editable": False, "submit": "recompose 的几何权威，不提交",
                          **_file_info(manifest)})
+    elif case.flow in case_mod.IMAGE_FLOWS:
+        d = cdir / "extracts" / (case.extract_current or "")
+        geometry = "image.json" if case.flow == "patchimg" else "image_pad.json"
+        for name, kind, label, submit in (
+                (geometry, "file", "几何契约",
+                 "不提交" if case.flow == "patchimg"
+                 else "stitch 的几何权威，不提交"),
+                ("result.png", "image", "已采用结果", "流程产物，不提交")):
+            rows.append({"kind": kind, "role": "derived", "label": label,
+                         "editable": False, "submit": submit,
+                         **_file_info(d / name)})
     elif case.flow == "gen":
         rows.append({"kind": "video", "role": "derived", "label": "已采用结果",
                      "editable": False, "submit": "流程产物，不提交",
@@ -1316,13 +1665,47 @@ def _submit_entries(case: case_mod.Case, assets: list[dict]) -> list[dict]:
     return out
 
 
+def _relight_payload(case: case_mod.Case) -> dict | None:
+    """relight 面板数据：两个槽位、``[relight]`` 草稿、当前成片与小样。
+
+    非 relight 流程返回 None，前端据此不渲染这块。
+    """
+    if case.flow != "relight":
+        return None
+    cdir = case.dir(_ctx["cases_root"])
+    gt, atmo = case.relight_slots()
+    current = _relight_current(case, cdir)
+    media = "image" if gt is not None and gt.kind == "image" else "video"
+    return {
+        "gt": _slot_payload(case, gt),
+        "atmo": _slot_payload(case, atmo),
+        "media": media if gt is not None else None,
+        "draft": dict(case.relight or {}),
+        "current": file_entry(current) if current is not None else None,
+        "current_report": (file_entry(current.with_suffix(".json"))
+                           if current is not None and current.with_suffix(".json").is_file()
+                           else None),
+        "samples": _relight_samples(case, cdir),
+    }
+
+
+def _slot_payload(case: case_mod.Case, asset) -> dict | None:
+    if asset is None:
+        return None
+    path = asset.resolved(case, _ctx["cases_root"])
+    return {"asset": asset.id, "kind": asset.kind, "path": asset.path,
+            "sha256": asset.sha256, "size": _file_info(path).get("size"),
+            "entry": file_entry(path)}
+
+
 def _case_info(name: str) -> dict | None:
     try:
         case = case_mod.load(name, _ctx["cases_root"])
     except CaseError:
         return None
-    store = get_store(name) if case.flow == "patch" else None
-    extracts = _extracts(case) if case.flow == "patch" else []
+    store = get_store(name) if case.flow in ("patch", "patchimg") else None
+    extracts = (_extracts(case)
+                if case.flow in ("patch", *case_mod.IMAGE_FLOWS) else [])
     # 素材明细要解码整批图片，一次请求只算一遍：assets / keyframe / gates 共用。
     assets = _asset_details(case)
     info = {
@@ -1343,6 +1726,7 @@ def _case_info(name: str) -> dict | None:
                   else None),
         "extract_current": case.extract_current,
         "adopt_round": case.adopt_round,
+        "adopt_index": case.adopt_index,
         "assets": assets,
         "raw_frames": _raw_frames(case),
         "keyframe": _keyframe_state(case, assets),
@@ -1357,11 +1741,17 @@ def _case_info(name: str) -> dict | None:
         "step_files": _step_files(case),
         "gates": _gates(case, extracts, assets),
         "previews": {"vp": f"/img/{case.name}/vp.png?k={store.key}"} if store else {},
-        "viewport_options": _viewport_options(case) if case.flow == "patch" else [],
+        "viewport_options": (_viewport_options(case)
+                             if case.flow in ("patch", "patchimg") else []),
         "viewport_footprint": _footprint_payload(store) if store else [],
         "coverage": _coverage_payload(store) if store else None,
         "fov_range": [FOV_MIN_DEG, FOV_MAX_DEG],
         "rounds": _rounds(case.name),
+        "image_rounds": (_image_rounds(case)
+                         if case.flow in case_mod.IMAGE_FLOWS else []),
+        "image_report": (_image_report(case)
+                         if case.flow in case_mod.IMAGE_FLOWS else None),
+        "relight": _relight_payload(case),
         "meta": _meta().read(case.name).as_dict(),
     }
     return info
@@ -1374,77 +1764,115 @@ def _save_gen_mode(name: str, mode: str) -> str | None:
     return payload.get("error")
 
 
+def _image_size(path: Path) -> tuple[int, int] | None:
+    """图片宽高 (w, h)：PNG 只读文件头，其余交给 cv2。
+
+    8K 全景图解开一次要一百多 MB；这里只需要一行尺寸给默认草稿用。
+    """
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(26)
+    except OSError:
+        return None
+    if head[:8] == b"\x89PNG\r\n\x1a\n" and len(head) >= 24:
+        return (int.from_bytes(head[16:20], "big"),
+                int.from_bytes(head[20:24], "big"))
+    image = cv2.imread(str(path))
+    if image is None:
+        return None
+    return (int(image.shape[1]), int(image.shape[0]))
+
+
 async def api_cases(request):
     if request.method == "GET":
         names = sorted(p.parent.name for p in _root().glob("*/case.toml"))
         infos = await asyncio.to_thread(
             lambda: [i for n in names if (i := _brief(n)) is not None])
         return JSONResponse(infos)
-    # POST：建新 case。gen 不再要求视频，但必须选模式；patch/fullredraw 仍要视频。
+    # POST：建新 case。gen 不要求源文件但必须选模式；视频流程要视频；图片
+    # 流程（patchimg/fullRedrawImg）要 2:1 ERP 图片，比例校验在 case.create。
     body = await request.json()
     flow = body.get("flow")
     if flow not in case_mod.FLOWS:
         return JSONResponse({"error": f"flow 必须是 {' 或 '.join(case_mod.FLOWS)}"},
                             status_code=400)
-    raw_video = str(body.get("video") or "")
+    image_flow = flow in case_mod.IMAGE_FLOWS
+    if flow == "relight":
+        # relight 建 case 不绑源：GT 与氛围图进 case 之后在素材步用两个槽位选定。
+        if body.get("video") or body.get("upload_id"):
+            return JSONResponse(
+                {"error": "relight 建 case 不绑源文件；GT 与氛围图在 case 的素材步选定"},
+                status_code=400)
+    exts = _IMAGE_EXTS if image_flow else _VIDEO_EXTS
+    what = "源图片" if image_flow else "源视频"
+    raw_source = str(body.get("video") or "")
     upload_id = str(body.get("upload_id") or "")
-    if raw_video and upload_id:
-        return JSONResponse({"error": "upload_id 与 video 只能二选一"}, status_code=400)
+    if raw_source and upload_id:
+        return JSONResponse({"error": "upload_id 与源文件只能二选一"}, status_code=400)
     if upload_id:
-        # 外部用户直接上传源视频：复用分片上传会话，落进 sources/ 后走原路径。
+        # 外部用户直接上传源文件：复用分片上传会话，落进 sources/ 后走原路径。
         try:
             paths, upload_dirs = _uploaded_paths([upload_id])
         except CaseError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         uploaded = paths[0]
-        if uploaded.suffix.lower() not in _VIDEO_EXTS:
+        if uploaded.suffix.lower() not in exts:
             return JSONResponse(
-                {"error": f"源视频必须是 {' / '.join(sorted(_VIDEO_EXTS))} 之一"},
+                {"error": f"{what}必须是 {' / '.join(sorted(exts))} 之一"},
                 status_code=400)
         target = sources_dir() / uploaded.name
         if target.exists():
             return JSONResponse(
-                {"error": f"sources/ 里已有同名视频：{uploaded.name}，请重命名后重新上传"},
+                {"error": f"sources/ 里已有同名文件：{uploaded.name}，请重命名后重新上传"},
                 status_code=409)
         sources_dir().mkdir(parents=True, exist_ok=True)
         shutil.move(str(uploaded), str(target))
         for directory in upload_dirs:
             shutil.rmtree(directory, ignore_errors=True)
-        raw_video = uploaded.name
-    video = sources_dir() / Path(raw_video).name if raw_video else None
+        raw_source = uploaded.name
+    source = sources_dir() / Path(raw_source).name if raw_source else None
     mode = body.get("mode")
     if flow == "gen":
         if mode not in case_mod.GEN_MODES:
             return JSONResponse(
                 {"error": f"gen 必须选择模式：{' / '.join(case_mod.GEN_MODES)}"},
                 status_code=400)
-        if video is not None and not video.is_file():
-            return JSONResponse({"error": f"sources/ 里没有这个视频：{video.name}"},
+        if source is not None and not source.is_file():
+            return JSONResponse({"error": f"sources/ 里没有这个视频：{source.name}"},
                                 status_code=400)
-        if video is None and not str(body.get("name") or "").strip():
+        if source is None and not str(body.get("name") or "").strip():
             return JSONResponse({"error": "没有视频素材时，必须填写 case 名"},
                                 status_code=400)
-    elif video is None or not video.is_file():
-        return JSONResponse({"error": "sources/ 里没有这个视频"}, status_code=400)
+    elif flow != "relight" and (source is None or not source.is_file()):
+        return JSONResponse({"error": f"sources/ 里没有这个{what}"}, status_code=400)
 
-    name = str(body.get("name") or (video.stem if video else "")).strip()
+    name = str(body.get("name") or (source.stem if source else "")).strip()
     if not name:
         return JSONResponse({"error": "必须填写 case 名"}, status_code=400)
     n = w = 0
     fps = 30.0
-    if video is not None:
-        cap = cv2.VideoCapture(str(video))
+    if source is not None and not image_flow:
+        cap = cv2.VideoCapture(str(source))
         if not cap.isOpened():
             return JSONResponse({"error": "打不开这个视频"}, status_code=400)
         n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
         cap.release()
+    elif source is not None:
+        size = _image_size(source)
+        if size is None:
+            return JSONResponse({"error": "打不开这张图片"}, status_code=400)
+        w = size[0]
+        fps = 0.0
     try:
-        case = case_mod.create(name, flow, video, root=_ctx["cases_root"])
+        case = case_mod.create(name, flow, source, root=_ctx["cases_root"])
         if flow == "patch":
             case_mod.set_draft(name, root=_ctx["cases_root"],
                                **case_mod.patch_default_draft(w, n))
+        elif flow == "patchimg":
+            case_mod.set_draft(name, root=_ctx["cases_root"],
+                               **case_mod.patchimg_default_draft(w))
     except CaseError as e:
         return JSONResponse({"error": str(e)}, status_code=409)
     if flow == "gen":
@@ -1454,7 +1882,7 @@ async def api_cases(request):
                 {"error": f"case 已创建，但模式没保存：{error}",
                  "name": name, "created": True}, status_code=502)
     return JSONResponse({"name": case.name, "flow": flow,
-                         "fps": round(fps, 3)})
+                         "fps": round(fps, 3), "width": w})
 
 
 def _brief(name: str) -> dict | None:
@@ -1524,18 +1952,105 @@ def _mode_ready(case: case_mod.Case, mode: str | None) -> tuple[bool, str]:
     return True, ""
 
 
+def _duration_limit(info: dict, mode: str | None) -> tuple[int, int] | None:
+    """当前模式允许的时长区间（来自 ``params show`` 的 modes[].duration）。"""
+    for item in (info.get("generation_params") or {}).get("modes") or []:
+        if item.get("value") != mode:
+            continue
+        duration = item.get("duration") or {}
+        low, high = duration.get("min"), duration.get("max")
+        if isinstance(low, int) and isinstance(high, int) and low and high:
+            return low, high
+    return None
+
+
+def _clip_seconds(case: case_mod.Case) -> float | None:
+    """当前 clip 的精确时长（秒）；读不到返回 None。
+
+    平台按片段真实时长判超限，不是按取整后的输出档，所以这里读 clip.json
+    的帧数与帧率，别用 ``clip_duration_s`` 的四舍五入值。
+    """
+    if case.flow != "patch" or not case.extract_current:
+        return None
+    from ..patch.sidecar import load_sidecar
+
+    path = case.dir(_ctx["cases_root"]) / "extracts" / case.extract_current / "clip.json"
+    try:
+        sidecar = load_sidecar(path)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not sidecar.segments or sidecar.fps <= 0:
+        return None
+    segment = sidecar.segments[0]
+    frames = int(segment.frame_end) - int(segment.frame_start) + 1
+    return round(frames / sidecar.fps, 1) if frames > 0 else None
+
+
 def _apply_mode_gate(info: dict, case: case_mod.Case, mode: str | None) -> None:
     gate = (info.get("gates") or {}).get("generate")
     if gate is None or not mode:
+        return
+    if case.flow in case_mod.IMAGE_FLOWS:
+        # 图片流程按候选张数生成、参考图可选，没有"必须勾选素材"的模式约束：
+        # 生成步的放行由「是否已抽取」决定，不要被视频的选片规则改写。
         return
     ready, reason = _mode_ready(case, mode)
     if not ready:
         gate["ready"] = False
         gate["reason"] = reason
+        return
+    # clip 的真实时长必须落在模式的区间内：超了平台只会回一句「素材 clip
+    # 不合约」，看不出是哪一项，所以在提交前把真实原因说出来。
+    limit = _duration_limit(info, mode)
+    seconds = _clip_seconds(case)
+    if seconds is None:
+        fixed = (info.get("generation_params") or {}).get("fixed") or {}
+        raw = fixed.get("duration_s")
+        seconds = float(raw) if isinstance(raw, (int, float)) else None
+    if seconds is not None and limit and not limit[0] <= seconds <= limit[1]:
+        gate["ready"] = False
+        gate["reason"] = (
+            f"clip 时长 {seconds:g} 秒，超出 {mode} 的 {limit[0]}–{limit[1]} 秒；"
+            f"把抽取范围缩到 {limit[1]} 秒以内，或换一个允许更长片段的模式/模型")
+
+
+async def _delete_case(request, name: str):
+    """删除 case 目录与 vrgen 台账；sources/ 与 logs/ 不动。
+
+    不可逆，所以两道闸门：case 被他人占用、或有运行中/排队任务时拒绝。
+    """
+    try:
+        await asyncio.to_thread(case_mod.load, name, _ctx["cases_root"])
+    except CaseError:
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    lock = _locks().read(name)
+    user = current_user(request)
+    if lock is not None and lock.owner_id != getattr(user, "id", None):
+        return JSONResponse(
+            {"error": f"case 正被 {lock.owner_name or '其他人'} 使用，等对方关闭后再删"},
+            status_code=409)
+    if QUEUE.active_for(name):
+        return JSONResponse(
+            {"error": "case 有运行中或排队任务，等任务结束后再删"}, status_code=409)
+    run_dir = _workdir() / name
+    try:
+        await asyncio.to_thread(case_mod.delete, name, _ctx["cases_root"])
+    except CaseError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    if run_dir.is_dir():
+        try:
+            await asyncio.to_thread(shutil.rmtree, run_dir)
+        except OSError as exc:
+            return JSONResponse(
+                {"error": f"case 目录已删，但 vrgen 台账删不掉：{exc}"},
+                status_code=500)
+    return JSONResponse({"deleted": name})
 
 
 async def api_case(request):
     name = request.path_params["name"]
+    if request.method == "DELETE":
+        return await _delete_case(request, name)
     info = await asyncio.to_thread(_case_info, name)
     if info is None:
         return JSONResponse({"error": "no such case"}, status_code=404)
@@ -1553,6 +2068,17 @@ async def api_case(request):
     meta = await asyncio.to_thread(_meta().ensure, name, current_user(request))
     info["meta"] = meta.as_dict()
     return JSONResponse(info)
+
+
+async def api_relight_draft(request):
+    """写 relight 的 ``[relight]`` 草稿：参数面板的持久值，权威仍在校验过的 case 模型。"""
+    name = request.path_params["name"]
+    body = await request.json()
+    try:
+        case_mod.set_relight(name, body, _ctx["cases_root"])
+    except CaseError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(await asyncio.to_thread(_info_with_generation, name))
 
 
 async def api_case_lock(request):
@@ -1831,6 +2357,30 @@ async def api_assets(request):
                                         status_code=400)
                 await asyncio.to_thread(case_mod.add_assets, name,
                                         list(zip(paths, roles, strict=True)), _ctx["cases_root"])
+        elif op == "slot":
+            # relight 的槽位：role + 文件 = 加一条候选并选中；role + asset_id = 只改指针。
+            role = str(body.get("role") or "")
+            asset_id = str(body.get("asset_id") or "")
+            slot = "gt" if role == case_mod.RELIGHT_GT else "atmo"
+            upload_ids = [str(i) for i in (body.get("upload_ids") or [])]
+            if asset_id:
+                await asyncio.to_thread(case_mod.set_relight_pick, name, slot,
+                                        asset_id, _ctx["cases_root"])
+            elif upload_ids or body.get("path"):
+                if upload_ids:
+                    if len(upload_ids) != 1:
+                        return JSONResponse({"error": "槽位一次只收一个文件"},
+                                            status_code=400)
+                    paths, dirs = _uploaded_paths(upload_ids)
+                else:
+                    paths, dirs = [Path(str(body["path"]))], []
+                await asyncio.to_thread(case_mod.add_relight_candidate, name, role,
+                                        paths[0], _ctx["cases_root"])
+                for directory in dirs:
+                    shutil.rmtree(directory, ignore_errors=True)
+            else:
+                return JSONResponse(
+                    {"error": "槽位需要 asset_id、upload_ids 或 path"}, status_code=400)
         elif op == "remove":
             asset_id = str(body.get("id") or "")
             await asyncio.to_thread(case_mod.remove_asset, name,
@@ -1929,6 +2479,9 @@ def _keyframe_ratio(case: case_mod.Case) -> str:
 RAW_FRAME_FILES = {"first_raw": "first_frame_raw.png",
                    "last_raw": "last_frame_raw.png"}
 
+#: 定稿来自「直接用原始帧」时写进 keyframe.toml 的轮次名（不是真轮次）。
+RAW_PICK_ROUND = "extract"
+
 
 KEYFRAME_VARS = "keyframe-vars.toml"
 KEYFRAME_TEMPLATES = {"first": "keyframe-first", "last": "keyframe-last"}
@@ -1966,12 +2519,20 @@ def _keyframe_refs(case: case_mod.Case) -> tuple[keyframe_mod.State, list[keyfra
 
 
 def _keyframe_inputs(case: case_mod.Case, step: str, *,
-                     require_first: bool = True) -> list[tuple[Path, str, str]]:
+                     require_first: bool = True,
+                     allow_stale: bool = False) -> list[tuple[Path, str, str]]:
     """图片步的最终参考图顺序：原始帧、主三视图、（尾帧）首帧定稿、细节图。
 
-    这里不读 ``[submit]``：视频提交清单与图片步是两份独立的输入声明。"""
+    这里不读 ``[submit]``：视频提交清单与图片步是两份独立的输入声明。
+
+    ``allow_stale`` 放行的场景只有「不依赖旧定稿」的两处：提示词的看与改、
+    以及首帧候选的生成——它们只用到当前抽取的原始帧与三视图。尾帧生成与
+    交接依赖首帧定稿，旧定稿属于旧抽取，必须先在当前抽取上重新定稿。
+    """
     state, refs = _keyframe_refs(case)
-    if state.extract and case.extract_current and state.extract != case.extract_current:
+    stale = bool(state.extract and case.extract_current
+                 and state.extract != case.extract_current)
+    if stale and not allow_stale:
         raise CaseError("抽取版本已更新，需要重新定稿两帧")
     primary = [ref for ref in refs if ref.role == "subject_ref"]
     if len(primary) != 1:
@@ -1998,9 +2559,12 @@ def _keyframe_inputs(case: case_mod.Case, step: str, *,
 
     pairs.append((resolved(primary[0]), "subject_ref", ""))
     if step == "last":
-        first = state.first
+        # 旧抽取上定稿的首帧不能当尾帧参考：它画的是旧版本的画面。
+        first = None if stale else state.first
         if not first and require_first:
-            raise CaseError("先生成并挑选首帧定稿，再生成尾帧")
+            raise CaseError(
+                "抽取版本已更新：先生成并挑选首帧定稿，再生成尾帧" if stale
+                else "先生成并挑选首帧定稿，再生成尾帧")
         if first:
             first_path = case.asset(first.asset).resolved(case, _ctx["cases_root"])
             if not first_path.is_file():
@@ -2017,7 +2581,9 @@ def _keyframe_argv(name: str, body: dict) -> list[str]:
     if case.flow != "patch":
         raise CaseError("首尾帧工作台首期只接 patch（gen 的入口待上传原始帧的入口）")
     step = _keyframe_step(body.get("step"))
-    pairs = _keyframe_inputs(case, step)
+    # 生成首帧只用到当前抽取的原始帧与三视图，旧定稿作废不影响它；
+    # 生成尾帧由 _keyframe_inputs 自己按 stale 判「先重定首帧」。
+    pairs = _keyframe_inputs(case, step, allow_stale=True)
     session = _current_session(name)
     if session <= 0:
         raise CaseError("图片生成按项目会话计费；先在底栏选择项目生成会话")
@@ -2031,8 +2597,8 @@ def _keyframe_argv(name: str, body: dict) -> list[str]:
     for path, role, note in pairs:
         argv += ["--image", str(path), "--image-role", role,
                  "--image-note", note]
-    if body.get("model_id") is not None:
-        argv += ["--model-id", str(body["model_id"])]
+    if body.get("image_model_id") is not None:
+        argv += ["--image-model-id", str(body["image_model_id"])]
     if body.get("resolution"):
         argv += ["--resolution", str(body["resolution"])]
     if body.get("num") is not None:
@@ -2052,36 +2618,58 @@ def _step_payload(payload: dict) -> dict:
     return payload
 
 
-def _keyframe_prompt(name: str, step: str) -> dict:
-    """读图片步的提示词草稿并展开；首次访问把四个变量写成空值/通用默认。
-
-    尾帧预览在首帧定稿前也允许读取（少图3 的分工说明），否则四个字段里
-    「尾帧姿态」的显示名与说明要等首帧挑完才能出现。"""
-    case = case_mod.load(name, _ctx["cases_root"])
-    step = _keyframe_step(step)
-    pairs = _keyframe_inputs(case, step, require_first=False)
-    vars_path = _workdir() / name / KEYFRAME_VARS
-    if not vars_path.is_file():
-        seed = ["prompt", "save", "--job", name,
-                "--template", KEYFRAME_TEMPLATES[step],
-                "--vars-file", KEYFRAME_VARS,
-                "--set", "figure=", "--set", "pose_first=",
-                "--set", "pose_last=",
-                "--set", f"preserve={DEFAULT_KEYFRAME_PRESERVE}",
-                "--workdir", str(_workdir())]
-        seeded = _vrgen_json(seed)
-        if "error" in seeded:
-            raise CaseError(seeded["error"])
+def _keyframe_prompt_argv(name: str, step: str, pairs: list) -> list[str]:
     argv = ["prompt", "show", "--job", name,
             "--template", KEYFRAME_TEMPLATES[step],
             "--vars-file", KEYFRAME_VARS,
             "--workdir", str(_workdir())]
     for _path, role, note in pairs:
         argv += ["--image-role", role, "--image-note", note]
-    payload = _vrgen_json(argv)
+    return argv
+
+
+def _seed_keyframe_vars(name: str, step: str, pairs: list) -> dict:
+    """读草稿并把模板新增的槽位按默认值补进去。
+
+    槽位清单以模板占位符为准，这里不维护第二份键白名单：``prompt show``
+    报出的 placeholders 与草稿现有 ``vars`` 的差集就是要补的键。旧 case 的
+    四键草稿因此能直接跨模板版本继续用，不需要手工迁移。
+    """
+    show = _keyframe_prompt_argv(name, step, pairs)
+    payload = _vrgen_json(show)
     if "error" in payload:
         raise CaseError(payload["error"])
-    return _step_payload(payload)
+    have = payload.get("vars") or {}
+    computed = set(payload.get("computed_keys") or ())
+    missing = [key for key in payload.get("placeholders") or ()
+               if key not in have and key not in computed]
+    if not missing:
+        return payload
+    seed = ["prompt", "save", "--job", name,
+            "--template", KEYFRAME_TEMPLATES[step],
+            "--vars-file", KEYFRAME_VARS,
+            "--workdir", str(_workdir())]
+    for key in missing:
+        seed += ["--set", f"{key}={DEFAULT_KEYFRAME_VARS.get(key, '')}"]
+    saved = _vrgen_json(seed)
+    if "error" in saved:
+        raise CaseError(saved["error"])
+    # save 只回草稿概览，没有展开后的正文；补完键再读一次拿 rendered。
+    payload = _vrgen_json(show)
+    if "error" in payload:
+        raise CaseError(payload["error"])
+    return payload
+
+
+def _keyframe_prompt(name: str, step: str) -> dict:
+    """读图片步的提示词草稿并展开；缺失的槽位按默认值补写。
+
+    尾帧预览在首帧定稿前也允许读取（少图3 的分工说明），否则尾帧槽位的
+    显示名与说明要等首帧挑完才能出现。"""
+    case = case_mod.load(name, _ctx["cases_root"])
+    step = _keyframe_step(step)
+    pairs = _keyframe_inputs(case, step, require_first=False, allow_stale=True)
+    return _step_payload(_seed_keyframe_vars(name, step, pairs))
 
 
 def _keyframe_rounds(name: str) -> dict:
@@ -2100,13 +2688,15 @@ def _keyframe_rounds(name: str) -> dict:
             path = Path(raw)
             if path.is_file():
                 results.append({"index": index,
-                                "url": f"/img/keyframe/{name}/{directory.name}/{index}",
+                                "url": f"/img/round/{name}/{directory.name}/{index}",
                                 **file_entry(path)})
         params = blob.get("params") or {}
         rows.append({"round": directory.name, "key": blob.get("key", ""),
                      "stage": blob.get("stage", ""),
                      "step": str(params.get("step") or ""),
-                     "model_id": params.get("model_id"),
+                     # 旧轮次台账记的是 model_id（图片轮次），读取时兼容
+                     "image_model_id": params.get(
+                         "image_model_id", params.get("model_id")),
                      "num": params.get("num"),
                      "gate": blob.get("gate") or {}, "results": results})
     return {"rounds": rows}
@@ -2135,7 +2725,7 @@ async def api_keyframe_rounds(request):
 def _keyframe_save_prompt(name: str, step: str, sets: dict) -> dict:
     case = case_mod.load(name, _ctx["cases_root"])
     step = _keyframe_step(step)
-    pairs = _keyframe_inputs(case, step)
+    pairs = _keyframe_inputs(case, step, allow_stale=True)
     argv = ["prompt", "save", "--job", name,
             "--template", KEYFRAME_TEMPLATES[step],
             "--vars-file", KEYFRAME_VARS,
@@ -2199,10 +2789,6 @@ async def api_keyframe_prompt(request):
     sets = body.get("vars") or {}
     if not isinstance(sets, dict):
         return JSONResponse({"error": "vars 必须是对象"}, status_code=400)
-    allowed = {"figure", "pose_first", "pose_last", "preserve"}
-    bad = sorted(set(sets) - allowed)
-    if bad:
-        return JSONResponse({"error": f"这些变量不能改：{bad}"}, status_code=400)
     try:
         payload = await asyncio.to_thread(
             _keyframe_save_prompt, name, str(step), {k: str(v) for k, v in sets.items()})
@@ -2234,6 +2820,56 @@ async def api_keyframe_handoff(request):
 
     try:
         info = await asyncio.to_thread(_do)
+    except (CaseError, OSError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(info)
+
+
+def _keyframe_use_raw(name: str, step: str) -> dict:
+    """把当前抽取的原始首/尾帧直接当定稿，不花钱、不重绘。
+
+    落进 ``[[assets]]`` 的角色是 ``first_frame`` / ``last_frame``（不是保留角色
+    ``*_raw``），所以交接给视频与之后的提交都走常规路径，``--refs`` 里仍然不会
+    出现原始帧角色。这一步同时把这一对定稿锚到当前抽取版本：首帧是这一对的锚，
+    落尾帧不移动锚点（过期状态下挑尾帧会拼出跨版本的一对，直接拒绝）。
+    """
+    case = case_mod.load(name, _ctx["cases_root"])
+    if case.flow != "patch":
+        raise CaseError("首尾帧工作台首期只接 patch（gen 的首尾帧入口另接）")
+    step = _keyframe_step(step)
+    if not case.extract_current:
+        raise CaseError("还没有抽取版本：首尾原始帧随 extract 产出")
+    cdir = case.dir(_ctx["cases_root"])
+    state = keyframe_mod.load(cdir)
+    if step == "last" and state.extract and state.extract != case.extract_current:
+        raise CaseError("抽取版本已更新：先把首帧定稿到当前版本，再定尾帧")
+    raw = (cdir / "extracts" / case.extract_current
+           / RAW_FRAME_FILES["first_raw" if step == "first" else "last_raw"])
+    if not raw.is_file():
+        raise CaseError(f"当前抽取版本没有这张原始帧：{raw.name}；重新抽取一次")
+    role = "first_frame" if step == "first" else "last_frame"
+    updated = case_mod.add_assets(name, [(raw, role)], _ctx["cases_root"])
+    new_id = updated.assets[-1].id
+    state.extract = case.extract_current
+    if step == "first":
+        state.first = keyframe_mod.Pick(RAW_PICK_ROUND, 1, new_id)
+        state.last = None
+        hint = "首帧用原始帧定稿；尾帧可以同样用原始帧，或生成重绘候选"
+    else:
+        state.last = keyframe_mod.Pick(RAW_PICK_ROUND, 1, new_id)
+        hint = "尾帧用原始帧定稿，现在可以交接给视频"
+    keyframe_mod.save(cdir, state)
+    info = _info_with_generation(name)
+    info["keyframe_hint"] = hint
+    return info
+
+
+async def api_keyframe_use_raw(request):
+    name = request.path_params["name"]
+    body = await request.json()
+    try:
+        info = await asyncio.to_thread(
+            _keyframe_use_raw, name, str(body.get("step") or "first"))
     except (CaseError, OSError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     return JSONResponse(info)
@@ -2277,16 +2913,31 @@ async def api_keyframe_pick(request):
             return JSONResponse({"error": f"候选图不是 16:9（{width}x{height}）"},
                                 status_code=400)
         if role == "last_frame":
-            # 尾帧必须与当前首帧同宽高；首帧换新时旧尾帧会被废弃，不拿它比。
+            # 尾帧必须与「当前定稿的首帧」同宽高——不是 assets 里最老的那张首帧。
+            # 旧抽取上定稿的首帧已经作废，这时挑尾帧只会拼出一对跨版本的图。
             current = case_mod.load(name, _ctx["cases_root"])
-            first = next((a for a in current.assets if a.role == "first_frame"), None)
+            state = keyframe_mod.load(current.dir(_ctx["cases_root"]))
+            if state.extract and current.extract_current \
+                    and state.extract != current.extract_current:
+                return JSONResponse(
+                    {"error": "抽取版本已更新：先生成并挑选首帧定稿，再挑尾帧"},
+                    status_code=400)
+            first = (next((a for a in current.assets if a.id == state.first.asset), None)
+                     if state.first is not None else None)
+            if first is None:
+                # 还没有定稿首帧（例如 gen 的首尾帧入口）：退回最近加入的那张首帧稿。
+                first = next((a for a in reversed(current.assets)
+                              if a.role == "first_frame"), None)
             if first is not None:
                 other = await asyncio.to_thread(
                     _media_meta, first.resolved(current, _ctx["cases_root"]), "image")
                 if (int(other.get("width") or 0),
                         int(other.get("height") or 0)) != (width, height):
                     return JSONResponse(
-                        {"error": "首帧与尾帧宽高不一致，请重新出图"}, status_code=400)
+                        {"error": (f"尾帧与当前首帧 {first.id} 的宽高不一致"
+                                   f"（{other.get('width')}x{other.get('height')} vs "
+                                   f"{width}x{height}）；请按首帧的分辨率重新出图")},
+                        status_code=400)
         info = await asyncio.to_thread(_keyframe_accept, name, role, round_name,
                                        index, target)
     except (CaseError, OSError, VideoIOError) as exc:
@@ -2306,13 +2957,14 @@ def _keyframe_accept(name: str, role: str, round_name: str, index: int,
     case = case_mod.load(name, _ctx["cases_root"])
     cdir = case.dir(_ctx["cases_root"])
     state = keyframe_mod.load(cdir)
-    state.extract = case.extract_current
     old_last = state.last
     same_first = (role == "first_frame" and state.first is not None
                   and state.first.round == round_name and state.first.index == index)
     updated = case_mod.add_assets(name, [(target, role)], _ctx["cases_root"])
     new_id = updated.assets[-1].id
     if role == "first_frame":
+        # 首帧是这一对定稿的锚：它落下时，这一对才属于当前抽取版本。
+        state.extract = case.extract_current
         state.first = keyframe_mod.Pick(round_name, index, new_id)
         if not same_first:
             state.last = None
@@ -2324,6 +2976,7 @@ def _keyframe_accept(name: str, role: str, round_name: str, index: int,
                 case_mod.set_submit_selected(name, selected, _ctx["cases_root"])
         hint = "首帧已定稿；尾帧不会自动生成，点「生成尾帧候选」提交"
     else:
+        # 尾帧跟着当前首帧走，不改写版本锚点（过期状态在挑片入口已经拦住）。
         state.last = keyframe_mod.Pick(round_name, index, new_id)
         keyframe_mod.save(cdir, state)
         hint = "尾帧已定稿"
@@ -2332,7 +2985,12 @@ def _keyframe_accept(name: str, role: str, round_name: str, index: int,
     return info
 
 
-async def keyframe_img(request):
+async def round_img(request):
+    """一轮结果的第 N 张图：按 ``<case>/<round>/run.json`` 的 results 下标取。
+
+    与 flow 无关：首尾帧工作台、patchimg 与 fullRedrawImg 的候选网格都从这里
+    取图；名字里不再带 keyframe，它取的是轮次结果，不是首尾帧专用。
+    """
     name = request.path_params["name"]
     round_name = request.path_params["round"]
     try:
@@ -2399,7 +3057,8 @@ async def api_params(request):
     resolution = str(body.get("resolution") or "")
     scale = str(body.get("scale") or "")
     if not any(body.get(k) is not None for k in
-               ("model_id", "resolution", "scale", "mode", "aspect_ratio",
+               ("video_model_id", "image_model_id", "resolution", "scale",
+                "mode", "aspect_ratio",
                 "session_id", "project_id", "episode")):
         return JSONResponse({"error": "没有要保存的参数"}, status_code=400)
     argv = ["params", "save", "--job", name]
@@ -2407,7 +3066,8 @@ async def api_params(request):
         argv += ["--resolution", resolution]
     if scale:
         argv += ["--scale", scale]
-    for field, flag in (("model_id", "--model-id"),
+    for field, flag in (("video_model_id", "--video-model-id"),
+                        ("image_model_id", "--image-model-id"),
                         ("mode", "--mode"),
                         ("aspect_ratio", "--aspect-ratio"),
                         ("session_id", "--session-id"),
@@ -2437,8 +3097,11 @@ async def api_draft(request):
         case = case_mod.load(name, _ctx["cases_root"])
     except CaseError:
         return JSONResponse({"error": "no such case"}, status_code=404)
-    if case.flow != "patch":
-        return JSONResponse({"error": "fullredraw 没有 pick 草稿"}, status_code=400)
+    if case.flow not in ("patch", "patchimg"):
+        return JSONResponse(
+            {"error": f"{case.flow} 没有选区草稿：视口与 inner 只用于 "
+                      f"patch（视频局部）与 patchimg（图片局部）"},
+            status_code=400)
     body = await request.json()
     sections = {}
     for key in ("viewport", "inner", "frames"):
@@ -2446,16 +3109,41 @@ async def api_draft(request):
             sections[key] = body[key]
     if not sections:
         return JSONResponse({"error": "没有要写的段"}, status_code=400)
-    case_mod.set_draft(name, root=_ctx["cases_root"], **sections)
+    try:
+        case_mod.set_draft(name, root=_ctx["cases_root"], **sections)
+    except CaseError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     _stores.pop(name, None)
     return JSONResponse(_case_info(name))
 
 
-async def api_viewport(request):
-    name = request.path_params["name"]
+def _selection_store(name: str) -> tuple[PreviewStore | None, JSONResponse | None]:
+    """选区类端点的唯一 flow 判定：视口/inner 草稿只属于 patch 与 patchimg。
+
+    fullredraw 的几何都由 pad 决定，图片全幅流程由 extract 决定，两者都没有
+    草稿可写——在这里一次拒掉，端点里不再各自判断，也不会把非法段写进
+    case.toml 才在 ``set_draft`` 里炸成 500。
+    """
+    try:
+        case = case_mod.load(name, _ctx["cases_root"])
+    except CaseError:
+        return None, JSONResponse({"error": "no such case"}, status_code=404)
+    if case.flow not in ("patch", "patchimg"):
+        return None, JSONResponse(
+            {"error": (f"{case.flow} 没有选区草稿：视口与 inner 只用于 "
+                       f"patch（视频局部）与 patchimg（图片局部）")},
+            status_code=400)
     store = get_store(name)
     if store is None:
-        return JSONResponse({"error": "no such case"}, status_code=404)
+        return None, JSONResponse({"error": "no such case"}, status_code=404)
+    return store, None
+
+
+async def api_viewport(request):
+    name = request.path_params["name"]
+    store, bad = _selection_store(name)
+    if bad is not None:
+        return bad
     body = await request.json()
     old = dict(store.case.viewport or {})
     await asyncio.to_thread(store.set_viewport_from_erp_click,
@@ -2468,9 +3156,9 @@ async def api_viewport(request):
 async def api_viewport_size(request):
     """切换选区视口分辨率；档位由 PATCH_VIEWPORT_OPTIONS 提供。"""
     name = request.path_params["name"]
-    store = get_store(name)
-    if store is None:
-        return JSONResponse({"error": "no such case"}, status_code=404)
+    store, bad = _selection_store(name)
+    if bad is not None:
+        return bad
     body = await request.json()
     try:
         width = int(body.get("width") or 0)
@@ -2499,9 +3187,9 @@ async def api_fov(request):
     只改 fov，不缩放 inner：inner 的像素框保持不动，覆盖角度随 fov 变大。
     """
     name = request.path_params["name"]
-    store = get_store(name)
-    if store is None:
-        return JSONResponse({"error": "no such case"}, status_code=404)
+    store, bad = _selection_store(name)
+    if bad is not None:
+        return bad
     if store.case.flow != "patch":
         return JSONResponse({"error": "只有 patch 有 fov 草稿"}, status_code=400)
     body = await request.json()
@@ -2524,9 +3212,9 @@ async def api_fov(request):
 
 async def api_inner(request):
     name = request.path_params["name"]
-    store = get_store(name)
-    if store is None:
-        return JSONResponse({"error": "no such case"}, status_code=404)
+    store, bad = _selection_store(name)
+    if bad is not None:
+        return bad
     body = await request.json()
     # 客户端契约：提交的是预览图上的 0..1 分数（与预览分辨率、CSS 尺寸都无关）
     fx, fy, fw, fh = (float(body[k]) for k in ("fx", "fy", "fw", "fh"))
@@ -2544,9 +3232,9 @@ async def api_inner(request):
 
 async def api_nudge(request):
     name = request.path_params["name"]
-    store = get_store(name)
-    if store is None:
-        return JSONResponse({"error": "no such case"}, status_code=404)
+    store, bad = _selection_store(name)
+    if bad is not None:
+        return bad
     body = await request.json()
     old = dict(store.case.viewport or {})
     yaw, pitch = await asyncio.to_thread(
@@ -2563,16 +3251,30 @@ async def api_reset_draft(request):
         case = case_mod.load(name, _ctx["cases_root"])
     except CaseError:
         return JSONResponse({"error": "no such case"}, status_code=404)
+    if case.flow not in ("patch", "patchimg"):
+        return JSONResponse(
+            {"error": f"{case.flow} 没有选区草稿，不存在可回退的选区"},
+            status_code=400)
     body = await request.json()
     version = body.get("version") or case.extract_current
     if not version:
         return JSONResponse({"error": "还没有任何抽取版本可回退"}, status_code=400)
-    sj = case.dir(_ctx["cases_root"]) / "extracts" / version / "clip.json"
+    d = case.dir(_ctx["cases_root"]) / "extracts" / version
+    # 视频 patch 的选区冻结在 clip.json 的段里，patchimg 冻结在 image.json 里。
+    marker = "clip.json" if case.flow == "patch" else "image.json"
+    sj = d / marker
     if not sj.is_file():
-        return JSONResponse({"error": f"抽取 {version} 缺 clip.json"}, status_code=400)
-    seg = json.loads(sj.read_text(encoding="utf-8"))["segments"][0]
-    case_mod.set_draft(name, root=_ctx["cases_root"],
-                       viewport=seg["viewport"], inner=seg["inner"])
+        return JSONResponse({"error": f"抽取 {version} 缺 {marker}"}, status_code=400)
+    if case.flow == "patch":
+        seg = json.loads(sj.read_text(encoding="utf-8"))["segments"][0]
+        viewport, inner = seg["viewport"], seg["inner"]
+    else:
+        try:
+            geometry = sidecar_mod.load_image(sj)
+        except (OSError, ValueError, TypeError) as exc:
+            return JSONResponse({"error": f"{marker} 不合法：{exc}"}, status_code=400)
+        viewport, inner = asdict(geometry.viewport), asdict(geometry.inner)
+    case_mod.set_draft(name, root=_ctx["cases_root"], viewport=viewport, inner=inner)
     _stores.pop(name, None)
     store = get_store(name)
     if store is None:
@@ -2617,11 +3319,21 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
             argv += ["--duration", str(body["duration"])]
         if body.get("aspect_ratio"):
             argv += ["--aspect-ratio", str(body["aspect_ratio"])]
+        # 图片流程的三个参数：候选张数、图片模型、扣额度的项目会话。
+        if body.get("num") is not None:
+            argv += ["--num", str(body["num"])]
+        if body.get("image_model_id") is not None:
+            argv += ["--image-model-id", str(body["image_model_id"])]
+        if body.get("session_id") is not None:
+            argv += ["--session-id", str(body["session_id"])]
         return argv
     if op == "adopt":
         argv = vrstudio_argv("generate", "adopt", "--case", name, *root)
         if body.get("round") and body["round"] != "latest":
             argv += ["--round", body["round"]]
+        # 图片流程必须显式挑候选，CLI 在缺 --index 时直接拒绝。
+        if body.get("index") is not None:
+            argv += ["--index", str(int(body["index"]))]
         return argv
     if op == "merge":
         argv = vrstudio_argv("merge", "--case", name, "-q", *root)
@@ -2640,6 +3352,29 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
                              "--manifest", str(manifests[0]),
                              "--out", str(out.with_suffix(".mp4")),
                              "--quiet")
+    if op == "relight":
+        # 槽位解析、产物命名与 [relight] current 的回写都在 CLI 一处（唯一权威点），
+        # web 只负责把面板参数翻成 flag。
+        argv = vrstudio_argv("relight", "--case", name, *root)
+        sample = body.get("sample")
+        if sample:
+            argv += ["--sample", str(int(sample))]
+        else:
+            if body.get("ref_frame") is not None:
+                argv += ["--ref-frame", str(int(body["ref_frame"]))]
+            if body.get("crf") is not None:
+                argv += ["--crf", str(int(body["crf"]))]
+        if body.get("scene"):
+            argv += ["--scene", str(body["scene"])]
+        for key, flag in (("strength", "--strength"),
+                          ("local_shading", "--local-shading"),
+                          ("clip_knee", "--clip-knee"),
+                          ("clip_max", "--clip-max")):
+            if body.get(key) is not None:
+                argv += [flag, str(body[key])]
+        if body.get("highlight_clip"):
+            argv += ["--highlight-clip"]
+        return [*argv, "--quiet"]
     raise CaseError(f"未知操作：{op}")
 
 
@@ -2806,6 +3541,13 @@ async def api_proxy(request):
         case = case_mod.load(name, _ctx["cases_root"])
     except CaseError:
         return JSONResponse({"error": "no such case"}, status_code=404)
+    if case.flow in case_mod.IMAGE_FLOWS:
+        return JSONResponse(
+            {"error": "图片流程没有预览代理：图直接按原图打开"}, status_code=400)
+    if case.flow == "relight":
+        # 底版不是 [source]，源片代理的生成入口没有它；页面按原分辨率播即可。
+        return JSONResponse(
+            {"error": "relight 没有源片代理：对比页按原分辨率播放"}, status_code=400)
     file = request.query_params.get("file")
     if file is None and request.method == "POST":
         try:
@@ -2842,9 +3584,15 @@ async def api_proxy(request):
 
 
 async def api_sources(request):
-    vids = sorted(p for p in sources_dir().iterdir()
-                  if p.is_file() and p.suffix.lower() in _VIDEO_EXTS)
-    return JSONResponse({"dir": str(sources_dir()), "files": [p.name for p in vids]})
+    """sources/ 里的可选源文件：视频流程用视频，图片流程用 2:1 图片。"""
+    files = sorted(p for p in sources_dir().iterdir()
+                   if p.is_file() and p.suffix.lower() in (_VIDEO_EXTS | _IMAGE_EXTS))
+    return JSONResponse({
+        "dir": str(sources_dir()),
+        "files": [p.name for p in files],
+        "videos": [p.name for p in files if p.suffix.lower() in _VIDEO_EXTS],
+        "images": [p.name for p in files if p.suffix.lower() in _IMAGE_EXTS],
+    })
 
 
 async def api_browse(request):
@@ -2877,15 +3625,16 @@ routes = [
     Route("/img/{name}/{file}", img),
     Route("/file", file_open),
     Route("/img/asset/{name}/{file}", asset_img),
-    Route("/img/keyframe/{name}/{round}/{index}", keyframe_img),
+    Route("/img/round/{name}/{round}/{index}", round_img),
     Route("/video/source/{name}", video_source),
     Route("/video/proxy/{name}", video_proxy),
     Route("/video/outproxy/{name}/{file}", video_out_proxy),
     Route("/api/cases", api_cases, methods=["GET", "POST"]),
-    Route("/api/case/{name}", api_case),
+    Route("/api/case/{name}", api_case, methods=["GET", "DELETE"]),
     Route("/api/case/{name}/lock", api_case_lock, methods=["GET", "POST", "DELETE"]),
     Route("/api/case/{name}/owner", api_case_owner, methods=["POST"]),
     Route("/api/case/{name}/draft", api_draft, methods=["POST"]),
+    Route("/api/case/{name}/relight", api_relight_draft, methods=["POST"]),
     Route("/api/case/{name}/prompt", api_prompt, methods=["POST"]),
     Route("/api/case/{name}/params", api_params, methods=["POST"]),
     Route("/api/case/{name}/assets", api_assets, methods=["POST"]),
@@ -2898,6 +3647,7 @@ routes = [
     Route("/api/case/{name}/keyframe/run", api_keyframe_run, methods=["POST"]),
     Route("/api/case/{name}/keyframe/rounds", api_keyframe_rounds),
     Route("/api/case/{name}/keyframe/pick", api_keyframe_pick, methods=["POST"]),
+    Route("/api/case/{name}/keyframe/use-raw", api_keyframe_use_raw, methods=["POST"]),
     Route("/api/case/{name}/keyframe/refs", api_keyframe_refs,
           methods=["GET", "PUT"]),
     Route("/api/case/{name}/keyframe/prompt", api_keyframe_prompt,

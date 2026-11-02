@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { roundResultText, roundResultType, visibleRounds } from '@/utils/rounds'
-import type { RoundSummary } from '@/types/case-info'
+import { latestImageRound, roundResultText, roundResultType, visibleRounds } from '@/utils/rounds'
+import type { ImageRound, RoundSummary } from '@/types/case-info'
 
 function round(overrides: Partial<RoundSummary> = {}): RoundSummary {
   return {
@@ -31,5 +31,15 @@ describe('rounds', () => {
     expect(roundResultText(round({ stage: 'prepared', result: 'no' }))).toBe('仅预演')
     expect(roundResultText(round({ stage: 'done', result: 'no' }))).toBe('未出片')
     expect(roundResultType(round({ stage: 'failed', result: 'no' }))).toBe('danger')
+  })
+
+  it('picks the newest image round and tolerates an empty list', () => {
+    const rounds: ImageRound[] = [
+      { round: 'img-b', adopted: false, results: [] },
+      { round: 'img-a', adopted: true, results: [] },
+    ]
+    expect(latestImageRound(rounds)?.round).toBe('img-b')
+    expect(latestImageRound([])).toBeNull()
+    expect(latestImageRound(undefined)).toBeNull()
   })
 })

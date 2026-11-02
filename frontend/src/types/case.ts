@@ -1,4 +1,10 @@
-export type Flow = 'patch' | 'fullredraw' | 'gen'
+export type Flow =
+  | 'patch'
+  | 'fullredraw'
+  | 'gen'
+  | 'patchimg'
+  | 'fullRedrawImg'
+  | 'relight'
 
 export type TaskStatus = 'idle' | 'queued' | 'running' | 'done' | 'failed'
 
@@ -37,6 +43,10 @@ export interface CaseBrief {
 export interface SourcesResponse {
   dir: string
   files: string[]
+  /** 视频流程可选的源视频；旧后端没有该字段时回落到 files。 */
+  videos?: string[]
+  /** 图片流程可选的 2:1 ERP 源图。 */
+  images?: string[]
 }
 
 export interface ModeOption {

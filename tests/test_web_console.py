@@ -876,20 +876,23 @@ def test_params_save_passes_mode_and_aspect(client, fullredraw_case, monkeypatch
     assert "--aspect-ratio" in argv and "16:9" in argv
 
 
-def test_params_save_passes_model_id(client, fullredraw_case, monkeypatch):
+def test_params_save_passes_model_ids(client, fullredraw_case, monkeypatch):
     calls = []
 
     def fake(argv):
         calls.append(argv)
-        return {"model_id": 22, "mode": "firstLastFrame", "resolution": "4K"}
+        return {"video_model_id": 22, "image_model_id": 25,
+                "mode": "firstLastFrame", "resolution": "4K"}
 
     monkeypatch.setattr(web_app, "_vrgen_json", fake)
     r = client.post("/api/case/f1/params",
-                    json={"model_id": 22, "mode": "firstLastFrame",
+                    json={"video_model_id": 22, "image_model_id": 25,
+                          "mode": "firstLastFrame",
                           "resolution": "4K", "aspect_ratio": "16:9"})
     assert r.status_code == 200, r.text
     argv = calls[0]
-    assert "--model-id" in argv and "22" in argv
+    assert "--video-model-id" in argv and "22" in argv
+    assert "--image-model-id" in argv and "25" in argv
     assert "--resolution" in argv and "4K" in argv
     assert "--mode" in argv and "firstLastFrame" in argv
 
@@ -1421,12 +1424,13 @@ def test_keyframe_run_queues_image_argv(client, patch_case, tmp_path, monkeypatc
                         captured.append((op, name, argv)))
     monkeypatch.setattr(web_app, "_current_session", lambda name: 123)
     r = client.post("/api/case/p1/keyframe/run", json={
-        "step": "first", "model_id": 44, "resolution": "2K"})
+        "step": "first", "image_model_id": 44, "resolution": "2K"})
     assert r.status_code == 200, r.text
     op, name, argv = captured[0]
     assert op == "keyframe" and name == "p1"
     assert "image" in argv and "submit" in argv
     assert "--ratio" in argv and "16:9" in argv
+    assert argv[argv.index("--image-model-id") + 1] == "44"
     assert argv[argv.index("--template") + 1] == "keyframe-first"
     assert argv[argv.index("--vars-file") + 1] == "keyframe-vars.toml"
     assert argv[argv.index("--step") + 1] == "first"
@@ -1600,6 +1604,73 @@ def test_keyframe_prompt_uses_vars_file(client, patch_case, tmp_path, monkeypatc
     assert r.json()["vars"] == {"figure": "x", "pose_first": "y"}
 
 
+def test_keyframe_prompt_backfills_new_template_slots(client, patch_case, tmp_path,
+                                                      monkeypatch):
+    """模板新增槽位后，旧草稿按 placeholders 差集补默认值，不需要手工迁移。"""
+    _keyframe_ready(tmp_path, monkeypatch)
+    vars_path = tmp_path / "runs" / "p1" / "keyframe-vars.toml"
+    vars_path.parent.mkdir(parents=True)
+    vars_path.write_text("template = 'keyframe-first'\n[vars]\nfigure = 'x'\n",
+                         encoding="utf-8")
+    state = {"figure": "x"}
+    calls = []
+
+    def fake(argv):
+        calls.append(argv)
+        if argv[1] == "save":
+            for index, item in enumerate(argv):
+                if item == "--set":
+                    key, _, value = argv[index + 1].partition("=")
+                    state[key] = value
+            return {"template": "keyframe-first", "vars": dict(state)}
+        return {"template": "keyframe-first",
+                "vars": dict(state),
+                "placeholders": ["image_roles", "target", "source_first", "figure",
+                                 "pose_first", "preserve", "cleanup"],
+                "computed_keys": ["image_roles"],
+                "rendered": "图1 = 首帧原始图。",
+                "labels": {}, "help": {}}
+
+    monkeypatch.setattr(web_app, "_vrgen_json", fake)
+    r = client.get("/api/case/p1/keyframe/prompt?step=first")
+    assert r.status_code == 200, r.text
+    save = next(call for call in calls if call[1] == "save")
+    joined = " ".join(save)
+    assert "target=人物" in joined
+    assert "cleanup=" in joined
+    assert "preserve=" in joined
+    body = r.json()
+    assert set(body["vars"]) == {"target", "source_first", "figure",
+                                 "pose_first", "preserve", "cleanup"}
+    assert body["vars"]["target"] == "人物"
+
+
+def test_keyframe_prompt_saves_new_slots(client, patch_case, tmp_path, monkeypatch):
+    """槽位随模板演进，保存接口不能再用四个键的白名单拦住新槽位。"""
+    _keyframe_ready(tmp_path, monkeypatch)
+    calls = []
+
+    def fake(argv):
+        calls.append(argv)
+        return {"template": "keyframe-first",
+                "vars": {"target": "三位舞女", "cleanup": "", "subject_last": ""},
+                "rendered": "以图1为底图做局部编辑。",
+                "placeholders": ["image_roles", "target", "cleanup", "subject_last"],
+                "computed_keys": ["image_roles"], "labels": {}, "help": {}}
+
+    monkeypatch.setattr(web_app, "_vrgen_json", fake)
+    r = client.put("/api/case/p1/keyframe/prompt",
+                   json={"step": "first",
+                         "vars": {"target": "三位舞女", "cleanup": "",
+                                  "source_last": "", "subject_last": ""}})
+    assert r.status_code == 200, r.text
+    save = calls[-1]
+    assert "target=三位舞女" in save
+    assert "source_last=" in save
+    assert "subject_last=" in save
+    assert r.json()["vars"]["target"] == "三位舞女"
+
+
 def test_keyframe_pick_first_does_not_submit_a_batch(
         client, patch_case, tmp_path, monkeypatch):
     """定稿只写台账；消耗额度的批次必须由用户点按钮提交（2026-10-26 决策）。"""
@@ -1668,6 +1739,259 @@ def test_keyframe_pointer_must_match_a_live_role(client, patch_case, tmp_path, m
         first=keyframe.Pick("img-a", 1, "i1")))
     info = client.get("/api/case/p1").json()
     assert info["keyframe"]["first"] is None
+
+
+def test_keyframe_stale_only_blocks_what_depends_on_old_picks(client, patch_case,
+                                                              tmp_path, monkeypatch):
+    """抽取版本更新后：提示词能看能改、首帧候选能生成；尾帧与交接才要重定稿。
+
+    首帧生成只用到当前抽取的原始帧与三视图，拿旧定稿去挡它等于让用户没法
+    重新定稿（旧定稿作废，新候选又生不出来）。
+    """
+    d = _mk_extract("p1", tmp_path, "v1")
+    (d / "first_frame_raw.png").write_bytes(b"first")
+    (d / "last_frame_raw.png").write_bytes(b"last")
+    case_mod.set_extract_current("p1", "v1", root=tmp_path)
+    _add_image("p1", tmp_path, "sheet", "subject_ref")
+    monkeypatch.setattr(web_app, "_workdir", lambda: tmp_path / "runs")
+    vars_path = tmp_path / "runs" / "p1" / "keyframe-vars.toml"
+    vars_path.parent.mkdir(parents=True)
+    vars_path.write_text("template = 'keyframe-first'\n[vars]\n", encoding="utf-8")
+    # 定稿挂在旧版本上，case 已重新抽取
+    keyframe.save(case_mod.case_dir("p1", tmp_path), keyframe.State(
+        extract="v0", refs=[keyframe.Ref("i1", "subject_ref")]))
+    case_mod.set_extract_current("p1", "v2", root=tmp_path)
+
+    monkeypatch.setattr(web_app, "_vrgen_json", lambda argv: {
+        "template": "keyframe-first", "vars": {},
+        "rendered": "图1 = 首帧原始图。",
+        "placeholders": ["image_roles", "target", "figure"],
+        "computed_keys": ["image_roles"], "labels": {}, "help": {}})
+
+    r = client.get("/api/case/p1/keyframe/prompt?step=first")
+    assert r.status_code == 200, r.text
+    assert r.json()["rendered"] == "图1 = 首帧原始图。"
+
+    calls = []
+    monkeypatch.setattr(web_app, "_vrgen_json",
+                        lambda argv: calls.append(argv) or {"vars": {}, "rendered": "x"})
+    r = client.put("/api/case/p1/keyframe/prompt",
+                   json={"step": "first", "vars": {"figure": "新外观"}})
+    assert r.status_code == 200, r.text
+    assert "figure=新外观" in calls[-1]
+
+    # 首帧候选照常能生成：入参是当前抽取的原始首帧 + 三视图
+    submitted = []
+    monkeypatch.setattr(web_app, "_current_session", lambda name: 2062569522605504)
+    monkeypatch.setattr(web_app, "_keyframe_ratio", lambda case: "16:9")
+    monkeypatch.setattr(web_app.QUEUE, "submit",
+                        lambda op, name, argv, **kw: submitted.append((op, argv)))
+    r = client.post("/api/case/p1/keyframe/run", json={"step": "first"})
+    assert r.status_code == 200, r.text
+    argv = submitted[0][1]
+    assert argv[argv.index("--step") + 1] == "first"
+    assert "first_frame_raw" in " ".join(argv)
+
+    # 尾帧要的是当前抽取上定稿的首帧，旧定稿不能用
+    r = client.post("/api/case/p1/keyframe/run", json={"step": "last"})
+    assert r.status_code == 400
+    assert "先生成并挑选首帧定稿" in r.json()["error"]
+
+    # 交接用的也是两帧定稿，继续按过期挡住
+    r = client.post("/api/case/p1/keyframe/handoff")
+    assert r.status_code == 400
+    assert "重新定稿" in r.json()["error"]
+
+
+def test_keyframe_last_pick_compares_with_the_current_first_pick(
+        client, patch_case, tmp_path, monkeypatch):
+    """尾帧宽高比对的参照物是「当前定稿的首帧」，不是 assets 里最早的那张首帧。
+
+    dance_move 的实际情况：新首帧是 2K（2048x1152），更早的首帧是 4K；按最早
+    那张比会把同尺寸的新尾帧判成不一致，用户就永远配不出这一对。
+    """
+    _keyframe_ready(tmp_path, monkeypatch)
+    _add_image("p1", tmp_path, "old_first", "first_frame")     # i2：更早的 4K 首帧
+    _add_image("p1", tmp_path, "new_first", "first_frame")     # i3：当前定稿的 2K 首帧
+    cdir = case_mod.case_dir("p1", tmp_path)
+    keyframe.save(cdir, keyframe.State(
+        extract="v1", refs=[keyframe.Ref("i1", "subject_ref")],
+        first=keyframe.Pick("img-new", 1, "i3")))
+
+    sizes = {"old_first": (3840, 2160), "new_first": (2048, 1152),
+             "1": (2048, 1152), "2": (3840, 2160)}
+
+    def meta(path, kind):
+        """按文件内容认图：临时出的候选文件里写的是候选下标。"""
+        raw = Path(path).read_bytes()[:32].decode("utf-8", "replace").strip()
+        key = raw if raw in sizes else Path(path).stem.split("_")[0]
+        width, height = sizes.get(key, (2048, 1152))
+        return {"width": width, "height": height}
+
+    def fake_capture(argv):
+        Path(argv[argv.index("--out") + 1]).write_text(
+            argv[argv.index("--index") + 1], encoding="utf-8")
+        return 0, "ok"
+
+    monkeypatch.setattr(web_app, "_media_meta", meta)
+    monkeypatch.setattr(web_app, "_capture", fake_capture)
+    run_dir = tmp_path / "runs" / "p1" / "img-last"
+    run_dir.mkdir(parents=True)
+    for index in (1, 2):
+        (run_dir / f"result_{index}.png").write_bytes(b"c")
+    (run_dir / "run.json").write_text(json.dumps({
+        "key": "last-round", "results": [str(run_dir / "result_1.png"),
+                                        str(run_dir / "result_2.png")]}),
+        encoding="utf-8")
+
+    # 与当前首帧同为 2K：放行
+    r = client.post("/api/case/p1/keyframe/pick",
+                    json={"round": "img-last", "index": 1, "role": "last_frame"})
+    assert r.status_code == 200, r.text
+    assert keyframe.load(cdir).last is not None
+
+    # 4K 候选与当前 2K 首帧不一致：拒绝，并指明比的是哪张首帧
+    r = client.post("/api/case/p1/keyframe/pick",
+                    json={"round": "img-last", "index": 2, "role": "last_frame"})
+    assert r.status_code == 400
+    assert "当前首帧 i3" in r.json()["error"]
+
+
+def test_keyframe_last_pick_rejected_when_the_pair_is_stale(
+        client, patch_case, tmp_path, monkeypatch):
+    """过期状态下只挑尾帧会拼出一对跨版本的图，入口直接拒绝。"""
+    _keyframe_ready(tmp_path, monkeypatch)
+    _add_image("p1", tmp_path, "sheet2", "first_frame")
+    cdir = case_mod.case_dir("p1", tmp_path)
+    keyframe.save(cdir, keyframe.State(
+        extract="v0", refs=[keyframe.Ref("i1", "subject_ref")],
+        first=keyframe.Pick("img-a", 1, "i2")))
+    case_mod.set_extract_current("p1", "v2", root=tmp_path)
+    run_dir = tmp_path / "runs" / "p1" / "img-last"
+    run_dir.mkdir(parents=True)
+    (run_dir / "result_1.png").write_bytes(b"c")
+    (run_dir / "run.json").write_text(json.dumps({
+        "key": "k", "results": [str(run_dir / "result_1.png")]}), encoding="utf-8")
+    monkeypatch.setattr(web_app, "_media_meta",
+                        lambda path, kind: {"width": 2048, "height": 1152})
+    monkeypatch.setattr(web_app, "_capture", lambda argv: (0, "ok"))
+
+    r = client.post("/api/case/p1/keyframe/pick",
+                    json={"round": "img-last", "index": 1, "role": "last_frame"})
+    assert r.status_code == 400
+    assert "先生成并挑选首帧定稿" in r.json()["error"]
+    assert keyframe.load(cdir).last is None
+
+
+def test_keyframe_use_raw_frames_for_both_steps(client, patch_case, tmp_path, monkeypatch):
+    """「直接用原始帧」：不生成、不花额度，两帧都定了就能交接。"""
+    _keyframe_ready(tmp_path, monkeypatch)
+    cdir = case_mod.case_dir("p1", tmp_path)
+
+    r = client.post("/api/case/p1/keyframe/use-raw", json={"step": "first"})
+    assert r.status_code == 200, r.text
+    state = keyframe.load(cdir)
+    assert state.extract == "v1"
+    assert state.first is not None and state.last is None
+    assets = case_mod.load("p1", tmp_path).assets
+    assert assets[-1].role == "first_frame"
+    assert state.first.asset == assets[-1].id
+    info = r.json()
+    assert info["keyframe"]["first"]["source"] == "raw"
+
+    r = client.post("/api/case/p1/keyframe/use-raw", json={"step": "last"})
+    assert r.status_code == 200, r.text
+    state = keyframe.load(cdir)
+    assert state.last is not None
+    assets = case_mod.load("p1", tmp_path).assets
+    assert assets[-1].role == "last_frame"
+
+    modes = []
+    monkeypatch.setattr(web_app, "_save_gen_mode",
+                        lambda name, mode: modes.append(mode) or None)
+    r = client.post("/api/case/p1/keyframe/handoff")
+    assert r.status_code == 200, r.text
+    assert modes == ["firstLastFrame"]
+    assert r.json()["submit_selected"] == [state.first.asset, state.last.asset]
+
+
+def test_keyframe_use_raw_needs_the_current_extract_frames(client, patch_case,
+                                                           tmp_path, monkeypatch):
+    _keyframe_ready(tmp_path, monkeypatch)
+    (case_mod.case_dir("p1", tmp_path) / "extracts" / "v1"
+     / "first_frame_raw.png").unlink()
+    r = client.post("/api/case/p1/keyframe/use-raw", json={"step": "first"})
+    assert r.status_code == 400
+    assert "原始帧" in r.json()["error"]
+
+
+def test_keyframe_use_raw_last_is_guarded_but_first_reanchors(
+        client, patch_case, tmp_path, monkeypatch):
+    """尾帧要跟当前版本的首帧配对；首帧本身就是版本锚，过期时正好用它重锚。"""
+    _keyframe_ready(tmp_path, monkeypatch)
+    cdir = case_mod.case_dir("p1", tmp_path)
+    keyframe.save(cdir, keyframe.State(extract="v0",
+                                       refs=[keyframe.Ref("i1", "subject_ref")]))
+    # 新抽取也有自己的两张原始帧
+    d = _mk_extract("p1", tmp_path, "v2")
+    (d / "first_frame_raw.png").write_bytes(b"first2")
+    (d / "last_frame_raw.png").write_bytes(b"last2")
+    case_mod.set_extract_current("p1", "v2", root=tmp_path)
+
+    r = client.post("/api/case/p1/keyframe/use-raw", json={"step": "last"})
+    assert r.status_code == 400
+    assert "先把首帧定稿到当前版本" in r.json()["error"]
+
+    r = client.post("/api/case/p1/keyframe/use-raw", json={"step": "first"})
+    assert r.status_code == 200, r.text
+    assert keyframe.load(cdir).extract == "v2"
+
+
+def test_keyframe_use_raw_rejects_other_flows(client, tmp_path, monkeypatch):
+    case_mod.create("g7", "gen", root=tmp_path)
+    _add_image("g7", tmp_path, "first", "first_frame")
+    monkeypatch.setattr(web_app, "_workdir", lambda: tmp_path / "runs")
+    r = client.post("/api/case/g7/keyframe/use-raw", json={"step": "first"})
+    assert r.status_code == 400
+    assert "只接 patch" in r.json()["error"]
+
+
+def test_duration_gate_names_the_mode_limit(client, patch_case, tmp_path):
+    """clip 时长超出模式区间时，提交前的理由要说清是哪一项超了。
+
+    平台只会回「素材 clip 不合约」；16.2 秒的 clip 对上 allMediaRef 的 15 秒
+    上限就是典型场景（dance_move 2026-10-30）。
+    """
+    cdir = case_mod.case_dir("p1", tmp_path)
+    d = cdir / "extracts" / "v1"
+    d.mkdir(parents=True)
+    (d / "clip.json").write_text(json.dumps({
+        "erp_width": 1920, "erp_height": 960, "fps": 30.0,
+        "segments": [{"id": "s0", "frame_start": 0, "frame_end": 479,
+                      "viewport": VIEWPORT, "inner": INNER}]}), encoding="utf-8")
+    case_mod.set_extract_current("p1", "v1", root=tmp_path)
+    _add_image("p1", tmp_path, "clip_ref", "subject_ref")
+    case_mod.set_submit_selected("p1", ["i1"], root=tmp_path)
+    case = case_mod.load("p1", tmp_path)
+
+    def run_gate(seconds_note: dict) -> dict:
+        info = {"gates": {"generate": {"ok": False, "ready": True}},
+                "generation_params": {"modes": [{"value": "allMediaRef",
+                                                 "duration": {"min": 4, "max": 15}}],
+                                      **seconds_note}}
+        web_app._apply_mode_gate(info, case, "allMediaRef")
+        return info["gates"]["generate"]
+
+    gate = run_gate({})
+    assert gate["ready"] is False
+    assert "16 秒" in gate["reason"] and "4–15 秒" in gate["reason"]
+
+    # 缩到 15 秒以内（450 帧）就不再挡
+    (d / "clip.json").write_text(json.dumps({
+        "erp_width": 1920, "erp_height": 960, "fps": 30.0,
+        "segments": [{"id": "s0", "frame_start": 0, "frame_end": 449,
+                      "viewport": VIEWPORT, "inner": INNER}]}), encoding="utf-8")
+    assert run_gate({})["ready"] is True
 
 
 def test_keyframe_gate_states(client, patch_case, tmp_path, monkeypatch):

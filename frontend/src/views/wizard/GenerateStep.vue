@@ -15,11 +15,13 @@ import GenerateSubmitList from '@/components/generate/GenerateSubmitList.vue'
 import GeneratePrompt from '@/components/generate/GeneratePrompt.vue'
 import GenerateResults from '@/components/generate/GenerateResults.vue'
 import GenerateSubmitBar from '@/components/generate/GenerateSubmitBar.vue'
+import ImageGeneratePanel from '@/components/generate/ImageGeneratePanel.vue'
 import { defaultRole } from '@/constants/assetRoles'
 import { useCaseSaveQueue } from '@/composables/useCaseSaveQueue'
 import { useCaseTasks } from '@/composables/useCaseTasks'
 import { buildPromptVariables, shouldExpirePreview } from '@/utils/prompt'
 import { visibleRounds } from '@/utils/rounds'
+import { IMAGE_AUTO_ROLES, IMAGE_ROLE_MODE } from '@/utils/roles'
 import { aggregateSaveState, type SaveState } from '@/utils/saveState'
 import type { PromptVariable } from '@/types/case'
 import type { ReferenceRow } from '@/types/reference'
@@ -29,6 +31,7 @@ import type {
   GenerationParams,
   InputOption,
   ModeInfo,
+  ModelOption,
   OutputOption,
   RoundSummary,
 } from '@/types/case-info'
@@ -42,6 +45,17 @@ const emit = defineEmits<{
 }>()
 
 const caseName = computed(() => props.caseName)
+/** 图片流程（patchimg / fullRedrawImg）与视频流程的生成区走两套控件。 */
+const isImageFlow = computed(
+  () => props.info.flow === 'patchimg' || props.info.flow === 'fullRedrawImg',
+)
+/**
+ * 素材角色词表按视频生成模式过滤（见 utils/roles）；图片流程没有模式字段，
+ * 用 IMAGE_ROLE_MODE 这一个固定上下文去挑图片参考角色。
+ */
+const submitMode = computed(() => (isImageFlow.value ? IMAGE_ROLE_MODE : mode.value))
+/** 图片流程的基图由装配器附带，不出现在角色下拉里。 */
+const excludedRoles = computed(() => (isImageFlow.value ? IMAGE_AUTO_ROLES : []))
 
 const promptVars = ref<PromptVariable[]>([])
 const promptRendered = ref('')
@@ -99,6 +113,32 @@ const generationParams = ref<GenerationParams | null>(null)
 const modeOptions = ref<ModeInfo[]>([])
 const resolutionOptions = ref<OutputOption[]>([])
 const scaleOptions = ref<InputOption[]>([])
+const videoModelOptions = ref<ModelOption[]>([])
+const imageModelOptions = ref<ModelOption[]>([])
+const imageModelsError = ref('')
+const videoModelId = ref<number | null>(null)
+const imageModelId = ref<number | null>(null)
+/** 图片流程的候选张数（1..4）；只随本次提交生效，不写 params。 */
+const imageNum = ref(1)
+
+/** 保存的模型 id 可能不在当前清单里（下架/改名）；补一条占位项，下拉框才不会空白。 */
+function withCurrentModel(options: ModelOption[], id: number | null): ModelOption[] {
+  if (id == null || id <= 0 || options.some((item) => item.id === id)) return options
+  return [{ id, name: `模型 #${id}`, description: '不在当前清单里' }, ...options]
+}
+
+const videoModelChoices = computed(() =>
+  withCurrentModel(videoModelOptions.value, videoModelId.value),
+)
+const imageModelChoices = computed(() =>
+  withCurrentModel(imageModelOptions.value, imageModelId.value),
+)
+
+/** 图片档固定 1K/2K/4K；params 没给清单时用这三档兜底。 */
+const imageResolutionValues = computed(() => {
+  const values = resolutionOptions.value.map((item) => item.value)
+  return values.length ? values : ['1K', '2K', '4K']
+})
 
 const selectedCount = computed(() => submitRows.value.length)
 
@@ -117,8 +157,11 @@ const statusDetail = ref('')
 const previewPassedSig = ref<string | null>(null)
 const activeTask = ref<TaskView | null>(null)
 const adoptingRound = ref<string | null>(null)
+/** 图片候选的选用请求键（round:index）；与视频的 adoptingRound 分开。 */
+const adoptingImageKey = ref<string | null>(null)
 const activeKind = ref<'dry_run' | 'submit' | 'adopt' | null>(null)
 const activeStartedAt = ref(0)
+let extractStartedAt = 0
 
 const {
   tasks: caseTasks,
@@ -127,6 +170,11 @@ const {
 } = useCaseTasks(
   computed(() => props.caseName),
   ['dry_run', 'submit', 'adopt'],
+)
+// 图片流程的抽取入口在本页，单独轮询，避免把 extract 混进视频页的「最近任务」。
+const { tasks: extractTasks, start: startExtractTasks } = useCaseTasks(
+  computed(() => props.caseName),
+  ['extract'],
 )
 
 const submitRows = computed<ReferenceRow[]>(() => {
@@ -160,6 +208,20 @@ function assetById(id: string): AssetDetail | undefined {
   return (props.info.assets ?? []).find((asset) => asset.id === id)
 }
 
+/**
+ * 档位与模型清单只存在于 params 里，且随模型、模式、比例变化。
+ * 保存成功与整页刷新都走这里，避免“只换模型 id、不换清单”的半更新。
+ */
+function applyParamsLists(params: GenerationParams): void {
+  generationParams.value = params
+  modeOptions.value = params.modes ?? []
+  resolutionOptions.value = params.output ?? []
+  scaleOptions.value = params.input ?? []
+  videoModelOptions.value = params.models ?? []
+  imageModelOptions.value = params.image_models ?? []
+  imageModelsError.value = params.image_models_error ?? ''
+}
+
 function applyInfo(data: CaseInfo): void {
   syncing = true
 
@@ -182,13 +244,15 @@ function applyInfo(data: CaseInfo): void {
   if (params?.error) {
     paramsError.value = params.error
   } else if (params && !paramsDirty) {
-    generationParams.value = params
-    modeOptions.value = params.modes ?? []
-    resolutionOptions.value = params.output ?? []
-    scaleOptions.value = params.input ?? []
+    applyParamsLists(params)
     const current = params.current
     if (current) {
-      if (modeOptions.value.some((item) => item.value === current.mode)) {
+      if (isImageFlow.value) {
+        // 图片流程没有视频的生成模式；modeOptions 可能为空，别保留视频默认值。
+        mode.value = modeOptions.value.some((item) => item.value === current.mode)
+          ? current.mode
+          : ''
+      } else if (modeOptions.value.some((item) => item.value === current.mode)) {
         mode.value = current.mode
       }
       if (resolutionOptions.value.some((item) => item.value === current.resolution)) {
@@ -205,6 +269,11 @@ function applyInfo(data: CaseInfo): void {
       }
     }
     duration.value = params.fixed?.duration_s ? String(params.fixed.duration_s) : 'auto'
+    videoModelId.value = params.fixed?.video_model_id ?? null
+    imageModelId.value = params.fixed?.image_model_id ?? null
+    if (params.fixed?.num) {
+      imageNum.value = Math.min(4, Math.max(1, Number(params.fixed.num)))
+    }
     paramsError.value = ''
   }
   void nextTick(() => {
@@ -316,8 +385,12 @@ const durationOptions = computed<{ value: string; label: string }[]>(() => {
   if (!duration || duration.type !== 'range' || !duration.min || !duration.max) {
     return [{ value: 'auto', label: duration?.type === '' ? '自动（由母版决定）' : '自动' }]
   }
-  const autoLabel = generationParams.value?.auto_duration_s
-    ? `自动（约 ${generationParams.value.auto_duration_s} 秒）`
+  // clip 推导出的自动时长可能超出当前模式的区间（例如 16.2 秒的 clip 对上
+  // allMediaRef 的 15 秒上限）；下拉里如实标出来，否则只看到「约 17 秒」会以为能用。
+  const auto = generationParams.value?.fixed?.duration_s ?? generationParams.value?.auto_duration_s
+  const overflow = typeof auto === 'number' && auto > duration.max
+  const autoLabel = typeof auto === 'number'
+    ? `自动（约 ${auto} 秒${overflow ? `，超出 ${duration.max} 秒上限` : ''}）`
     : '自动'
   const options = [{ value: 'auto', label: autoLabel }]
   for (let value = duration.min; value <= duration.max; value += 1) {
@@ -354,25 +427,36 @@ async function flushPromptSaves(): Promise<boolean> {
   }
 }
 
+function sessionBody(): Pick<SaveParamsPayload, 'session_id' | 'project_id' | 'episode'> {
+  if (selectedSession.value === '') return {}
+  const sessionId = Number(selectedSession.value)
+  if (sessionId) {
+    return {
+      session_id: sessionId,
+      project_id: Number(selectedProject.value) || 0,
+      episode: Number(selectedEpisode.value) || 0,
+    }
+  }
+  return { session_id: 0, project_id: 0, episode: 0 }
+}
+
 function paramsBody(): SaveParamsPayload {
+  if (isImageFlow.value) {
+    // 图片流程只认识分辨率、图片模型与计费会话；mode/aspect 不属于它。
+    const body: SaveParamsPayload = {}
+    if (resolution.value) body.resolution = resolution.value
+    if (imageModelId.value != null) body.image_model_id = imageModelId.value
+    return { ...body, ...sessionBody() }
+  }
   const body: SaveParamsPayload = {
     mode: mode.value,
     aspect_ratio: ratio.value,
   }
   if (resolution.value) body.resolution = resolution.value
   if (scale.value) body.scale = scale.value
-  if (selectedSession.value !== '') {
-    const sessionId = Number(selectedSession.value)
-    body.session_id = Number.isFinite(sessionId) ? sessionId : 0
-    if (sessionId) {
-      body.project_id = Number(selectedProject.value) || 0
-      body.episode = Number(selectedEpisode.value) || 0
-    } else {
-      body.project_id = 0
-      body.episode = 0
-    }
-  }
-  return body
+  if (videoModelId.value != null) body.video_model_id = videoModelId.value
+  if (imageModelId.value != null) body.image_model_id = imageModelId.value
+  return { ...body, ...sessionBody() }
 }
 
 const paramsSaveQueue = useCaseSaveQueue<SaveParamsPayload>(
@@ -383,7 +467,8 @@ const paramsSaveQueue = useCaseSaveQueue<SaveParamsPayload>(
       const data = await saveParams(entry.caseName, entry.payload)
       if (entry.caseName !== caseName.value) return
       if (data.generation_params) {
-        generationParams.value = data.generation_params
+        // 保存后的清单才是新模型的档位；这里不刷新，下拉会一直停在上一个模型。
+        applyParamsLists(data.generation_params)
         paramsError.value = data.generation_params.error ?? ''
       }
       emit('updated', data)
@@ -412,7 +497,7 @@ async function persistParams(): Promise<boolean> {
   try {
     const data = await saveParams(name, paramsBody())
     if (name === caseName.value && data.generation_params) {
-      generationParams.value = data.generation_params
+      applyParamsLists(data.generation_params)
       paramsError.value = data.generation_params.error ?? ''
     }
     emit('updated', data)
@@ -433,58 +518,14 @@ function scheduleParamsSave(): void {
   paramsSaveQueue.schedule(caseName.value, 'params', paramsBody())
 }
 
-type GenerationPreset = '4k' | '1080p'
-
-/** 两条 4K 路线共用的模型预设；4K 需要 Seedance 2.0（22），1080p 对照用 2.5（37）。 */
-async function applyPreset(preset: GenerationPreset): Promise<void> {
-  if (!caseName.value || paramsSaving.value) return
-  const name = caseName.value
-  const viewportWidth = props.info.viewport?.width ?? 0
-  if (preset === '4k' && viewportWidth < 3840) {
-    ElMessage.warning('当前视口不是 3840×2160；4K 路线建议先在 Pick 页切到 4K 视口')
-  }
-  if (preset === '1080p' && viewportWidth >= 3840) {
-    ElMessage.warning('视口是 4K，1080p 输出会在贴回时被放大；只作对照用')
-  }
-  if (paramsSaveQueue.has(name)) {
-    const queued = await paramsSaveQueue.flush(name)
-    if (!queued) paramsSaveQueue.cancel(name)
-  }
-  const payload: SaveParamsPayload =
-    preset === '4k'
-      ? {
-          model_id: 22,
-          // 已经在 4K 可用的两种模式里就保持，否则回到首尾帧。
-          mode: ['firstLastFrame', 'allMediaRef'].includes(mode.value)
-            ? mode.value
-            : 'firstLastFrame',
-          resolution: '4K',
-          aspect_ratio: '16:9',
-        }
-      : { model_id: 37, mode: 'videoEdit', resolution: '1080p', aspect_ratio: 'auto' }
-  paramsSaving.value = true
-  try {
-    const data = await saveParams(name, payload)
-    if (name !== caseName.value) return
-    if (data.generation_params) {
-      generationParams.value = data.generation_params
-      paramsError.value = data.generation_params.error ?? ''
-    }
-    emit('updated', data)
-    ElMessage.success(
-      preset === '4k' ? '已切到 4K（Seedance 2.0）' : '已切回 1080p（Seedance 2.5）',
-    )
-  } catch (err) {
-    const message = err instanceof Error ? err.message : '切换生成预设失败'
-    paramsError.value = message
-    ElMessage.error(message)
-  } finally {
-    paramsSaving.value = false
-  }
-}
-
 watch(ratioOptions, (options) => {
   if (!options.includes(ratio.value)) ratio.value = options[0] ?? 'auto'
+})
+
+watch(imageResolutionValues, (options) => {
+  if (isImageFlow.value && !options.includes(resolution.value)) {
+    resolution.value = options[0] ?? '1K'
+  }
 })
 
 watch(durationOptions, (options) => {
@@ -493,7 +534,18 @@ watch(durationOptions, (options) => {
   }
 })
 
-watch([mode, ratio, resolution, scale], scheduleParamsSave)
+watch(resolutionOptions, (options) => {
+  // 换模型或换比例后档位会重算；当前值不在新清单里就回落到第一档，
+  // 不能把一个该模型不支持的档位留在下拉里再发出去。
+  const values = options.map((item) => item.value)
+  if (!values.length || values.includes(resolution.value)) return
+  resolution.value = values[0]
+})
+
+watch(
+  [mode, ratio, resolution, scale, videoModelId, imageModelId],
+  scheduleParamsSave,
+)
 watch([selectedProject, selectedEpisode, selectedSession], scheduleParamsSave)
 
 async function savePrompt(): Promise<void> {
@@ -531,7 +583,16 @@ const previewSignature = computed(() =>
       row.file?.mtime ?? null,
       row.file?.size ?? null,
     ]),
-    params: [mode.value, ratio.value, resolution.value, scale.value, duration.value],
+    params: [
+      mode.value,
+      ratio.value,
+      resolution.value,
+      scale.value,
+      duration.value,
+      videoModelId.value,
+      imageModelId.value,
+      imageNum.value,
+    ],
     prompt: [promptVars.value.map((item) => [item.key, item.value]), promptRendered.value],
     quota: [selectedProject.value, selectedEpisode.value, selectedSession.value],
   }),
@@ -546,6 +607,7 @@ watch(previewSignature, () => {
 const generateGate = computed(() => props.info.gates?.generate)
 
 const firstLastFrameIssue = computed(() => {
+  if (isImageFlow.value) return ''
   if (mode.value !== 'firstLastFrame') return ''
   const selected = submitRows.value
   const first = selected.filter((row) => row.role === 'first_frame')
@@ -563,8 +625,34 @@ const runBlockReason = computed(() => {
   if (generateGate.value && !generateGate.value.ready) {
     return generateGate.value.reason || '生成条件还没有满足'
   }
+  if (isImageFlow.value) return ''
   return firstLastFrameIssue.value
 })
+
+/** 图片生成按项目会话计费；'0' 是个人额度，不算选中项目会话。 */
+const imageSessionReady = computed(() => {
+  const value = selectedSession.value
+  return value !== '' && value !== '0' && Number.isFinite(Number(value))
+})
+
+const extracting = computed(() =>
+  extractTasks.value.some(
+    (task) => task.kind === 'extract' && (task.status === 'queued' || task.status === 'running'),
+  ),
+)
+
+function imageSubmitBody(): RunPayload {
+  const body: RunPayload = {
+    resolution: resolution.value,
+    num: imageNum.value,
+  }
+  if (imageModelId.value != null && imageModelId.value > 0) {
+    body.image_model_id = imageModelId.value
+  }
+  const sessionId = Number(selectedSession.value)
+  if (imageSessionReady.value && Number.isFinite(sessionId)) body.session_id = sessionId
+  return body
+}
 
 function submitBody(): RunPayload {
   const body: RunPayload = {
@@ -631,12 +719,14 @@ function syncRunStatus(): void {
   } else if (activeKind.value === 'adopt') {
     if (task.status === 'done') {
       adoptingRound.value = null
+      adoptingImageKey.value = null
       activeKind.value = null
       ElMessage.success('已采用成片')
       void refreshCase()
     }
     if (task.status === 'failed') {
       adoptingRound.value = null
+      adoptingImageKey.value = null
       activeKind.value = null
       ElMessage.error(task.error || '采用成片失败')
     }
@@ -644,6 +734,25 @@ function syncRunStatus(): void {
 }
 
 watch(caseTasks, syncRunStatus)
+
+// 图片流程的抽取入口在本页：完成/失败后刷新 case，候选与门控才会跟着更新。
+watch(extractTasks, (tasks) => {
+  if (!extractStartedAt) return
+  const task = tasks.find(
+    (item) =>
+      item.kind === 'extract' &&
+      new Date(item.created_at).getTime() >= extractStartedAt - 5000,
+  )
+  if (!task) return
+  if (task.status === 'done') {
+    extractStartedAt = 0
+    void refreshCase()
+    ElMessage.success('抽取完成')
+  } else if (task.status === 'failed') {
+    extractStartedAt = 0
+    ElMessage.error(task.error || task.tail[task.tail.length - 1] || '抽取失败')
+  }
+})
 
 async function refreshCase(): Promise<void> {
   try {
@@ -659,6 +768,10 @@ async function execute(op: 'dry_run' | 'submit'): Promise<void> {
     ElMessage.warning(runBlockReason.value)
     return
   }
+  if (isImageFlow.value && op === 'submit' && !imageSessionReady.value) {
+    ElMessage.warning('图片生成按项目会话计费：先选择项目会话再提交')
+    return
+  }
   if (!(await flushPromptSaves())) return
   if (!(await persistParams())) return
   activeKind.value = op
@@ -667,7 +780,8 @@ async function execute(op: 'dry_run' | 'submit'): Promise<void> {
   status.value = op === 'dry_run' ? '预演中' : '提交中'
   statusDetail.value = ''
   try {
-    await runOperation(caseName.value, op, submitBody())
+    const body: RunPayload = isImageFlow.value ? imageSubmitBody() : submitBody()
+    await runOperation(caseName.value, op, body)
     void refreshTasks()
   } catch (err) {
     activeKind.value = null
@@ -683,6 +797,40 @@ function dryRun(): void {
 
 function submit(): void {
   void execute('submit')
+}
+
+/** 图片流程的抽取入口：patchimg 受选区门控，fullRedrawImg 总是可跑。 */
+async function runImageExtract(): Promise<void> {
+  const gate = props.info.gates.extract
+  if (gate && gate.ready === false) {
+    ElMessage.warning(gate.reason || '抽取条件还没有满足')
+    return
+  }
+  if (extracting.value) return
+  try {
+    extractStartedAt = Date.now()
+    await runOperation(caseName.value, 'extract')
+    void refreshTasks()
+  } catch (err) {
+    extractStartedAt = 0
+    ElMessage.error(err instanceof Error ? err.message : '启动抽取失败')
+  }
+}
+
+/** 图片流程采用一张候选：adopt 必须带轮次目录名与候选下标。 */
+async function adoptImage(round: string, index: number): Promise<void> {
+  if (adoptingImageKey.value) return
+  adoptingImageKey.value = `${round}:${index}`
+  activeKind.value = 'adopt'
+  activeStartedAt.value = Date.now()
+  try {
+    await runOperation(caseName.value, 'adopt', { round, index })
+    void refreshTasks()
+  } catch (err) {
+    adoptingImageKey.value = null
+    activeKind.value = null
+    ElMessage.error(err instanceof Error ? err.message : '采用候选失败')
+  }
 }
 
 async function adoptResult(round: RoundSummary): Promise<void> {
@@ -750,6 +898,7 @@ watch(() => props.info, applyInfo, { immediate: true })
 onMounted(() => {
   void loadSessions()
   startTasks()
+  if (isImageFlow.value) startExtractTasks()
 })
 
 onUnmounted(() => {
@@ -772,11 +921,13 @@ function statusTone(): string {
       <GenerateSubmitList
         :case-name="caseName"
         :rows="submitRows"
-        :mode="mode"
+        :mode="submitMode"
         :roles="info.roles || []"
         :role-help="info.role_help || {}"
         :selected-count="selectedCount"
         :disabled="selectionSaving"
+        :title="isImageFlow ? '本次图片提交' : '本次视频提交'"
+        :exclude-roles="excludedRoles"
         @add="pickerOpen = true"
         @remove="removeSubmit"
         @move="moveSubmit"
@@ -796,7 +947,41 @@ function statusTone(): string {
     </section>
 
     <aside class="gen-side">
+      <ImageGeneratePanel
+        v-if="isImageFlow"
+        v-model:resolution="resolution"
+        v-model:num="imageNum"
+        v-model:image-model-id="imageModelId"
+        v-model:selected-project="selectedProject"
+        v-model:selected-episode="selectedEpisode"
+        v-model:selected-session="selectedSession"
+        :case-name="caseName"
+        :info="info"
+        :resolution-options="imageResolutionValues"
+        :image-model-options="imageModelChoices"
+        :image-models-error="imageModelsError"
+        :projects="projects"
+        :episodes="episodes"
+        :sessions="sessions"
+        :sessions-loading="sessionsLoading"
+        :session-error="sessionError"
+        :extract-gate="info.gates.extract"
+        :generate-gate="generateGate"
+        :extracting="extracting"
+        :running="running"
+        :status="status"
+        :status-detail="statusDetail"
+        :run-block-reason="runBlockReason"
+        :session-ready="imageSessionReady"
+        :adopting-key="adoptingImageKey"
+        @extract="runImageExtract"
+        @dry-run="dryRun"
+        @submit="submit"
+        @adopt="adoptImage"
+        @refresh-sessions="refreshSessions"
+      />
       <GenerateResults
+        v-else
         :recent-output="recentOutput"
         :adopted-round="adoptedRoundName"
         :adopting-round="adoptingRound"
@@ -810,11 +995,14 @@ function statusTone(): string {
   </div>
 
   <GenerateSubmitBar
+    v-if="!isImageFlow"
     v-model:mode="mode"
     v-model:ratio="ratio"
     v-model:resolution="resolution"
     v-model:scale="scale"
     v-model:duration="duration"
+    v-model:video-model-id="videoModelId"
+    v-model:image-model-id="imageModelId"
     v-model:selected-project="selectedProject"
     v-model:selected-episode="selectedEpisode"
     v-model:selected-session="selectedSession"
@@ -822,6 +1010,9 @@ function statusTone(): string {
     :ratio-options="ratioOptions"
     :resolution-options="resolutionOptions"
     :scale-options="scaleOptions"
+    :video-model-options="videoModelChoices"
+    :image-model-options="imageModelChoices"
+    :image-models-error="imageModelsError"
     :duration-options="durationOptions"
     :projects="projects"
     :episodes="episodes"
@@ -837,10 +1028,7 @@ function statusTone(): string {
     :running="running"
     :active-kind="activeKind"
     :run-block-reason="runBlockReason"
-    :show-presets="info.flow === 'patch'"
     @refresh-sessions="refreshSessions"
-    @preset-4k="applyPreset('4k')"
-    @preset-1080p="applyPreset('1080p')"
     @dry-run="dryRun"
     @submit="submit"
   />
@@ -849,7 +1037,7 @@ function statusTone(): string {
     v-model="pickerOpen"
     :case-name="caseName"
     :info="info"
-    mode="video"
+    :mode="isImageFlow ? 'image' : 'video'"
     @confirm="addFromPicker"
     @updated="onPickerUpdated"
   />

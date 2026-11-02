@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh, VideoPlay } from '@element-plus/icons-vue'
 import { fetchCase, runOperation } from '@/api/case'
+import FileRow from '@/components/common/FileRow.vue'
 import { useCaseTasks } from '@/composables/useCaseTasks'
 import { taskStatusMeta } from '@/constants/taskStatus'
 import { formatSize } from '@/utils/format'
@@ -33,6 +34,10 @@ const pickGate = computed(() => props.info.gates.pick)
 const extractGate = computed(() => props.info.gates.extract)
 const outputs = computed<FileInfo[]>(() => props.info.step_files.extract?.outputs ?? [])
 const current = computed(() => props.info.extract_current)
+/** 图片流程的抽取产物是 PNG 与 JSON：没有 clip.mp4 与首尾帧卡片。 */
+const isImageFlow = computed(
+  () => props.info.flow === 'patchimg' || props.info.flow === 'fullRedrawImg',
+)
 
 function output(name: string): FileInfo | undefined {
   return outputs.value.find((file) => file.name === name)
@@ -130,6 +135,10 @@ watch(latest, async (task) => {
       </div>
       <div class="panel-body">
         <div v-if="outputs.length" class="ex-products">
+          <template v-if="isImageFlow">
+            <FileRow v-for="file in outputs" :key="file.path" :entry="file" />
+          </template>
+          <template v-else>
           <div class="ex-prod">
             <a
               v-if="clip?.exists && clip.open_url"
@@ -214,9 +223,14 @@ watch(latest, async (task) => {
               <div class="ex-prod-meta">png × 2 · 工作台输入底图</div>
             </div>
           </div>
+          </template>
         </div>
-        <p v-else class="muted ex-empty-note">
-          还没有抽取结果。运行抽取会生成 clip.mp4、clip_mask.png、clip.json 与首尾原始帧。
+        <p v-if="!outputs.length" class="muted ex-empty-note">
+          {{
+            isImageFlow
+              ? '还没有抽取结果。运行抽取会生成 PNG 与清单文件。'
+              : '还没有抽取结果。运行抽取会生成 clip.mp4、clip_mask.png、clip.json 与首尾原始帧。'
+          }}
         </p>
       </div>
     </section>

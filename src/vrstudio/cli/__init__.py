@@ -8,7 +8,9 @@
 - ← vrpad 迁入（fullredraw）：pad / recompose / plan / verify / calib / seam-center
 - ← vrpatch 迁入（patch）：extract（子 app，含 case|args 两命令）/ merge / restore
 - ★ 新增 stub（M3/M4 落地）：case / generate / serve
-- ★ 新增（决策 48）：relight（两张图进、一张图出）
+- ★ 新增（决策 48）：relight（把 AI 氛围图的光照搬到真 GT 上）
+- ★ 合并（决策 60）：relight 按 GT 的媒体类型派发，图片出单帧、视频出整段；
+  relight-video 退役
 """
 
 from __future__ import annotations

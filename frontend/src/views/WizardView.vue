@@ -13,6 +13,8 @@ import GenerateStep from '@/views/wizard/GenerateStep.vue'
 import KeyframeStep from '@/views/wizard/KeyframeStep.vue'
 import MergeStep from '@/views/wizard/MergeStep.vue'
 import PickStep from '@/views/wizard/PickStep.vue'
+import RelightAssetsStep from '@/views/wizard/RelightAssetsStep.vue'
+import RelightStep from '@/views/wizard/RelightStep.vue'
 import CaseLibraryView from '@/views/case/CaseLibraryView.vue'
 import { flowMeta } from '@/constants/flow'
 import { stepsForFlow } from '@/constants/steps'
@@ -367,6 +369,20 @@ watch(caseName, (_next, previous) => {
         :info="caseInfo"
         @updated="onStepUpdated"
         @handoff="onHandoff"
+      />
+      <RelightAssetsStep
+        v-else-if="activeStep === 'assets'"
+        :key="caseName"
+        :case-name="caseName"
+        :info="caseInfo"
+        @updated="onStepUpdated"
+      />
+      <RelightStep
+        v-else-if="activeStep === 'relight'"
+        :key="caseName"
+        :case-name="caseName"
+        :info="caseInfo"
+        @updated="onStepUpdated"
       />
       <MergeStep
         v-else-if="['merge', 'pad', 'recompose'].includes(activeStep)"

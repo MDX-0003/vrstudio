@@ -85,10 +85,11 @@ def seed_patch_draft(name: str, source: Path, cases_dir: Path | None,
 @app.command("new")
 def new(
     name: str = typer.Argument(..., help="case 名（= cases/ 下的目录名 = vrgen 的 job 名）。"),
-    flow: str = typer.Option(..., "--flow", help="patch | patchimg | fullredraw | gen"),
+    flow: str = typer.Option(..., "--flow", help="patch | patchimg | fullredraw | gen | relight"),
     source: Path = typer.Option(
         None, "--source", exists=True, dir_okay=False,
-        help="源文件。patch/fullredraw 要视频；patchimg 要 2:1 ERP 图片；gen 可选。"),
+        help="源文件。patch/fullredraw 要视频；patchimg 要 2:1 ERP 图片；gen 可选；"
+             "relight 不接受（建完在素材步选 GT 与氛围图）。"),
     mode: str = typer.Option(None, "--mode",
                              help="gen 必填：videoEdit | allMediaRef | videoExtend。"),
     cases_dir: Path = typer.Option(None, "--cases-dir", help="覆盖 cases 根（测试用）。"),
@@ -102,7 +103,7 @@ def new(
                 f"flow=gen 必须给 --mode（{' | '.join(case_mod.GEN_MODES)}）"))
     elif mode is not None:
         _fail(CaseError(f"flow={flow} 的模式由流程固定，不接受 --mode"))
-    if flow != "gen" and source is None:
+    if flow != "gen" and flow != "relight" and source is None:
         _fail(CaseError(f"flow={flow} 必须给 --source"))
     try:
         case = case_mod.create(name, flow, source, root=cases_dir)
@@ -131,6 +132,9 @@ def new(
     elif flow == "fullRedrawImg":
         typer.echo("下一步：vrstudio extract name --case " + case.name
                    + "（pad 成 21:9 + 冗余带 mask）")
+    elif flow == "relight":
+        typer.echo("下一步：web 素材步加入底版（" + case_mod.RELIGHT_GT
+                   + "）与氛围图（" + case_mod.RELIGHT_ATMO + "），然后跑 vrstudio relight")
     else:
         typer.echo("下一步：vrstudio pad --in <源> --out <case>/seedance_input.mp4")
 
@@ -161,6 +165,68 @@ def draft(
     typer.echo(f"draft    {case.name}  " + "  ".join(parts))
 
 
+@app.command("relight")
+def relight(
+    name: str = typer.Option(..., "--case", help="relight case 名"),
+    gt: Path = typer.Option(None, "--gt", exists=True, dir_okay=False,
+                            help="加入一条底版候选（2:1 ERP 视频或图片）并选中它"),
+    atmo: Path = typer.Option(None, "--atmo", exists=True, dir_okay=False,
+                              help="加入一条氛围图候选（图片）并选中它"),
+    gt_id: str = typer.Option(None, "--gt-id", help="只改指针：选中库里已有的底版候选"),
+    atmo_id: str = typer.Option(None, "--atmo-id",
+                                help="只改指针：选中库里已有的氛围图候选"),
+    scene: str = typer.Option(None, "--scene", help="写入 [relight] 的场景预设"),
+    strength: float = typer.Option(None, "--strength", help="写入 [relight] 的整体施加量"),
+    local_shading: float = typer.Option(None, "--local-shading",
+                                        help="写入 [relight] 的局部明暗权重"),
+    ref_frame: int = typer.Option(None, "--ref-frame", help="写入 [relight] 的参考帧"),
+    current: str = typer.Option(None, "--current",
+                                help="写入 [relight] current：case 目录内的成片相对路径"),
+    cases_dir: Path = typer.Option(None, "--cases-dir"),
+) -> None:
+    """设置 relight 的素材库、两个槽位指针与 ``[relight]`` 草稿。
+
+    素材库可以有多条同角色候选（氛围图每改一版多一条）；``--gt/--atmo`` 是「加一条并
+    选中」，``--gt-id/--atmo-id`` 是「只改选中」。两者对同一槽位同时给是参数错。
+    """
+    if gt is not None and gt_id is not None:
+        _fail(CaseError("--gt 与 --gt-id 只能给一个：前者加新文件，后者只改指针"))
+    if atmo is not None and atmo_id is not None:
+        _fail(CaseError("--atmo 与 --atmo-id 只能给一个"))
+    try:
+        case = case_mod.load(name, cases_dir)
+        if gt is not None:
+            case, _id = case_mod.add_relight_candidate(
+                name, case_mod.RELIGHT_GT, gt, cases_dir)
+        elif gt_id is not None:
+            case = case_mod.set_relight_pick(name, "gt", gt_id, cases_dir)
+        if atmo is not None:
+            case, _id = case_mod.add_relight_candidate(
+                name, case_mod.RELIGHT_ATMO, atmo, cases_dir)
+        elif atmo_id is not None:
+            case = case_mod.set_relight_pick(name, "atmo", atmo_id, cases_dir)
+        values = {"scene": scene, "strength": strength,
+                  "local_shading": local_shading, "ref_frame": ref_frame,
+                  "current": current}
+        if any(value is not None for value in values.values()):
+            case = case_mod.set_relight(name, values, cases_dir)
+        else:
+            case = case_mod.load(name, cases_dir)
+    except CaseError as exc:
+        _fail(exc)
+    gt_asset, atmo_asset = case.relight_slots()
+    relight_draft = case.relight or {}
+    typer.echo(f"case     {case.name}")
+    typer.echo(f"gt       {gt_asset.id + '  ' + gt_asset.path if gt_asset else '(未选)'}")
+    typer.echo(f"atmo     {atmo_asset.id + '  ' + atmo_asset.path if atmo_asset else '(未选)'}")
+    typer.echo(f"library  {len(case.assets)} 条候选（"
+               + "、".join(f"{a.id}:{a.role}" for a in case.assets) + "）"
+               if case.assets else "library  (空)")
+    if relight_draft:
+        items = "  ".join(f"{k}={v}" for k, v in relight_draft.items())
+        typer.echo(f"relight  {items}")
+
+
 @app.command("list")
 def list_(cases_dir: Path = typer.Option(None, "--cases-dir")) -> None:
     """列出全部 case（flow / adopt 状态）。"""
@@ -175,7 +241,8 @@ def list_(cases_dir: Path = typer.Option(None, "--cases-dir")) -> None:
             try:
                 case = case_mod.load(child.name, cases_dir)
                 adopt = case.adopt_round or "-"
-                extra = f" assets={len(case.assets)}" if case.flow == "gen" else ""
+                extra = (f" assets={len(case.assets)}"
+                         if case.flow in ("gen", "relight") else "")
                 typer.echo(f"  {case.name:<24} {case.flow:<12} adopt={adopt}{extra}")
             except CaseError as exc:
                 typer.echo(f"  {child.name:<24} (读不了：{exc})")
@@ -199,6 +266,12 @@ def show(
         typer.echo(f"assets   {len(case.assets)} 条")
         for asset in case.assets:
             typer.echo(f"  {asset.id:<4} {asset.kind:<5} {asset.role:<12} {asset.path}")
+    elif case.flow == "relight":
+        gt, atmo = case.relight_slots()
+        typer.echo(f"gt       {gt.path if gt else '(未选——素材步选底版)'}")
+        typer.echo(f"atmo     {atmo.path if atmo else '(未选——素材步选氛围图)'}")
+        relight = case.relight or {}
+        typer.echo(f"current  {relight.get('current') or '(还没跑过)'}")
     else:
         typer.echo(f"source   {case.source_path}")
         if case.sha256:

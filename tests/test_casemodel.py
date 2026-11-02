@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -370,3 +371,135 @@ def test_kind_limited_roles(tmp_path, src_video):
         encoding="utf-8")
     with pytest.raises(CaseError, match="lighting_ref"):
         case_mod.load("ship", tmp_path)
+
+
+# ── relight：不绑源、两个固定槽位、[relight] 草稿 ───────────────────────────
+
+
+@pytest.fixture
+def relight_media(tmp_path):
+    """两个槽位的候选文件：底版（视频/图片）与氛围图（图片）。"""
+    video = tmp_path / "gt.mp4"
+    video.write_bytes(b"fake video")
+    still = tmp_path / "gt.png"
+    still.write_bytes(b"fake still")
+    atmo = tmp_path / "atmo.png"
+    atmo.write_bytes(b"fake atmo")
+    return video, still, atmo
+
+
+def test_relight_creates_without_source(tmp_path):
+    """建 relight case 不绑源：case.toml 没有 [source]，flow 是 relight。"""
+    case = case_mod.create("rl", "relight", root=tmp_path)
+    assert case.flow == "relight" and case.source_path is None
+    text = case_mod.case_toml("rl", tmp_path).read_text(encoding="utf-8")
+    assert 'flow = "relight"' in text
+    assert "[source]" not in text
+    assert case_mod.load("rl", tmp_path).assets == []
+
+
+def test_relight_rejects_source(tmp_path, relight_media):
+    """给 relight 传 --source 明确拒绝：GT 只能进槽位。"""
+    video, _, _ = relight_media
+    with pytest.raises(CaseError, match="不绑源文件"):
+        case_mod.create("rl", "relight", video, root=tmp_path)
+
+
+def test_relight_candidates_accumulate_and_pointer_picks(tmp_path, relight_media):
+    """素材库可有多条同角色候选；槽位是指针，换底版不删旧候选。"""
+    video, still, atmo = relight_media
+    case_mod.create("rl", "relight", root=tmp_path)
+    case, gt_id = case_mod.add_relight_candidate(
+        "rl", case_mod.RELIGHT_GT, video, tmp_path)
+    case, atmo_id = case_mod.add_relight_candidate(
+        "rl", case_mod.RELIGHT_ATMO, atmo, tmp_path)
+    gt, atmo_asset = case.relight_slots()
+    assert gt.id == gt_id and atmo_asset.id == atmo_id
+    assert len(case.assets) == 2
+    assert case.master().role == case_mod.RELIGHT_GT
+
+    # 再加一条底版候选：库变 3 条，指针切到新的那条，旧的仍在库里。
+    case, second = case_mod.add_relight_candidate(
+        "rl", case_mod.RELIGHT_GT, still, tmp_path)
+    assert len(case.assets) == 3
+    gt, _ = case.relight_slots()
+    assert gt.id == second and gt.kind == "image"
+
+    # 指针可以换回旧候选，不需要重新上传。
+    case = case_mod.set_relight_pick("rl", "gt", gt_id, tmp_path)
+    assert case.relight_slots()[0].id == gt_id
+
+
+def test_relight_same_file_is_not_duplicated(tmp_path, relight_media):
+    """同一个文件重复加入：复用已有候选，库不变。"""
+    video, _, _ = relight_media
+    case_mod.create("rl", "relight", root=tmp_path)
+    case, first = case_mod.add_relight_candidate(
+        "rl", case_mod.RELIGHT_GT, video, tmp_path)
+    case, again = case_mod.add_relight_candidate(
+        "rl", case_mod.RELIGHT_GT, video, tmp_path)
+    assert first == again and len(case.assets) == 1
+
+
+def test_relight_pick_rejects_wrong_role(tmp_path, relight_media):
+    """把氛围图指进底版槽位：按角色拒绝。"""
+    _, _, atmo = relight_media
+    case_mod.create("rl", "relight", root=tmp_path)
+    case, atmo_id = case_mod.add_relight_candidate(
+        "rl", case_mod.RELIGHT_ATMO, atmo, tmp_path)
+    with pytest.raises(CaseError, match="不能放进 gt 槽位"):
+        case_mod.set_relight_pick("rl", "gt", atmo_id, tmp_path)
+
+
+def test_relight_rejects_stray_roles(tmp_path, relight_media):
+    """relight 只允许两个槽位角色：别的角色加不进来。"""
+    video, _, _ = relight_media
+    case_mod.create("rl", "relight", root=tmp_path)
+    with pytest.raises(CaseError, match="relight 的素材只能是"):
+        case_mod.add_assets("rl", [(video, "motion_ref")], root=tmp_path)
+
+
+def test_relight_atmo_must_be_image(tmp_path, relight_media):
+    video, _, _ = relight_media
+    case_mod.create("rl", "relight", root=tmp_path)
+    with pytest.raises(CaseError, match="relight_atmo"):
+        case_mod.add_relight_candidate("rl", case_mod.RELIGHT_ATMO, video, tmp_path)
+
+
+def test_relight_draft_round_trips_and_rejects_unknown_keys(tmp_path):
+    case_mod.create("rl", "relight", root=tmp_path)
+    case = case_mod.set_relight("rl", {"scene": "day", "strength": 0.8,
+                                       "ref_frame": 12}, tmp_path)
+    assert case.relight == {"scene": "day", "strength": 0.8, "ref_frame": 12}
+    back = case_mod.load("rl", tmp_path)
+    assert back.relight == case.relight
+    with pytest.raises(CaseError, match="不认识的键"):
+        case_mod.set_relight("rl", {"strengh": 0.5}, tmp_path)
+    with pytest.raises(CaseError, match="必须是数字"):
+        case_mod.set_relight("rl", {"strength": "high"}, tmp_path)
+
+
+def test_relight_current_must_stay_inside_case(tmp_path):
+    case_mod.create("rl", "relight", root=tmp_path)
+    case_mod.set_relight("rl", {"current": "out/x_relit.mp4"}, tmp_path)
+    assert case_mod.load("rl", tmp_path).relight["current"] == "out/x_relit.mp4"
+    for bad in ("../escape.mp4", "C:/abs.mp4"):
+        with pytest.raises(CaseError, match="相对路径"):
+            case_mod.set_relight("rl", {"current": bad}, tmp_path)
+
+
+def test_relight_section_belongs_to_relight_only(tmp_path, src_video):
+    """[relight] 写在别的 flow 上按真实原因拒绝。"""
+    case_mod.create("ship", "patch", src_video, root=tmp_path)
+    path = case_mod.case_toml("ship", tmp_path)
+    path.write_text(path.read_text(encoding="utf-8") + '\n[relight]\nscene = "day"\n',
+                    encoding="utf-8")
+    with pytest.raises(CaseError, match=r"\[relight\] 只属于 flow=relight"):
+        case_mod.load("ship", tmp_path)
+
+
+def test_relight_set_draft_is_rejected(tmp_path):
+    """relight 没有选区草稿：pick 类写入按真实原因拒绝。"""
+    case_mod.create("rl", "relight", root=tmp_path)
+    with pytest.raises(CaseError, match="没有 pick 草稿"):
+        case_mod.set_draft("rl", viewport={"yaw_deg": 0.0}, root=tmp_path)

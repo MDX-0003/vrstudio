@@ -39,7 +39,7 @@ class SegmentMaps:
     def from_geometry(cls, viewport, inner, erp_w, erp_h, feather_px=16):
         """Build the maps from bare geometry, without inventing a Segment.
 
-        `flow = patchimg` is a single frame: it has a still.json with viewport
+        `flow = patchimg` is a single frame: it has a image.json with viewport
         and inner but no time range, so faking a Segment just to reach the
         constructor would put a fake frame range into the geometry path.
         """

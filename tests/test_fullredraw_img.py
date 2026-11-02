@@ -99,12 +99,12 @@ def test_extract_writes_canvas_and_mask(tmp_path):
     _prepared_case(tmp_path)
     version = _version_dir(tmp_path)
 
-    for name in ("padded.png", "padded_mask.png", "still_pad.json"):
+    for name in ("padded.png", "padded_mask.png", "image_pad.json"):
         assert (version / name).is_file(), name
     assert not (version / "regions.json").exists()
     assert read_image(version / "padded.png").shape[:2] == (192, 448)
 
-    manifest = json.loads((version / "still_pad.json").read_text(encoding="utf-8"))
+    manifest = json.loads((version / "image_pad.json").read_text(encoding="utf-8"))
     assert manifest["canvas"]["size"] == [448, 192]
     mask = read_image(version / "padded_mask.png")[:, :, 0]
     assert mask.max() == 255 and mask.min() == 0
@@ -156,7 +156,7 @@ def test_merge_returns_the_source_bit_exactly(tmp_path):
 
     case = case_mod.load("p", tmp_path)
     out = (case_mod.case_dir("p", tmp_path) / "out"
-           / f"{case.extract_current}_still.png")
+           / f"{case.extract_current}_image.png")
     assert out.is_file()
     assert np.array_equal(read_image(out), read_image(src))
 

@@ -11,6 +11,7 @@ import {
   runKeyframe,
   saveKeyframePrompt,
   setKeyframeRefs,
+  useRawKeyframe,
 } from '@/api/keyframe'
 import type { KeyframeRefInput, KeyframeRound } from '@/api/keyframe'
 import { useCaseTasks } from '@/composables/useCaseTasks'
@@ -55,7 +56,6 @@ const refsPanel = ref<HTMLElement | null>(null)
 const pickerOpen = ref(false)
 const taskOpen = ref(false)
 const olderOpen = ref(false)
-const modelId = ref<number | null>(null)
 const resolution = ref(defaultKeyframeResolution(props.info))
 const num = ref(4)
 const noteDraft = ref<Record<string, string>>({})
@@ -123,6 +123,13 @@ const targetLabel = computed(() => (step.value === 'first' ? '首帧定稿' : '�
 const refs = computed(() => keyframe.value.refs ?? [])
 const primary = computed(() => refs.value.find((ref) => ref.role === 'subject_ref') ?? null)
 const details = computed(() => refs.value.filter((ref) => ref.role === 'detail_ref'))
+/** 首尾帧共用一个图片模型：值来自生成页底栏保存的 image_model_id。 */
+const imageModelName = computed(() => {
+  const params = props.info.generation_params
+  const id = params?.fixed?.image_model_id
+  if (id == null) return ''
+  return params.image_models?.find((item) => item.id === id)?.name ?? `模型 #${id}`
+})
 const anchorNumber = computed(() =>
   step.value === 'last' && firstPick.value && primary.value ? 3 : null,
 )
@@ -257,12 +264,11 @@ async function run(): Promise<void> {
   running.value = true
   startedAt = Date.now()
   try {
-    const payload: { step: Step; model_id?: number; resolution?: string; num?: number } = {
+    const payload: { step: Step; resolution?: string; num?: number } = {
       step: step.value,
       resolution: resolution.value,
       num: num.value,
     }
-    if (modelId.value) payload.model_id = modelId.value
     await runKeyframe(props.caseName, payload)
     startTasks()
     startRoundsPolling()
@@ -298,6 +304,29 @@ async function pick(round: KeyframeRound, index: number): Promise<void> {
     ElMessage.error(err instanceof Error ? err.message : '挑选候选失败')
   } finally {
     picking.value = null
+  }
+}
+
+const rawUsing = ref(false)
+
+async function useRawFrame(): Promise<void> {
+  if (rawUsing.value || !rawFrame.value?.exists) return
+  rawUsing.value = true
+  try {
+    const data = await useRawKeyframe(props.caseName, step.value)
+    emit('updated', data)
+    await loadRounds()
+    if (step.value === 'first') {
+      ElMessage.success(data.keyframe_hint || '首帧已用原始帧定稿')
+      step.value = 'last'
+      await loadPrompt('last')
+    } else {
+      ElMessage.success(data.keyframe_hint || '尾帧已用原始帧定稿')
+    }
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '用原始帧定稿失败')
+  } finally {
+    rawUsing.value = false
   }
 }
 
@@ -554,14 +583,30 @@ onUnmounted(() => {
             <figcaption class="kf-slot-cap">
               <span class="kf-slot-no">目标</span>
               <span>{{ targetLabel }}</span>
-              <span class="kf-slot-note">点候选即定稿</span>
+              <el-button
+                link
+                type="primary"
+                size="small"
+                class="kf-slot-action"
+                :loading="rawUsing"
+                :disabled="!rawFrame?.exists"
+                :title="rawFrame?.exists
+                  ? '不重绘，直接把当前抽取的原始帧当定稿（不花额度）'
+                  : '当前抽取版本没有这张原始帧；先重新抽取'"
+                @click="useRawFrame"
+              >
+                直接用原始帧
+              </el-button>
             </figcaption>
             <div v-if="stepPick" class="kf-shot">
               <img :src="pickedUrl(stepPick)" :alt="targetLabel" />
               <FileOpenLink :file="stepPick.file" :label="`打开${targetLabel}`" class="card-open" />
             </div>
             <div v-else class="kf-shot kf-shot-target"><span>从下方候选里挑一张</span></div>
-            <div class="kf-slot-file mono">{{ stepPick?.file?.name || '待定稿' }}</div>
+            <div class="kf-slot-file mono">
+              {{ stepPick?.file?.name || '待定稿' }}
+              <template v-if="stepPick?.source === 'raw'">（原始帧，未重绘）</template>
+            </div>
           </figure>
         </div>
       </div>
@@ -605,6 +650,13 @@ onUnmounted(() => {
         <h2 class="panel-title">{{ step === 'first' ? '首帧候选' : '尾帧候选' }}</h2>
         <span class="spacer" />
         <div class="kf-head-actions">
+          <span
+            v-if="imageModelName"
+            class="kf-model-hint muted"
+            title="首尾帧两步共用这一个图片模型；在生成页底栏切换"
+          >
+            图片模型：{{ imageModelName }}
+          </span>
           <el-select v-model="resolution" size="small" style="width: 104px">
             <el-option
               v-for="item in KEYFRAME_RESOLUTIONS"
@@ -929,6 +981,11 @@ onUnmounted(() => {
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
+}
+
+.kf-model-hint {
+  font-size: var(--text-xs);
+  white-space: nowrap;
 }
 
 .round-list {

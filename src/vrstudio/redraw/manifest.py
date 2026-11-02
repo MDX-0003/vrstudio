@@ -329,8 +329,8 @@ class LocalInfo:
 
 
 @dataclass(frozen=True)
-class StillManifest:
-    """``still_pad.json``: pad -> stitch contract for one ERP image.
+class ImageManifest:
+    """``image_pad.json``: pad -> stitch contract for one ERP image.
 
     It is deliberately a separate type from :class:`Manifest`: the video
     manifest's field set is a frozen external contract, and a still image has no
@@ -354,7 +354,7 @@ class StillManifest:
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        d["kind"] = "still"
+        d["kind"] = "image"
         d["tool"] = {"name": TOOL_NAME, "version": self.tool_version}
         d.pop("tool_version")
         return d
@@ -366,14 +366,14 @@ class StillManifest:
         return path
 
     @staticmethod
-    def load(path: str | Path) -> "StillManifest":
+    def load(path: str | Path) -> "ImageManifest":
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
-        if raw.get("kind") != "still":
-            raise ValueError(f"{path} is not a still manifest (kind={raw.get('kind')!r})")
+        if raw.get("kind") != "image":
+            raise ValueError(f"{path} is not a image manifest (kind={raw.get('kind')!r})")
         schema = int(raw.get("schema", 0))
         if schema != SCHEMA:
             raise ValueError(
-                f"still manifest schema {schema} is not supported (this build reads "
+                f"image manifest schema {schema} is not supported (this build reads "
                 f"{SCHEMA}); re-run the pad step with the current version"
             )
         try:
@@ -382,7 +382,7 @@ class StillManifest:
             if local_raw:
                 local = LocalInfo(viewport=dict(local_raw["viewport"]),
                                   inner=dict(local_raw["inner"]))
-            return StillManifest(
+            return ImageManifest(
                 schema=schema,
                 created_utc=raw["created_utc"],
                 tool_version=str(raw.get("tool", {}).get("version", "")),
@@ -403,7 +403,7 @@ class StillManifest:
                 ratio_label=str(raw.get("ratio_label", "")),
             )
         except (KeyError, TypeError) as exc:
-            raise ValueError(f"still manifest is missing or malformed: {exc}") from exc
+            raise ValueError(f"image manifest is missing or malformed: {exc}") from exc
 
     def to_pad_plan(self) -> PadPlan:
         """Rebuild the plan so the closure invariant can be re-asserted on load."""
@@ -434,12 +434,12 @@ class StillManifest:
         actual = sha256_16(path)
         if actual != self.source.sha256_16:
             raise ValueError(
-                f"source hash mismatch: still manifest expects {self.source.sha256_16}, "
+                f"source hash mismatch: image manifest expects {self.source.sha256_16}, "
                 f"{path} is {actual}. This manifest belongs to a different image."
             )
 
 
-def from_still_plan(
+def from_image_plan(
     plan: PadPlan,
     *,
     source_path: str | Path,
@@ -453,9 +453,9 @@ def from_still_plan(
     local: LocalInfo | None = None,
     ratio_label: str = "",
     tool_version: str = "",
-) -> StillManifest:
+) -> ImageManifest:
     W, H = plan.source_size
-    return StillManifest(
+    return ImageManifest(
         source=StillSourceInfo(
             path=str(source_path),
             size=(W, H),
