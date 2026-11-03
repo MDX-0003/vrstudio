@@ -52,6 +52,13 @@ watch(
           >
         </div>
         <el-alert
+          v-if="task.reused"
+          type="info"
+          :closable="false"
+          :title="`未提交、未花费：复用了已有轮次 ${task.reused.round}`"
+          class="task-reused"
+        />
+        <el-alert
           v-if="task.error"
           type="error"
           :closable="false"
@@ -80,6 +87,10 @@ watch(
 }
 
 .task-error {
+  margin-top: var(--space-2);
+}
+
+.task-reused {
   margin-top: var(--space-2);
 }
 </style>

@@ -556,7 +556,8 @@ def _check_image_resolution(flow: str, resolution: str | None) -> None:
 
 def _submit_image(case: case_mod.Case, cases_dir, conf, *,
                   variables, image_model_id, resolution, num, session_id,
-                  mode, duration, aspect_ratio, scale, dry_run, check) -> None:
+                  mode, duration, aspect_ratio, scale, dry_run, check,
+                  resubmit=False) -> None:
     """patchimg 的提交：vrgen image submit，底图 + mask + 可选参考图。"""
     if mode or duration is not None or aspect_ratio or scale:
         _fail(GenError("patchimg 不接受 --mode/--duration/--aspect-ratio/--scale"))
@@ -583,6 +584,8 @@ def _submit_image(case: case_mod.Case, cases_dir, conf, *,
     if session_id is not None:
         argv += ["--session-id", str(session_id)]
     argv += ["--workdir", str(_workdir(conf))]
+    if resubmit:
+        argv += ["--resubmit"]
     if dry_run:
         typer.echo("dry-run：将发出")
         for arg in argv:
@@ -595,7 +598,8 @@ def _submit_image(case: case_mod.Case, cases_dir, conf, *,
 
 def _submit_full(case: case_mod.Case, cases_dir, conf, *,
                  variables, image_model_id, resolution, num, session_id,
-                 mode, duration, aspect_ratio, scale, dry_run, check) -> None:
+                 mode, duration, aspect_ratio, scale, dry_run, check,
+                 resubmit=False) -> None:
     """fullRedrawImg 的提交：基图 + mask + 氛围参考图。"""
     if mode or duration is not None or aspect_ratio or scale:
         _fail(GenError("fullRedrawImg 不接受 --mode/--duration/--aspect-ratio/--scale"))
@@ -627,6 +631,8 @@ def _submit_full(case: case_mod.Case, cases_dir, conf, *,
     if session_id is not None:
         argv += ["--session-id", str(session_id)]
     argv += ["--workdir", str(_workdir(conf))]
+    if resubmit:
+        argv += ["--resubmit"]
     if dry_run:
         typer.echo("dry-run：将发出")
         for arg in argv:
@@ -668,6 +674,9 @@ def submit(
         None, "--session-id",
         help="项目生成会话 ID（>0）：在该项目额度下提交；不传则用 generation.toml/配置。"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只打印 argv，不真调 vrgen。"),
+    resubmit: bool = typer.Option(
+        False, "--resubmit",
+        help="透传 vrgen submit --resubmit：同提示词另开一轮并重新计费（多抽几版）。"),
     check: bool = typer.Option(
         False, "--check",
         help="调 vrgen submit --dry-run：校验素材与提示词并打印完整命令，不提交不花钱。"),
@@ -691,7 +700,7 @@ def submit(
                       image_model_id=image_model_id, resolution=resolution, num=num,
                       session_id=session_id, mode=mode, duration=duration,
                       aspect_ratio=aspect_ratio, scale=scale,
-                      dry_run=dry_run, check=check)
+                      dry_run=dry_run, check=check, resubmit=resubmit)
         return
     if case.flow == "fullRedrawImg":
         if video_model_id is not None:
@@ -701,7 +710,7 @@ def submit(
                      image_model_id=image_model_id, resolution=resolution, num=num,
                      session_id=session_id, mode=mode, duration=duration,
                      aspect_ratio=aspect_ratio, scale=scale,
-                     dry_run=dry_run, check=check)
+                     dry_run=dry_run, check=check, resubmit=resubmit)
         return
     if image_model_id is not None:
         _fail(GenError(f"{case.flow} 是视频流，用 --video-model-id"))
@@ -745,6 +754,8 @@ def submit(
     if session_id is not None:
         argv += ["--session-id", str(session_id)]
     argv += ["--workdir", str(_workdir(conf))]
+    if resubmit:
+        argv += ["--resubmit"]
     if dry_run and check:
         _fail(GenError("--dry-run 与 --check 互斥"))
     if dry_run:

@@ -109,10 +109,20 @@ watch(scope, () => {
 
     <div class="panel">
       <el-table v-loading="loading" :data="tasks" row-key="id" @row-click="openTask">
-        <el-table-column label="状态" width="100">
+        <el-table-column label="状态" width="150">
           <template #default="{ row }">
             <el-tag :type="statusOf(row.status).type" effect="light" size="small">
               {{ statusOf(row.status).text }}
+            </el-tag>
+            <el-tag
+              v-if="row.reused"
+              type="info"
+              effect="plain"
+              size="small"
+              class="reused-tag"
+              title="这一轮没有发请求、没有扣额度"
+            >
+              未花费
             </el-tag>
           </template>
         </el-table-column>
@@ -218,6 +228,10 @@ watch(scope, () => {
 </template>
 
 <style scoped>
+.reused-tag {
+  margin-left: var(--space-1);
+}
+
 .task-kind {
   font-weight: 600;
 }

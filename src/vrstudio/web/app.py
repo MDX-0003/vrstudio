@@ -3377,6 +3377,9 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
         argv = vrstudio_argv("generate", "submit", "--case", name, *root)
         if op == "dry_run":
             argv += ["--check"]
+        # 再抽一版会重新计费，所以只挂在真提交上；预演不碰它。
+        if op == "submit" and body.get("resubmit"):
+            argv += ["--resubmit"]
         for item in body.get("vars") or []:
             argv += ["--var", item]
         if body.get("resolution"):

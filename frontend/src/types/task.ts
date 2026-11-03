@@ -1,5 +1,12 @@
 export type TaskState = 'queued' | 'running' | 'done' | 'failed'
 
+/** 提交任务复用了已有轮次：本次没有发请求、没有扣额度。 */
+export interface ReusedRound {
+  round: string
+  reason: 'key' | 'resumed'
+  task_id: number | null
+}
+
 export interface TaskView {
   id: string
   kind: string
@@ -17,6 +24,7 @@ export interface TaskView {
   progress: unknown
   log_path: string | null
   error: string | null
+  reused: ReusedRound | null
   request_id: string | null
   tail: string[]
 }

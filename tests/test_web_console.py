@@ -2156,6 +2156,36 @@ def test_task_history_survives_restart(tmp_path, monkeypatch):
     assert gone.list() == []
 
 
+def test_reused_marker_reads_the_submit_log(tmp_path):
+    """vrgen 的 reused 行是「没花额度」的唯一机器可读信号。"""
+    path = tmp_path / "submit.log"
+    path.write_text(
+        "WARN this round already exists: gen-multi-6d0da795 (stage checked) -- reusing it\n"
+        "job         dance_walk_01\n"
+        "round       E:\\runs\\dance_walk_01\\gen-multi-6d0da795\n"
+        "reused      gen-multi-6d0da795  reason=key  task=2067798413457408  "
+        "(本次未提交，未花费)\n"
+        "result      E:\\runs\\dance_walk_01\\gen-multi-6d0da795\\result.mp4  (9.7 MB)\n",
+        encoding="utf-8")
+    assert tasks_mod._reused_marker(path) == {
+        "round": "gen-multi-6d0da795", "reason": "key", "task_id": 2067798413457408}
+
+
+def test_reused_marker_reads_resumed_without_a_task_id(tmp_path):
+    path = tmp_path / "submit.log"
+    path.write_text(
+        "reused      img-1234abcd  reason=resumed  task=-  (本次未提交，未花费)\n",
+        encoding="utf-8")
+    assert tasks_mod._reused_marker(path) == {
+        "round": "img-1234abcd", "reason": "resumed", "task_id": None}
+
+
+def test_reused_marker_absent_for_a_real_submit(tmp_path):
+    path = tmp_path / "submit.log"
+    path.write_text("round       gen-multi-6d0da795\nresult      ok\n", encoding="utf-8")
+    assert tasks_mod._reused_marker(path) is None
+
+
 def test_tasks_api_returns_owner_and_positions(client, monkeypatch):
     from vrstudio.web.identity import User
 

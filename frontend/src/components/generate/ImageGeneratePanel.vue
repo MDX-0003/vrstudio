@@ -37,6 +37,8 @@ const imageModelId = defineModel<number | null>('imageModelId', { required: true
 const selectedProject = defineModel<string>('selectedProject', { required: true })
 const selectedEpisode = defineModel<string>('selectedEpisode', { required: true })
 const selectedSession = defineModel<string>('selectedSession', { required: true })
+/** 一次性开关：勾上再提交会另开一轮并重新计费，提交后由页面清空。 */
+const resubmit = defineModel<boolean>('resubmit', { required: true })
 
 const emit = defineEmits<{
   extract: []
@@ -199,6 +201,14 @@ const extractLabel = computed(() => (props.info.flow === 'patchimg' ? '运行抽
         >
           预演检查（不花额度）
         </el-button>
+        <el-checkbox
+          v-model="resubmit"
+          size="small"
+          class="resubmit-switch"
+          title="同一提示词再开一轮：不复用已有候选，会重新扣额度"
+        >
+          再抽一版（重新计费）
+        </el-checkbox>
         <el-button
           type="primary"
           size="small"

@@ -13,6 +13,8 @@ const videoModelId = defineModel<number | null>('videoModelId', { required: true
 const selectedProject = defineModel<string>('selectedProject', { required: true })
 const selectedEpisode = defineModel<string>('selectedEpisode', { required: true })
 const selectedSession = defineModel<string>('selectedSession', { required: true })
+/** 一次性开关：勾上再提交会另开一轮并重新计费，提交后由页面清空。 */
+const resubmit = defineModel<boolean>('resubmit', { required: true })
 
 defineProps<{
   modeOptions: ModeInfo[]
@@ -226,6 +228,14 @@ function scaleLabel(option: InputOption): string {
           >
             预演检查（不扣费）
           </el-button>
+          <el-checkbox
+            v-model="resubmit"
+            size="small"
+            class="resubmit-switch"
+            title="同一提示词再开一轮：不复用已有结果，会重新扣额度"
+          >
+            再抽一版（重新计费）
+          </el-checkbox>
           <el-button
             type="primary"
             size="small"

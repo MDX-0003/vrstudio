@@ -28,6 +28,11 @@ from ..progress import logs_dir
 from .logging import TASK_LOGGER
 
 _TAIL_BYTES = 8 * 1024
+#: 复用标记在日志开头（提示词与命令行之前）；读到这一段就够。
+_HEAD_BYTES = 256 * 1024
+_REUSED_LINE = re.compile(
+    r"^reused\s+(?P<round>\S+)\s+reason=(?P<reason>key|resumed)\s+"
+    r"task=(?P<task>\d+|-)(?=\s|$)")
 log = logging.getLogger(TASK_LOGGER)
 
 
@@ -48,6 +53,30 @@ def _history_path() -> Path:
     directory = logs_dir() / "tasks"
     directory.mkdir(parents=True, exist_ok=True)
     return directory / "history.jsonl"
+
+
+def _reused_marker(path: Path | None) -> dict | None:
+    """vrgen 的 ``reused`` 行 → 「这一轮没花额度」的机器可读事实。
+
+    契约见 ``docs/case-model.md`` 的 submit 输出段；标记在日志开头，所以只读头部。
+    """
+    if path is None or not path.is_file():
+        return None
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(_HEAD_BYTES)
+    except OSError:
+        return None
+    for line in decode_text(head).splitlines():
+        match = _REUSED_LINE.match(line)
+        if match:
+            raw = match.group("task")
+            return {
+                "round": match.group("round"),
+                "reason": match.group("reason"),
+                "task_id": None if raw == "-" else int(raw),
+            }
+    return None
 
 
 class Task:
@@ -74,6 +103,8 @@ class Task:
         self.finished_at: str | None = None
         self.progress = None
         self.error: str | None = None
+        #: 复用已有轮次（本次未提交、未花费）；字段见 _reused_marker。
+        self.reused: dict | None = None
         self.submitted = time.strftime("%m-%d %H:%M:%S")   # 用户点按钮的时刻
         self.started = 0.0
         self.out_path: Path | None = None
@@ -99,6 +130,8 @@ class Task:
             self.started = time.time()
             self.started_at = _now()
             self.returncode = self.proc.wait()
+        if self.kind == "submit":
+            self.reused = _reused_marker(self.out_path)
         self.state = "done" if self.returncode == 0 else "failed"
         self.finished_at = _now()
         data = {
@@ -134,6 +167,7 @@ class Task:
             "progress": self.progress,
             "log_path": str(self.out_path) if self.out_path else None,
             "error": self.error,
+            "reused": self.reused,
             "request_id": self.request_id,
             "tail": self.tail(8),
         }
@@ -184,6 +218,7 @@ def _task_from_record(raw: str) -> Task | None:
         task.state = status
         task.progress = data.get("progress")
         task.error = data.get("error")
+        task.reused = data.get("reused")
         task.created_at = data.get("created_at") or task.created_at
         task.started_at = data.get("started_at")
         task.finished_at = data.get("finished_at")

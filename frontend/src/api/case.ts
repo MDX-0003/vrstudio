@@ -97,6 +97,8 @@ export interface RunPayload {
   sample?: number
   /** 视频生成：keep 保留结果音轨，none 下载后去音轨。 */
   audio?: 'keep' | 'none'
+  /** 提交生成：放弃复用已有轮次，同提示词另开一轮（重新计费）。 */
+  resubmit?: boolean
 }
 
 export function runOperation(

@@ -152,9 +152,12 @@ type RunStatus =
   | '排队中'
   | '运行中'
   | '已完成'
+  | '已复用上一轮'
   | '失败'
 const status = ref<RunStatus>('未预演')
 const statusDetail = ref('')
+/** 一次性：勾上后的这次提交不复用已有轮次，提交发起后立刻清空。 */
+const resubmit = ref(false)
 /**
  * 图片流程的状态回显：本地运行态优先，没有再按轮次台账推导。
  * 页面刷新或 serve 重启后 status 会回到「未预演」，但成片已经出了，
@@ -664,6 +667,7 @@ function imageSubmitBody(): RunPayload {
     resolution: resolution.value,
     num: imageNum.value,
   }
+  if (resubmit.value) body.resubmit = true
   if (imageModelId.value != null && imageModelId.value > 0) {
     body.image_model_id = imageModelId.value
   }
@@ -680,6 +684,7 @@ function submitBody(): RunPayload {
     scale: scale.value,
     audio: audio.value,
   }
+  if (resubmit.value) body.resubmit = true
   if (duration.value !== 'auto') body.duration = Number(duration.value)
   return body
 }
@@ -725,8 +730,16 @@ function syncRunStatus(): void {
     if (task.status === 'queued') status.value = '排队中'
     if (task.status === 'running') status.value = '运行中'
     if (task.status === 'done') {
-      status.value = '已完成'
-      statusDetail.value = '生成任务已完成'
+      if (task.reused) {
+        // rc=0 且没有发请求：这一轮已存在，钱没花。必须和真提交区分开。
+        status.value = '已复用上一轮'
+        statusDetail.value =
+          `未提交、未花费：复用了 ${task.reused.round}；` +
+          '要多抽一版请勾选「再抽一版（重新计费）」再提交'
+      } else {
+        status.value = '已完成'
+        statusDetail.value = '生成任务已完成'
+      }
       activeKind.value = null
       void refreshCase()
     }
@@ -801,6 +814,8 @@ async function execute(op: 'dry_run' | 'submit'): Promise<void> {
   try {
     const body: RunPayload = isImageFlow.value ? imageSubmitBody() : submitBody()
     await runOperation(caseName.value, op, body)
+    // 再抽一版是一次性的：提交发起后立即复位，避免下一次静默多花钱。
+    if (op === 'submit') resubmit.value = false
     void refreshTasks()
   } catch (err) {
     activeKind.value = null
@@ -927,6 +942,7 @@ onUnmounted(() => {
 
 function statusTone(): string {
   if (status.value === '预演通过' || status.value === '已完成') return 'done'
+  if (status.value === '已复用上一轮') return 'stale'
   if (['提交中', '排队中', '运行中', '预演中'].includes(status.value)) return 'queued'
   if (status.value === '失败') return 'failed'
   if (status.value === '预演已过期') return 'stale'
@@ -974,6 +990,7 @@ function statusTone(): string {
         v-model:selected-project="selectedProject"
         v-model:selected-episode="selectedEpisode"
         v-model:selected-session="selectedSession"
+        v-model:resubmit="resubmit"
         :case-name="caseName"
         :info="info"
         :resolution-options="imageResolutionValues"
@@ -1027,6 +1044,7 @@ function statusTone(): string {
     v-model:selected-project="selectedProject"
     v-model:selected-episode="selectedEpisode"
     v-model:selected-session="selectedSession"
+    v-model:resubmit="resubmit"
     :mode-options="modeOptions"
     :ratio-options="ratioOptions"
     :resolution-options="resolutionOptions"

@@ -102,6 +102,13 @@ def test_submit_argv_omits_absent_image_params(patchimg_case):
     assert "--session-id" not in argv
 
 
+def test_submit_argv_carries_resubmit_only_on_submit(patchimg_case):
+    """再抽一版只挂真提交；预演不能被它带去开新轮。"""
+    assert "--resubmit" in web_app._op_argv(patchimg_case, "submit", {"resubmit": True})
+    assert "--resubmit" not in web_app._op_argv(patchimg_case, "submit", {})
+    assert "--resubmit" not in web_app._op_argv(patchimg_case, "dry_run", {"resubmit": True})
+
+
 def test_adopt_argv_carries_index(patchimg_case):
     argv = web_app._op_argv(patchimg_case, "adopt", {"round": "img-abc", "index": 3})
     assert argv[argv.index("--round") + 1] == "img-abc"
