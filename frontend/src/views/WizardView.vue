@@ -396,6 +396,7 @@ watch(caseName, (_next, previous) => {
         :key="caseName"
         :case-name="caseName"
         :info="caseInfo"
+        @updated="onStepUpdated"
       />
       <GenerateStep
         v-else

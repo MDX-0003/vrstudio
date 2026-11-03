@@ -30,8 +30,18 @@ vi.mock('@/api/workflow', () => ({
   fetchProxy: vi.fn(),
 }))
 
+vi.mock('@/api/tasks', () => ({ fetchTasks: vi.fn() }))
+
+vi.mock('@/api/case', () => ({ fetchCase: vi.fn() }))
+
+import { fetchCase } from '@/api/case'
+import { fetchTasks } from '@/api/tasks'
 import CompareStep from '@/views/wizard/CompareStep.vue'
-import type { CaseInfo } from '@/types/case-info'
+import type { CaseInfo, OutputFile } from '@/types/case-info'
+import type { TaskView } from '@/types/task'
+
+const fetchTasksMock = vi.mocked(fetchTasks)
+const fetchCaseMock = vi.mocked(fetchCase)
 
 const ButtonStub = defineComponent({
   props: { disabled: Boolean, loading: Boolean, icon: [Object, Function] },
@@ -101,10 +111,10 @@ function imageCase(): CaseInfo {
   } as unknown as CaseInfo
 }
 
-async function mountCompare(info: CaseInfo) {
+async function mountCompare(info: CaseInfo, caseName = 'p1') {
   viewerInstances.length = 0
   const wrapper = mount(CompareStep, {
-    props: { caseName: 'p1', info },
+    props: { caseName, info },
     global: { stubs },
   })
   await flushPromises()
@@ -153,5 +163,154 @@ describe('CompareStep 图片流程', () => {
     expect(download.text()).toContain('下载')
     expect(download.attributes('href')).toContain('download=1')
     wrapper.unmount()
+  })
+})
+
+function relightOut(file: string): OutputFile {
+  return {
+    file,
+    name: file,
+    exists: true,
+    open_url: `/file?root=cases&p=relight_web_01%2Fout%2F${encodeURIComponent(file)}`,
+  }
+}
+
+/** out/ 里混入的 relight-* 散件按文件名排在时间戳产物之后，是当初选错成片的现场。 */
+function relightCase(overrides?: { current?: string; outputs?: string[] }): CaseInfo {
+  const outputs = (overrides?.outputs ?? [
+    '20261102-105534_relit.mp4',
+    '20261103-103409_relit.mp4',
+    'relight-test-原始视频.mp4',
+    'relight-tset-结果视频.mp4',
+  ]).map(relightOut)
+  const current = relightOut(overrides?.current ?? '20261103-103409_relit.mp4')
+  return {
+    name: 'relight_web_01',
+    flow: 'relight',
+    source_url: '/video/source/relight_web_01',
+    source_file: null,
+    proxy: null,
+    outputs,
+    relight: {
+      media: 'video',
+      gt: { asset: 'v4', kind: 'video', path: 'assets/v4.mp4',
+            entry: { name: 'v4.mp4', open_url: '/file?root=cases&p=v4.mp4' } },
+      atmo: null,
+      draft: {},
+      current,
+      samples: [],
+    },
+    gates: {},
+    assets: [],
+  } as unknown as CaseInfo
+}
+
+function relightTask(overrides: Partial<TaskView> & Pick<TaskView, 'id' | 'status'>): TaskView {
+  return {
+    kind: 'relight',
+    case: 'relight_web_01',
+    owner_id: null,
+    owner_name: null,
+    project_id: null,
+    episode_id: null,
+    session_id: null,
+    queue_position: null,
+    created_at: new Date().toISOString(),
+    started_at: null,
+    finished_at: null,
+    progress: null,
+    log_path: null,
+    error: null,
+    reused: null,
+    request_id: null,
+    tail: [],
+    ...overrides,
+  }
+}
+
+describe('CompareStep relight 流程', () => {
+  it('defaults the right video to [relight] current, not the alphabetically-later stray file', async () => {
+    const wrapper = await mountCompare(relightCase())
+    const videos = wrapper.findAll('video')
+    expect(videos).toHaveLength(2)
+    expect(videos[1].attributes('src')).toContain('20261103-103409_relit.mp4')
+    expect(videos[1].attributes('src')).not.toContain('relight-tset')
+    wrapper.unmount()
+  })
+
+  it('offers the output dropdown for relight and switching swaps the right video', async () => {
+    const wrapper = await mountCompare(relightCase())
+    const outputLabel = wrapper
+      .findAll('label.ctl')
+      .find((node) => node.text().includes('右路成片'))
+    expect(outputLabel).toBeDefined()
+    await outputLabel!.find('select').setValue('20261102-105534_relit.mp4')
+    await flushPromises()
+    expect(wrapper.findAll('video')[1].attributes('src')).toContain(
+      '20261102-105534_relit.mp4',
+    )
+    wrapper.unmount()
+  })
+
+  it('follows a new [relight] current after the case refreshes', async () => {
+    const wrapper = await mountCompare(relightCase())
+    const updated = relightCase({
+      outputs: [
+        '20261102-105534_relit.mp4',
+        '20261103-103409_relit.mp4',
+        'relight-test-原始视频.mp4',
+        'relight-tset-结果视频.mp4',
+        '20261104-120000_relit.mp4',
+      ],
+      current: '20261104-120000_relit.mp4',
+    })
+    await wrapper.setProps({ info: updated })
+    await flushPromises()
+    expect(wrapper.findAll('video')[1].attributes('src')).toContain(
+      '20261104-120000_relit.mp4',
+    )
+    wrapper.unmount()
+  })
+
+  it('refreshes the case when a relight run finishes while the page is open', async () => {
+    vi.useFakeTimers()
+    try {
+      fetchTasksMock.mockResolvedValue({
+        tasks: [relightTask({ id: 't1', status: 'running' })],
+      })
+      const wrapper = await mountCompare(relightCase(), 'relight_web_01')
+      await vi.advanceTimersByTimeAsync(2000)
+      await flushPromises()
+      expect(wrapper.emitted('updated')).toBeUndefined()
+
+      const fresh = relightCase()
+      fetchTasksMock.mockResolvedValue({
+        tasks: [relightTask({ id: 't1', status: 'done' })],
+      })
+      fetchCaseMock.mockResolvedValue(fresh)
+      await vi.advanceTimersByTimeAsync(2000)
+      await flushPromises()
+      expect(fetchCaseMock).toHaveBeenCalledWith('relight_web_01')
+      expect(wrapper.emitted('updated')).toEqual([[fresh]])
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not refresh for a run that finished before the page mounted', async () => {
+    vi.useFakeTimers()
+    try {
+      fetchTasksMock.mockResolvedValue({
+        tasks: [relightTask({ id: 't0', status: 'done', created_at: '2026-01-01T00:00:00' })],
+      })
+      const wrapper = await mountCompare(relightCase())
+      await vi.advanceTimersByTimeAsync(6000)
+      await flushPromises()
+      expect(wrapper.emitted('updated')).toBeUndefined()
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

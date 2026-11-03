@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { FullScreen, Refresh, VideoPause, VideoPlay } from '@element-plus/icons-vue'
+import { fetchCase } from '@/api/case'
 import { ensureProxy, fetchProxy } from '@/api/workflow'
 import { Erp360Compare } from '@/legacy/Erp360Compare'
+import { useCaseTasks } from '@/composables/useCaseTasks'
 import type { CaseInfo, FullRedrawImageReport, OutputFile } from '@/types/case-info'
 
 const props = defineProps<{ caseName: string; info: CaseInfo }>()
+const emit = defineEmits<{ updated: [data: CaseInfo] }>()
 
 /** 图片流程（patchimg / fullRedrawImg）用并排静态图对比，不走 WebGL 视频对比。 */
 const isImageFlow = computed(
@@ -23,19 +26,54 @@ const sourceImageUrl = computed(() =>
     ? (props.info.relight?.gt?.entry.open_url ?? '')
     : (props.info.source_file?.open_url ?? ''),
 )
+
+// —— relight 成片的实时跟随 ——
+// 对比页自己不发起任务：轮询本 case 的 relight 任务，完成时向父级要一份新 case，
+// current 指针变化再由下面的 watch 切右路。复用打光页同一条 useCaseTasks 机制。
+const mountedAt = Date.now()
+const seenLive = new Set<string>()
+const handledTasks = new Set<string>()
+const { latest, start } = useCaseTasks(computed(() => props.caseName), ['relight'])
+
+watch(latest, async (task) => {
+  if (!task || task.kind !== 'relight') return
+  if (task.status !== 'done') {
+    seenLive.add(task.id)
+    return
+  }
+  if (handledTasks.has(task.id)) return
+  const created = new Date(task.created_at).getTime()
+  // 挂载前就完成的旧任务不触发刷新（mount 拉到的数据已含它的产物）；
+  // 挂载期间见过它运行、或挂载后新建的任务，完成即刷新。
+  const fresh = Number.isFinite(created) && created >= mountedAt - 5000
+  if (!fresh && !seenLive.has(task.id)) {
+    handledTasks.add(task.id)
+    return
+  }
+  handledTasks.add(task.id)
+  try {
+    emit('updated', await fetchCase(props.caseName))
+  } catch {
+    handledTasks.delete(task.id) // 拉取失败，下一轮轮询重试
+  }
+})
 const outputs = computed<OutputFile[]>(() => props.info.outputs)
 const selectedFile = ref<string>('')
 const selected = computed(
   () => outputs.value.find((item) => item.file === selectedFile.value) ?? null,
 )
+const currentFile = computed(() => props.info.relight?.current?.name ?? '')
 /**
- * 右路成片：图片流程与视频一样选「最新一份」，下拉可切；relight 图片底版用当前采用物。
+ * 右路成片的默认选中：relight 跟随 ``[relight] current``（后端已兜底取 out/ 最新，
+ * out/ 里混入的非产物文件不会带偏默认值）；其余流程取列表最后一项（升序最新）。
  * 旧实现直接取 outputs[0]（升序第一份，即最旧一份），跑过多轮 merge 的 case 会看错图。
  */
-const imageOutput = computed(() =>
-  isRelight.value ? (props.info.relight?.current ?? null) : (selected.value ?? null),
-)
-const outputImageUrl = computed(() => imageOutput.value?.open_url ?? '')
+function defaultSelection(rows: OutputFile[]): string {
+  const pinned = isRelight.value ? currentFile.value : ''
+  if (pinned && rows.some((item) => item.file === pinned)) return pinned
+  return rows[rows.length - 1].file
+}
+const outputImageUrl = computed(() => selected.value?.open_url ?? '')
 /** 「打开原图」新标签直开，「下载」带 download=1 走 attachment。 */
 const imageOpenUrl = computed(() => outputImageUrl.value)
 const imageDownloadUrl = computed(() =>
@@ -326,11 +364,19 @@ watch(
       return
     }
     if (!rows.some((item) => item.file === selectedFile.value)) {
-      selectedFile.value = rows[rows.length - 1].file
+      selectedFile.value = defaultSelection(rows)
     }
   },
   { immediate: true },
 )
+
+// 新成片落盘（current 指针变化）即切右路；手动选中的旧版本在下一次成片前保持。
+watch(currentFile, (file) => {
+  if (!isRelight.value || !file) return
+  if (outputs.value.some((item) => item.file === file)) {
+    selectedFile.value = file
+  }
+})
 
 watch(selectedFile, () => {
   if (isStill.value) {
@@ -350,6 +396,7 @@ watch([sourceImageUrl, outputImageUrl], () => {
 
 onMounted(async () => {
   await nextTick()
+  void start()
   if (isStill.value) {
     if (selected.value) selectedFile.value = selected.value.file
     initStillViewer()
@@ -395,7 +442,7 @@ function onKeydown(event: KeyboardEvent): void {
 
     <template v-else>
       <div class="compare-top">
-        <label v-if="isStill && !isRelight" class="ctl">
+        <label v-if="isStill || isRelight" class="ctl">
           <span>右路成片</span>
           <el-select
             :model-value="selectedFile"
@@ -437,7 +484,7 @@ function onKeydown(event: KeyboardEvent): void {
         </template>
         <template v-else>
           <span class="muted">左路：{{ leftLabel }}</span>
-          <span class="muted">右路：{{ imageOutput?.name ?? '交付图缺失' }}</span>
+          <span class="muted">右路：{{ selected?.name ?? '交付图缺失' }}</span>
           <a
             v-if="imageOpenUrl"
             class="file-action"
