@@ -3445,7 +3445,9 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
                 argv += [flag, str(body[key])]
         if body.get("highlight_clip"):
             argv += ["--highlight-clip"]
-        return [*argv, "--quiet"]
+        # 不加 --quiet：relight 的步骤/小样逐帧行是过程信息，任务卡片靠它们显示进度；
+        # 整段渲染的速率行不走 Log，加不加 --quiet 都会写进日志。
+        return argv
     raise CaseError(f"未知操作：{op}")
 
 

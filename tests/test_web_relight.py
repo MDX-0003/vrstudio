@@ -263,7 +263,8 @@ def test_op_argv_uses_case_and_shared_params(tmp_path, client):
     assert "--ref-frame" not in argv
     assert "--scene" in argv and "day" in argv
     assert "--highlight-clip" in argv
-    assert argv[-1] == "--quiet"
+    # web 任务卡片靠 tail 显示过程：relight 不能静默，否则只剩收尾几行。
+    assert "--quiet" not in argv
 
 
 def test_op_argv_video_gt_passes_ref_frame_and_crf(tmp_path, client):
