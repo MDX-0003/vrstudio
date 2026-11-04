@@ -90,9 +90,7 @@ const pinnedRound = computed(() => {
 const shownRounds = computed(() => {
   const head = recentRounds.value.slice(0, 1)
   const pinned = pinnedRound.value
-  return pinned && !head.some((round) => round.round === pinned.round)
-    ? [...head, pinned]
-    : head
+  return pinned && !head.some((round) => round.round === pinned.round) ? [...head, pinned] : head
 })
 const olderRounds = computed(() => {
   const shown = new Set(shownRounds.value.map((round) => round.round))
@@ -551,7 +549,9 @@ onUnmounted(() => {
             </figcaption>
             <div class="kf-shot">
               <img v-if="rawFrame?.exists" :src="rawFrame.url" :alt="rawLabel" />
-              <div v-else class="kf-shot-empty"><span>缺{{ rawLabel }}</span></div>
+              <div v-else class="kf-shot-empty">
+                <span>缺{{ rawLabel }}</span>
+              </div>
               <FileOpenLink :file="rawFrame" :label="`打开${rawLabel}`" class="card-open" />
             </div>
             <div class="kf-slot-file mono">{{ rawFrame?.name || '—' }}</div>
@@ -567,22 +567,12 @@ onUnmounted(() => {
             <figcaption class="kf-slot-cap">
               <span class="kf-slot-no">{{ primary ? '图2' : '—' }}</span>
               <span>参考图组</span>
-              <el-button
-                link
-                type="primary"
-                size="small"
-                class="kf-slot-action"
-                @click="focusRefs"
-              >
+              <el-button link type="primary" size="small" class="kf-slot-action" @click="focusRefs">
                 编辑参考图
               </el-button>
             </figcaption>
             <div class="kf-shot contain">
-              <img
-                v-if="primary"
-                :src="primary.url || assetUrl(primary.asset)"
-                alt="人物三视图"
-              />
+              <img v-if="primary" :src="primary.url || assetUrl(primary.asset)" alt="人物三视图" />
               <div v-else class="kf-shot-empty"><span>还没有人物三视图</span></div>
               <span v-if="refs.length > 1" class="kf-stack">共 {{ refs.length }} 张</span>
               <FileOpenLink
@@ -599,9 +589,7 @@ onUnmounted(() => {
             <figcaption class="kf-slot-cap">
               <span class="kf-slot-no">{{ anchorNumber ?? '—' }}</span>
               <span>首帧定稿</span>
-              <span class="kf-slot-note">{{
-                anchorNumber ? '自动追加' : '尾帧步骤插入'
-              }}</span>
+              <span class="kf-slot-note">{{ anchorNumber ? '自动追加' : '尾帧步骤插入' }}</span>
             </figcaption>
             <div v-if="step === 'last' && firstPick && primary" class="kf-shot">
               <img :src="pickedUrl(firstPick)" alt="首帧定稿" />
@@ -626,9 +614,11 @@ onUnmounted(() => {
                 class="kf-slot-action"
                 :loading="rawUsing"
                 :disabled="!rawFrame?.exists"
-                :title="rawFrame?.exists
-                  ? '不重绘，直接把当前抽取的原始帧当定稿（不花额度）'
-                  : '当前抽取版本没有这张原始帧；先重新抽取'"
+                :title="
+                  rawFrame?.exists
+                    ? '不重绘，直接把当前抽取的原始帧当定稿（不花额度）'
+                    : '当前抽取版本没有这张原始帧；先重新抽取'
+                "
                 @click="useRawFrame"
               >
                 直接用原始帧
@@ -714,7 +704,13 @@ onUnmounted(() => {
             />
           </el-select>
           <el-input-number v-model="num" :min="1" :max="KEYFRAME_MAX_CANDIDATES" size="small" />
-          <el-button link type="primary" :icon="Refresh" :loading="roundsLoading" @click="loadRounds">
+          <el-button
+            link
+            type="primary"
+            :icon="Refresh"
+            :loading="roundsLoading"
+            @click="loadRounds"
+          >
             刷新
           </el-button>
           <el-button

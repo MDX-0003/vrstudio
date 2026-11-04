@@ -1,10 +1,4 @@
-export type Flow =
-  | 'patch'
-  | 'fullredraw'
-  | 'gen'
-  | 'patchimg'
-  | 'fullRedrawImg'
-  | 'relight'
+export type Flow = 'patch' | 'fullredraw' | 'gen' | 'patchimg' | 'fullRedrawImg' | 'relight'
 
 export type TaskStatus = 'idle' | 'queued' | 'running' | 'done' | 'failed'
 

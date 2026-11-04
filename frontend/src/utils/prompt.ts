@@ -21,10 +21,7 @@ export function buildPromptVariables(
   if (!prompt) return []
   const values = prompt.vars ?? {}
   const placeholders = prompt.placeholders ?? []
-  const structural = new Set([
-    ...(prompt.geometry_keys ?? []),
-    ...(prompt.computed_keys ?? []),
-  ])
+  const structural = new Set([...(prompt.geometry_keys ?? []), ...(prompt.computed_keys ?? [])])
   const keys = [
     ...placeholders,
     ...Object.keys(values).filter((key) => !placeholders.includes(key)),
@@ -37,7 +34,7 @@ export function buildPromptVariables(
       key,
       label: prompt.labels?.[key] || key,
       help: prompt.help?.[key] || '',
-      value: defined ? values[key] ?? '' : '',
+      value: defined ? (values[key] ?? '') : '',
       defined,
     })
   }

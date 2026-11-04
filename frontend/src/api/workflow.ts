@@ -1,11 +1,4 @@
-import type {
-  CaseInfo,
-  Coverage,
-  FrameRange,
-  Footprint,
-  Inner,
-  Viewport,
-} from '@/types/case-info'
+import type { CaseInfo, Coverage, FrameRange, Footprint, Inner, Viewport } from '@/types/case-info'
 import { getJson, postJson } from './client'
 import { casePath } from './path'
 

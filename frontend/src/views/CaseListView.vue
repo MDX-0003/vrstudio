@@ -152,8 +152,10 @@ async function loadCreateOptions(): Promise<void> {
   try {
     const [sourceData, modeData] = await Promise.all([fetchSources(), fetchModes()])
     const files = sourceData.files ?? []
-    sourceVideos.value = sourceData.videos ?? files.filter((name) => !/\.(png|jpe?g|webp)$/i.test(name))
-    sourceImages.value = sourceData.images ?? files.filter((name) => /\.(png|jpe?g|webp)$/i.test(name))
+    sourceVideos.value =
+      sourceData.videos ?? files.filter((name) => !/\.(png|jpe?g|webp)$/i.test(name))
+    sourceImages.value =
+      sourceData.images ?? files.filter((name) => /\.(png|jpe?g|webp)$/i.test(name))
     modes.value = modeData.modes ?? []
     form.source = createSources.value[0] ?? ''
     if (!form.mode && modes.value.length) form.mode = modes.value[0].value
@@ -182,7 +184,9 @@ async function createCase(): Promise<void> {
     return
   }
   if (needsSource.value && !form.source) {
-    ElMessage.warning(createImageFlow.value ? 'sources/ 里还没有可选图片' : 'sources/ 里还没有可选视频')
+    ElMessage.warning(
+      createImageFlow.value ? 'sources/ 里还没有可选图片' : 'sources/ 里还没有可选视频',
+    )
     return
   }
   if (form.flow === 'gen' && !form.mode) {

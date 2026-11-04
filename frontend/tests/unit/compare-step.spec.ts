@@ -136,9 +136,7 @@ describe('CompareStep 图片流程', () => {
     const wrapper = await mountCompare(imageCase())
     const viewer = viewerInstances[0]
     expect(viewer.sourceB).toBeInstanceOf(HTMLImageElement)
-    expect((viewer.sourceB as HTMLImageElement).src).toContain(
-      '20261102-094449_image.png',
-    )
+    expect((viewer.sourceB as HTMLImageElement).src).toContain('20261102-094449_image.png')
     expect((viewer.sourceA as HTMLImageElement).src).toContain('light_source.png')
     expect(wrapper.text()).toContain('20261102-094449_image.png')
     wrapper.unmount()
@@ -236,12 +234,14 @@ function relightOut(file: string): OutputFile {
 
 /** out/ 里混入的 relight-* 散件按文件名排在时间戳产物之后，是当初选错成片的现场。 */
 function relightCase(overrides?: { current?: string; outputs?: string[] }): CaseInfo {
-  const outputs = (overrides?.outputs ?? [
-    '20261102-105534_relit.mp4',
-    '20261103-103409_relit.mp4',
-    'relight-test-原始视频.mp4',
-    'relight-tset-结果视频.mp4',
-  ]).map(relightOut)
+  const outputs = (
+    overrides?.outputs ?? [
+      '20261102-105534_relit.mp4',
+      '20261103-103409_relit.mp4',
+      'relight-test-原始视频.mp4',
+      'relight-tset-结果视频.mp4',
+    ]
+  ).map(relightOut)
   const current = relightOut(overrides?.current ?? '20261103-103409_relit.mp4')
   return {
     name: 'relight_web_01',
@@ -252,8 +252,12 @@ function relightCase(overrides?: { current?: string; outputs?: string[] }): Case
     outputs,
     relight: {
       media: 'video',
-      gt: { asset: 'v4', kind: 'video', path: 'assets/v4.mp4',
-            entry: { name: 'v4.mp4', open_url: '/file?root=cases&p=v4.mp4' } },
+      gt: {
+        asset: 'v4',
+        kind: 'video',
+        path: 'assets/v4.mp4',
+        entry: { name: 'v4.mp4', open_url: '/file?root=cases&p=v4.mp4' },
+      },
       atmo: null,
       draft: {},
       current,
@@ -305,9 +309,7 @@ describe('CompareStep relight 流程', () => {
     expect(outputLabel).toBeDefined()
     await outputLabel!.find('select').setValue('20261102-105534_relit.mp4')
     await flushPromises()
-    expect(wrapper.findAll('video')[1].attributes('src')).toContain(
-      '20261102-105534_relit.mp4',
-    )
+    expect(wrapper.findAll('video')[1].attributes('src')).toContain('20261102-105534_relit.mp4')
     wrapper.unmount()
   })
 
@@ -325,9 +327,7 @@ describe('CompareStep relight 流程', () => {
     })
     await wrapper.setProps({ info: updated })
     await flushPromises()
-    expect(wrapper.findAll('video')[1].attributes('src')).toContain(
-      '20261104-120000_relit.mp4',
-    )
+    expect(wrapper.findAll('video')[1].attributes('src')).toContain('20261104-120000_relit.mp4')
     wrapper.unmount()
   })
 

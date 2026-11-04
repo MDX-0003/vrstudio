@@ -58,7 +58,10 @@ interface RelightReport {
 const props = defineProps<{ caseName: string; info: CaseInfo }>()
 const emit = defineEmits<{ updated: [data: CaseInfo] }>()
 
-const { latest, start } = useCaseTasks(computed(() => props.caseName), ['relight'])
+const { latest, start } = useCaseTasks(
+  computed(() => props.caseName),
+  ['relight'],
+)
 const running = ref('')
 const report = ref<RelightReport | null>(null)
 const sampleReport = ref<RelightReport | null>(null)
@@ -125,8 +128,10 @@ async function loadSampleReport(): Promise<void> {
 /** 时间戳是本页的重点：运行什么时候发生，比分段数字更先被看到。 */
 function formatDate(date: Date): string {
   const pad = (n: number): string => String(n).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
-    + `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  )
 }
 
 function formatTime(iso?: string): string {
@@ -150,7 +155,7 @@ const MAPPING_LABELS: Record<string, string> = {
 function atmoLabel(r: RelightReport): string {
   if (r.atmo_kind !== 'video') return '图片 · 固定光场'
   const frames = r.atmo_frames ? `${r.atmo_frames} 帧` : '帧数未知'
-  const mapping = r.atmo_mapping ? MAPPING_LABELS[r.atmo_mapping] ?? r.atmo_mapping : '按进度'
+  const mapping = r.atmo_mapping ? (MAPPING_LABELS[r.atmo_mapping] ?? r.atmo_mapping) : '按进度'
   return `视频 · 逐帧光场（${frames}，${mapping}对齐）`
 }
 
@@ -196,7 +201,10 @@ onMounted(() => {
 
 watch(draft, applyDraft)
 watch(current, () => void loadReport())
-watch(() => payload.value?.sample_report?.open_url, () => void loadSampleReport())
+watch(
+  () => payload.value?.sample_report?.open_url,
+  () => void loadSampleReport(),
+)
 
 function runPayload() {
   const body: Record<string, string | number | boolean> = {
@@ -294,9 +302,21 @@ const percent = (value: number | undefined): string =>
           <el-checkbox v-model="form.highlight_clip">高光软裁切</el-checkbox>
           <template v-if="form.highlight_clip">
             <span class="muted">拐点</span>
-            <el-input-number v-model="form.clip_knee" :min="0.01" :max="0.99" :step="0.01" size="small" />
+            <el-input-number
+              v-model="form.clip_knee"
+              :min="0.01"
+              :max="0.99"
+              :step="0.01"
+              size="small"
+            />
             <span class="muted">上限</span>
-            <el-input-number v-model="form.clip_max" :min="0.02" :max="1" :step="0.01" size="small" />
+            <el-input-number
+              v-model="form.clip_max"
+              :min="0.02"
+              :max="1"
+              :step="0.01"
+              size="small"
+            />
           </template>
         </div>
         <p class="clip-hint muted">
@@ -431,7 +451,9 @@ const percent = (value: number | undefined): string =>
             <span>对齐内点 / 匹配</span>
             <span>{{ report.align.inliers }} / {{ report.align.matches }}</span>
             <span>缩放 · 旋转</span>
-            <span>{{ report.align.scale.toFixed(5) }} · {{ report.align.angle_deg.toFixed(4) }}°</span>
+            <span
+              >{{ report.align.scale.toFixed(5) }} · {{ report.align.angle_deg.toFixed(4) }}°</span
+            >
             <span>结构重合度</span>
             <span>
               {{ report.align.correlation_before.toFixed(3) }} →
@@ -462,7 +484,9 @@ const percent = (value: number | undefined): string =>
               </span>
             </template>
             <span>高光裁切</span>
-            <span>{{ report.clip ? percent(report.clip.clipped_before ?? undefined) : '未开启' }}</span>
+            <span>{{
+              report.clip ? percent(report.clip.clipped_before ?? undefined) : '未开启'
+            }}</span>
             <span>耗时</span>
             <span>{{ report.seconds }}s</span>
           </div>

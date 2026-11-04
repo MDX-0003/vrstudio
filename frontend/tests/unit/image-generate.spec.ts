@@ -184,9 +184,9 @@ describe('GenerateStep 图片流程', () => {
       global: { stubs, provide: { [routerKey]: { push: vi.fn() } } },
     })
     await flushPromises()
-    expect(wrapper.findAll('button').filter((item) => item.text().includes('选用这张'))).toHaveLength(
-      1,
-    )
+    expect(
+      wrapper.findAll('button').filter((item) => item.text().includes('选用这张')),
+    ).toHaveLength(1)
     expect(wrapper.text()).toContain('当前采用：img-a 第 2 张')
     wrapper.unmount()
   })
@@ -205,9 +205,9 @@ describe('GenerateStep 图片流程', () => {
       ...(data.image_rounds ?? []),
     ]
     const { wrapper } = await mountStep(data)
-    expect(wrapper.findAll('button').filter((item) => item.text().includes('选用这张'))).toHaveLength(
-      2,
-    )
+    expect(
+      wrapper.findAll('button').filter((item) => item.text().includes('选用这张')),
+    ).toHaveLength(2)
     expect(wrapper.text()).toContain('img-a · gate=ok')
     wrapper.unmount()
   })

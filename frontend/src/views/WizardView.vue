@@ -98,9 +98,7 @@ function onCaseView(value: string | number | boolean | undefined): void {
 }
 
 const ownerMeta = computed(() => caseInfo.value?.meta ?? null)
-const ownerLabel = computed(
-  () => ownerMeta.value?.owner_name ?? '未定（首次打开时自动归属）',
-)
+const ownerLabel = computed(() => ownerMeta.value?.owner_name ?? '未定（首次打开时自动归属）')
 const ownerIsMine = computed(() => {
   const uid = session.user?.id
   return Boolean(uid) && ownerMeta.value?.owner_id === uid
@@ -214,7 +212,8 @@ function onCaseConflict(event: Event): void {
       : ''
   void ElMessageBox.confirm(
     (detail?.error || 'case 已被其他人修改，当前页面的保存会覆盖对方的改动。') +
-      ' ' + ownerSuffix +
+      ' ' +
+      ownerSuffix +
       '「仍要保存」会覆盖对方的改动；「重新加载」会丢弃你未保存的修改；' +
       '点右上角 × 保留当前页面，但本次会话的保存会被拒绝。',
     '保存冲突',
@@ -275,12 +274,7 @@ watch(caseName, (_next, previous) => {
     <div v-if="caseInfo" class="owner-line">
       <span class="muted">当前归属 = {{ ownerLabel }}</span>
       <template v-if="!ownerIsMine">
-        <el-button
-          size="small"
-          type="primary"
-          :loading="takingOwner"
-          @click="takeOwnership"
-        >
+        <el-button size="small" type="primary" :loading="takingOwner" @click="takeOwnership">
           归属到我的名下
         </el-button>
         <span class="muted owner-hint">

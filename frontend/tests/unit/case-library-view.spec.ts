@@ -136,7 +136,11 @@ describe('CaseLibraryView', () => {
   it('shows the flow master (pad/clip) with its submit state', () => {
     const data = info()
     data.assets = [
-      { ...asset('pad', 'edit_master', 'seedance_input.mp4', 'video'), source: 'flow', role_fixed: true },
+      {
+        ...asset('pad', 'edit_master', 'seedance_input.mp4', 'video'),
+        source: 'flow',
+        role_fixed: true,
+      },
     ]
     data.submit_entries = [{ asset: 'pad', role: 'edit_master' }]
     const wrapper = mountView(data)

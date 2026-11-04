@@ -39,11 +39,7 @@ function optionsFor(row: ReferenceRow): RoleOption[] {
 }
 
 function labelFor(row: ReferenceRow): string {
-  return (
-    row.roleLabel ||
-    optionsFor(row).find((item) => item.value === row.role)?.label ||
-    row.role
-  )
+  return row.roleLabel || optionsFor(row).find((item) => item.value === row.role)?.label || row.role
 }
 
 function helpFor(row: ReferenceRow, role: string): string {
@@ -95,7 +91,9 @@ const total = computed(() => props.rows.length)
         :title="helpFor(row, row.role)"
         size="small"
         class="role-select"
-        @change="(value: string | number | boolean | undefined) => emit('role', row.asset, String(value))"
+        @change="
+          (value: string | number | boolean | undefined) => emit('role', row.asset, String(value))
+        "
       >
         <el-option
           v-for="option in optionsFor(row)"

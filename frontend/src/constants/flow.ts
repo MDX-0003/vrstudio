@@ -10,6 +10,6 @@ export const flowMeta: Record<Flow, { label: string; tag: 'primary' | 'success' 
 }
 
 /** 流程筛选与表格 tag 共用同一份词表：加流程只改 flowMeta。 */
-export const flowOptions: { value: Flow; label: string }[] = (
-  Object.keys(flowMeta) as Flow[]
-).map((value) => ({ value, label: flowMeta[value].label }))
+export const flowOptions: { value: Flow; label: string }[] = (Object.keys(flowMeta) as Flow[]).map(
+  (value) => ({ value, label: flowMeta[value].label }),
+)

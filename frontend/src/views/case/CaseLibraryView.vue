@@ -66,9 +66,7 @@ function usageCount(asset: AssetDetail): number {
   return usageList(asset).length
 }
 
-const assets = computed(() =>
-  (props.info.assets ?? []).filter((asset) => asset.source !== 'flow'),
-)
+const assets = computed(() => (props.info.assets ?? []).filter((asset) => asset.source !== 'flow'))
 
 // 流程产物（fullredraw 的 pad、patch 的 clip）以 source === 'flow' 标记，后端按当前
 // 流程的 manifest 现算；前端不判断 flow 的名字，有就显示。
@@ -78,8 +76,8 @@ const flowProducts = computed(() =>
 
 const imageCount = computed(() => assets.value.filter((item) => item.kind === 'image').length)
 const videoCount = computed(() => assets.value.filter((item) => item.kind === 'video').length)
-const usedCount = computed(() =>
-  [...assets.value, ...flowProducts.value].filter((item) => usageCount(item)).length,
+const usedCount = computed(
+  () => [...assets.value, ...flowProducts.value].filter((item) => usageCount(item)).length,
 )
 
 // 源视频与流程产物都不写进 [[assets]]（见 docs/case-model.md 的说明），但它们属于
@@ -205,7 +203,8 @@ function sizeText(size: number | null): string {
       <div class="library-flow-head">
         <h3>流程文件</h3>
         <p class="muted">
-          源视频是流程起点，母版由流程生成（patch 的 clip、fullredraw 的 pad）；两者都不是素材文件，引用由生成页的提交清单决定，这里不能删除或改角色。
+          源视频是流程起点，母版由流程生成（patch 的 clip、fullredraw 的
+          pad）；两者都不是素材文件，引用由生成页的提交清单决定，这里不能删除或改角色。
         </p>
       </div>
       <div v-for="row in flowRows" :key="row.key" class="library-flow-row">
@@ -216,7 +215,13 @@ function sizeText(size: number | null): string {
     </div>
 
     <div class="library-toolbar">
-      <el-input v-model="search" size="small" :prefix-icon="Search" placeholder="搜索 id 或文件名" clearable />
+      <el-input
+        v-model="search"
+        size="small"
+        :prefix-icon="Search"
+        placeholder="搜索 id 或文件名"
+        clearable
+      />
       <el-select v-model="kind" size="small" style="width: 120px">
         <el-option label="全部类型" value="all" />
         <el-option label="图片" value="image" />
@@ -258,7 +263,9 @@ function sizeText(size: number | null): string {
           <div class="library-sub mono">{{ asset.id }}</div>
         </div>
         <div>
-          <el-tag size="small" effect="light">{{ asset.kind === 'image' ? '图片' : '视频' }}</el-tag>
+          <el-tag size="small" effect="light">{{
+            asset.kind === 'image' ? '图片' : '视频'
+          }}</el-tag>
         </div>
         <div class="muted library-meta">
           {{ asset.width && asset.height ? `${asset.width}×${asset.height}` : '—' }}

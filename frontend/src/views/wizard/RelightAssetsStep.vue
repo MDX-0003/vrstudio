@@ -155,7 +155,11 @@ function sizeText(slot: RelightSlot | null): string {
             去重打光
           </el-button>
           <span v-if="media" class="muted">
-            底版是{{ media === 'video' ? '视频：整段逐帧复用同一份光照场，只适用于固定机位' : '图片：只出一帧' }}
+            底版是{{
+              media === 'video'
+                ? '视频：整段逐帧复用同一份光照场，只适用于固定机位'
+                : '图片：只出一帧'
+            }}
           </span>
         </div>
       </div>

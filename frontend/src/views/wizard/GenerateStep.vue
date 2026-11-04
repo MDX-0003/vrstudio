@@ -2,13 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import {
-  fetchCase,
-  runOperation,
-  saveParams,
-  savePromptVar,
-  saveSubmitSelection,
-} from '@/api/case'
+import { fetchCase, runOperation, saveParams, savePromptVar, saveSubmitSelection } from '@/api/case'
 import type { RunPayload, SaveParamsPayload } from '@/api/case'
 import { fetchSessions } from '@/api/sessions'
 import AssetPickerDialog from '@/components/assets/AssetPickerDialog.vue'
@@ -104,10 +98,11 @@ const rounds = computed<RoundSummary[]>(() => props.info.rounds?.rounds ?? [])
 const visibleRoundRows = computed(() => visibleRounds(rounds.value))
 const roundsHint = computed(() => props.info.rounds?.hint ?? '')
 
-const adoptedRoundName = computed(() =>
-  String(props.info.adopt_round ?? '')
-    .split(/[\\/]/)
-    .pop() ?? '',
+const adoptedRoundName = computed(
+  () =>
+    String(props.info.adopt_round ?? '')
+      .split(/[\\/]/)
+      .pop() ?? '',
 )
 
 const generationParams = ref<GenerationParams | null>(null)
@@ -252,7 +247,7 @@ function applyInfo(data: CaseInfo): void {
       promptRendered.value = ''
     }
   } else if (prompt && !promptDirty) {
-      promptVars.value = buildPromptVariables(prompt, { includeUndefined: true })
+    promptVars.value = buildPromptVariables(prompt, { includeUndefined: true })
     promptRendered.value = prompt.rendered || prompt.template_text || ''
     promptRenderError.value = prompt.render_error || ''
   }
@@ -299,10 +294,7 @@ function applyInfo(data: CaseInfo): void {
   })
 }
 
-async function saveSubmit(
-  ids: string[],
-  roles: Record<string, string>,
-): Promise<void> {
+async function saveSubmit(ids: string[], roles: Record<string, string>): Promise<void> {
   if (selectionSaving.value) return
   selectionSaving.value = true
   try {
@@ -409,9 +401,10 @@ const durationOptions = computed<{ value: string; label: string }[]>(() => {
   // allMediaRef 的 15 秒上限）；下拉里如实标出来，否则只看到「约 17 秒」会以为能用。
   const auto = generationParams.value?.fixed?.duration_s ?? generationParams.value?.auto_duration_s
   const overflow = typeof auto === 'number' && auto > duration.max
-  const autoLabel = typeof auto === 'number'
-    ? `自动（约 ${auto} 秒${overflow ? `，超出 ${duration.max} 秒上限` : ''}）`
-    : '自动'
+  const autoLabel =
+    typeof auto === 'number'
+      ? `自动（约 ${auto} 秒${overflow ? `，超出 ${duration.max} 秒上限` : ''}）`
+      : '自动'
   const options = [{ value: 'auto', label: autoLabel }]
   for (let value = duration.min; value <= duration.max; value += 1) {
     options.push({ value: String(value), label: `${value} 秒` })
@@ -562,10 +555,7 @@ watch(resolutionOptions, (options) => {
   resolution.value = values[0]
 })
 
-watch(
-  [mode, ratio, resolution, scale, videoModelId, imageModelId],
-  scheduleParamsSave,
-)
+watch([mode, ratio, resolution, scale, videoModelId, imageModelId], scheduleParamsSave)
 watch([selectedProject, selectedEpisode, selectedSession], scheduleParamsSave)
 
 async function savePrompt(): Promise<void> {
@@ -772,8 +762,7 @@ watch(extractTasks, (tasks) => {
   if (!extractStartedAt) return
   const task = tasks.find(
     (item) =>
-      item.kind === 'extract' &&
-      new Date(item.created_at).getTime() >= extractStartedAt - 5000,
+      item.kind === 'extract' && new Date(item.created_at).getTime() >= extractStartedAt - 5000,
   )
   if (!task) return
   if (task.status === 'done') {

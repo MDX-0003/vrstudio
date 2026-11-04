@@ -139,90 +139,90 @@ watch(latest, async (task) => {
             <FileRow v-for="file in outputs" :key="file.path" :entry="file" />
           </template>
           <template v-else>
-          <div class="ex-prod">
-            <a
-              v-if="clip?.exists && clip.open_url"
-              :href="clip.open_url"
-              target="_blank"
-              class="ex-prod-media ex-prod-video"
-              :aria-label="`播放 ${clip.name}`"
-            >
-              <img
-                v-if="rawFirstFile?.exists && rawFirstFile.open_url"
-                :src="rawFirstFile.open_url"
-                alt="clip.mp4 首帧"
-                class="ex-poster"
-              />
-              <span class="ex-scrim" />
-              <span class="ex-play">▶</span>
-              <span class="ex-prod-hint">播放</span>
-            </a>
-            <div v-else class="ex-prod-media ex-prod-empty">文件缺失</div>
-            <div class="ex-prod-body">
-              <div class="ex-prod-name mono">clip.mp4</div>
-              <div class="ex-prod-meta">{{ sizeText(clip) }}</div>
-            </div>
-          </div>
-
-          <div class="ex-prod">
-            <a
-              v-if="mask?.exists && mask.open_url"
-              :href="mask.open_url"
-              target="_blank"
-              class="ex-prod-media"
-              :aria-label="`打开 ${mask.name}`"
-            >
-              <img :src="mask.open_url" alt="clip_mask.png" />
-            </a>
-            <div v-else class="ex-prod-media ex-prod-empty">文件缺失</div>
-            <div class="ex-prod-body">
-              <div class="ex-prod-name mono">clip_mask.png</div>
-              <div class="ex-prod-meta">区域遮罩 · {{ sizeText(mask) }}</div>
-            </div>
-          </div>
-
-          <div class="ex-prod">
-            <a
-              v-if="sidecar?.exists && sidecar.open_url"
-              :href="sidecar.open_url"
-              target="_blank"
-              class="ex-prod-media ex-prod-json"
-              :aria-label="`打开 ${sidecar.name}`"
-            >
-              { case, viewport, frames, … }
-            </a>
-            <div v-else class="ex-prod-media ex-prod-empty">文件缺失</div>
-            <div class="ex-prod-body">
-              <div class="ex-prod-name mono">clip.json</div>
-              <div class="ex-prod-meta">片段台账 · {{ sizeText(sidecar) }}</div>
-            </div>
-          </div>
-
-          <div class="ex-prod">
-            <div v-if="rawFirstFile?.exists && rawLastFile?.exists" class="ex-pair">
+            <div class="ex-prod">
               <a
-                v-if="rawFirstFile.open_url"
-                :href="rawFirstFile.open_url"
+                v-if="clip?.exists && clip.open_url"
+                :href="clip.open_url"
                 target="_blank"
-                :aria-label="`打开 ${rawFirstFile.name}`"
+                class="ex-prod-media ex-prod-video"
+                :aria-label="`播放 ${clip.name}`"
               >
-                <img :src="rawFirstFile.open_url" alt="首帧原始图" />
+                <img
+                  v-if="rawFirstFile?.exists && rawFirstFile.open_url"
+                  :src="rawFirstFile.open_url"
+                  alt="clip.mp4 首帧"
+                  class="ex-poster"
+                />
+                <span class="ex-scrim" />
+                <span class="ex-play">▶</span>
+                <span class="ex-prod-hint">播放</span>
               </a>
+              <div v-else class="ex-prod-media ex-prod-empty">文件缺失</div>
+              <div class="ex-prod-body">
+                <div class="ex-prod-name mono">clip.mp4</div>
+                <div class="ex-prod-meta">{{ sizeText(clip) }}</div>
+              </div>
+            </div>
+
+            <div class="ex-prod">
               <a
-                v-if="rawLastFile.open_url"
-                :href="rawLastFile.open_url"
+                v-if="mask?.exists && mask.open_url"
+                :href="mask.open_url"
                 target="_blank"
-                :aria-label="`打开 ${rawLastFile.name}`"
+                class="ex-prod-media"
+                :aria-label="`打开 ${mask.name}`"
               >
-                <img :src="rawLastFile.open_url" alt="尾帧原始图" />
+                <img :src="mask.open_url" alt="clip_mask.png" />
               </a>
+              <div v-else class="ex-prod-media ex-prod-empty">文件缺失</div>
+              <div class="ex-prod-body">
+                <div class="ex-prod-name mono">clip_mask.png</div>
+                <div class="ex-prod-meta">区域遮罩 · {{ sizeText(mask) }}</div>
+              </div>
             </div>
-            <div v-else class="ex-prod-media ex-prod-empty">文件缺失</div>
-            <div class="ex-prod-body">
-              <div class="ex-prod-name mono">首尾原始帧</div>
-              <div class="ex-prod-meta">png × 2 · 工作台输入底图</div>
+
+            <div class="ex-prod">
+              <a
+                v-if="sidecar?.exists && sidecar.open_url"
+                :href="sidecar.open_url"
+                target="_blank"
+                class="ex-prod-media ex-prod-json"
+                :aria-label="`打开 ${sidecar.name}`"
+              >
+                { case, viewport, frames, … }
+              </a>
+              <div v-else class="ex-prod-media ex-prod-empty">文件缺失</div>
+              <div class="ex-prod-body">
+                <div class="ex-prod-name mono">clip.json</div>
+                <div class="ex-prod-meta">片段台账 · {{ sizeText(sidecar) }}</div>
+              </div>
             </div>
-          </div>
+
+            <div class="ex-prod">
+              <div v-if="rawFirstFile?.exists && rawLastFile?.exists" class="ex-pair">
+                <a
+                  v-if="rawFirstFile.open_url"
+                  :href="rawFirstFile.open_url"
+                  target="_blank"
+                  :aria-label="`打开 ${rawFirstFile.name}`"
+                >
+                  <img :src="rawFirstFile.open_url" alt="首帧原始图" />
+                </a>
+                <a
+                  v-if="rawLastFile.open_url"
+                  :href="rawLastFile.open_url"
+                  target="_blank"
+                  :aria-label="`打开 ${rawLastFile.name}`"
+                >
+                  <img :src="rawLastFile.open_url" alt="尾帧原始图" />
+                </a>
+              </div>
+              <div v-else class="ex-prod-media ex-prod-empty">文件缺失</div>
+              <div class="ex-prod-body">
+                <div class="ex-prod-name mono">首尾原始帧</div>
+                <div class="ex-prod-meta">png × 2 · 工作台输入底图</div>
+              </div>
+            </div>
           </template>
         </div>
         <p v-if="!outputs.length" class="muted ex-empty-note">

@@ -189,9 +189,10 @@ export class Erp360Compare {
     if (!gl) return
     const size = this.readySize(source)
     if (!size) return
-    const key = source instanceof HTMLVideoElement
-      ? `${source.currentSrc}:${source.currentTime}`
-      : (source.currentSrc || source.src)
+    const key =
+      source instanceof HTMLVideoElement
+        ? `${source.currentSrc}:${source.currentTime}`
+        : source.currentSrc || source.src
     if (!key || key === this.lastKey[index]) return
     this.lastKey[index] = key
     gl.bindTexture(gl.TEXTURE_2D, this.textures[index])

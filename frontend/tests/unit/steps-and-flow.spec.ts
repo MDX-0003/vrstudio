@@ -93,9 +93,11 @@ describe('flow steps', () => {
       label: '等待选区',
       actionable: true,
     })
-    expect(
-      nextStepForFlow('patchimg', { pick: { ok: true } }),
-    ).toEqual({ key: 'extract', label: '可以抽取', actionable: true })
+    expect(nextStepForFlow('patchimg', { pick: { ok: true } })).toEqual({
+      key: 'extract',
+      label: '可以抽取',
+      actionable: true,
+    })
     expect(
       nextStepForFlow('patchimg', {
         pick: { ok: true },
@@ -176,9 +178,11 @@ describe('flow steps', () => {
       label: '可以重打光',
       actionable: true,
     })
-    expect(
-      nextStepForFlow('relight', { assets: { ok: true }, relight: { ok: true } }),
-    ).toEqual({ key: 'compare', label: '可以对比', actionable: true })
+    expect(nextStepForFlow('relight', { assets: { ok: true }, relight: { ok: true } })).toEqual({
+      key: 'compare',
+      label: '可以对比',
+      actionable: true,
+    })
   })
 })
 

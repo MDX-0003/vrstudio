@@ -31,12 +31,7 @@ watch(
   <div class="panel">
     <div class="panel-head">
       <h2 class="panel-title">{{ title }}</h2>
-      <el-tag
-        v-if="task"
-        size="small"
-        effect="light"
-        :type="taskStatusMeta(task.status).type"
-      >
+      <el-tag v-if="task" size="small" effect="light" :type="taskStatusMeta(task.status).type">
         {{ task.kind }} · {{ taskStatusMeta(task.status).text }}
       </el-tag>
       <span v-else class="muted">无</span>
@@ -47,9 +42,7 @@ watch(
         <div class="task-summary">
           <span>{{ task.kind }}</span>
           <span class="muted mono">{{ task.id }}</span>
-          <span v-if="task.queue_position" class="muted"
-            >排队第 {{ task.queue_position }} 位</span
-          >
+          <span v-if="task.queue_position" class="muted">排队第 {{ task.queue_position }} 位</span>
         </div>
         <el-alert
           v-if="task.reused"
@@ -65,17 +58,10 @@ watch(
           :title="task.error"
           class="task-error"
         />
-        <el-button
-          v-if="task.tail.length"
-          link
-          size="small"
-          @click="showTail = !showTail"
-        >
+        <el-button v-if="task.tail.length" link size="small" @click="showTail = !showTail">
           {{ showTail ? '收起技术详情' : '查看技术详情' }}
         </el-button>
-        <pre v-if="showTail && task.tail.length" class="task-tail">{{
-          task.tail.join('\n')
-        }}</pre>
+        <pre v-if="showTail && task.tail.length" class="task-tail">{{ task.tail.join('\n') }}</pre>
       </template>
     </div>
   </div>

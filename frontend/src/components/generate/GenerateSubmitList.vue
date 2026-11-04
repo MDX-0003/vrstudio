@@ -46,7 +46,7 @@ function roleOptionsFor(row: ReferenceRow): RoleOption[] {
 <template>
   <section class="panel">
     <div class="panel-head">
-        <h2 class="panel-title">{{ title }}</h2>
+      <h2 class="panel-title">{{ title }}</h2>
       <div class="head-actions">
         <span class="muted">{{ selectedCount }} 项已选</span>
       </div>

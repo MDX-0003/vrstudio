@@ -37,11 +37,7 @@ export const IMAGE_AUTO_ROLES = ['edit_master'] as const
  * 图片流程（patchimg / fullRedrawImg）没有视频的生成模式，调用方传
  * `IMAGE_ROLE_MODE`：它只是角色词表的过滤上下文，不会提交给平台。
  */
-export function optionsFor(
-  roles: RoleSpec[],
-  ctx: RoleContext,
-  current?: string,
-): RoleOption[] {
+export function optionsFor(roles: RoleSpec[], ctx: RoleContext, current?: string): RoleOption[] {
   const options: RoleOption[] = roles
     .filter((role) => role.open && !role.reserved)
     .filter((role) => !ctx.kind || !role.kinds || role.kinds.includes(ctx.kind))

@@ -16,9 +16,7 @@ const isImageFlow = computed(
 )
 const isRelight = computed(() => props.info.flow === 'relight')
 /** relight 的媒体由底版决定：图片底版走静态并排，视频底版走 360 对比器。 */
-const relightStill = computed(
-  () => isRelight.value && props.info.relight?.media === 'image',
-)
+const relightStill = computed(() => isRelight.value && props.info.relight?.media === 'image')
 /** 「静态并排」这一类：图片两条流程与图片底版的 relight。 */
 const isStill = computed(() => isImageFlow.value || relightStill.value)
 const sourceImageUrl = computed(() =>
@@ -33,7 +31,10 @@ const sourceImageUrl = computed(() =>
 const mountedAt = Date.now()
 const seenLive = new Set<string>()
 const handledTasks = new Set<string>()
-const { latest, start } = useCaseTasks(computed(() => props.caseName), ['relight'])
+const { latest, start } = useCaseTasks(
+  computed(() => props.caseName),
+  ['relight'],
+)
 
 watch(latest, async (task) => {
   if (!task || task.kind !== 'relight') return
@@ -168,7 +169,11 @@ function syncFromMaster(): void {
   const follower = videoB.value
   if (!master) return
   currentTime.value = master.currentTime
-  if (follower && !follower.seeking && Math.abs(follower.currentTime - master.currentTime) > SYNC_THRESHOLD) {
+  if (
+    follower &&
+    !follower.seeking &&
+    Math.abs(follower.currentTime - master.currentTime) > SYNC_THRESHOLD
+  ) {
     follower.currentTime = master.currentTime
   }
 }
@@ -575,10 +580,24 @@ function onKeydown(event: KeyboardEvent): void {
       <div v-if="fullReport" class="seam-box">
         <div class="seam-head">
           <span>接缝结论</span>
-          <el-tag size="small" effect="light" :type="fullReport.verdict === 'ok' ? 'success' : fullReport.verdict === 'bad' ? 'danger' : 'warning'">
+          <el-tag
+            size="small"
+            effect="light"
+            :type="
+              fullReport.verdict === 'ok'
+                ? 'success'
+                : fullReport.verdict === 'bad'
+                  ? 'danger'
+                  : 'warning'
+            "
+          >
             {{ fullReport.verdict }}
           </el-tag>
-          <el-tag size="small" effect="light" :type="fullReport.gate === 'ok' ? 'success' : 'warning'">
+          <el-tag
+            size="small"
+            effect="light"
+            :type="fullReport.gate === 'ok' ? 'success' : 'warning'"
+          >
             gate={{ fullReport.gate }}
           </el-tag>
           <span class="mono muted">宽高漂移 {{ fullReport.aspect_drift_pct.toFixed(1) }}%</span>

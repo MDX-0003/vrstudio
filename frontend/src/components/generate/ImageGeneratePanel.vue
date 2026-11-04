@@ -71,7 +71,9 @@ function adoptKey(index: number): string {
   return `${round.value?.round ?? ''}:${index}`
 }
 
-const extractLabel = computed(() => (props.info.flow === 'patchimg' ? '运行抽取（局部裁剪）' : '运行抽取（整幅扩充）'))
+const extractLabel = computed(() =>
+  props.info.flow === 'patchimg' ? '运行抽取（局部裁剪）' : '运行抽取（整幅扩充）',
+)
 </script>
 
 <template>
@@ -89,12 +91,7 @@ const extractLabel = computed(() => (props.info.flow === 'patchimg' ? '运行抽
         <label class="ctl">
           <span>分辨率</span>
           <el-select v-model="resolution" size="small" class="w-res">
-            <el-option
-              v-for="item in resolutionOptions"
-              :key="item"
-              :label="item"
-              :value="item"
-            />
+            <el-option v-for="item in resolutionOptions" :key="item" :label="item" :value="item" />
             <el-option v-if="!resolutionOptions.length" label="暂无档位" value="" disabled />
           </el-select>
         </label>
@@ -149,7 +146,12 @@ const extractLabel = computed(() => (props.info.flow === 'patchimg' ? '运行抽
         </label>
         <label class="ctl">
           <span>剧集</span>
-          <el-select v-model="selectedEpisode" size="small" class="w-episode" :disabled="!episodes.length">
+          <el-select
+            v-model="selectedEpisode"
+            size="small"
+            class="w-episode"
+            :disabled="!episodes.length"
+          >
             <el-option
               v-for="item in episodes"
               :key="item.no"
@@ -170,7 +172,12 @@ const extractLabel = computed(() => (props.info.flow === 'patchimg' ? '运行抽
             />
           </el-select>
         </label>
-        <el-button size="small" :icon="Refresh" :loading="sessionsLoading" @click="emit('refresh-sessions')">
+        <el-button
+          size="small"
+          :icon="Refresh"
+          :loading="sessionsLoading"
+          @click="emit('refresh-sessions')"
+        >
           刷新
         </el-button>
       </div>

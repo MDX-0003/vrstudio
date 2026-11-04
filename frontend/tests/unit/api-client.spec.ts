@@ -23,10 +23,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 function conflictResponse(): Response {
-  return jsonResponse(
-    { code: 'revision_conflict', error: 'case 已被其他人修改，请重新加载' },
-    409,
-  )
+  return jsonResponse({ code: 'revision_conflict', error: 'case 已被其他人修改，请重新加载' }, 409)
 }
 
 describe('api client', () => {

@@ -119,10 +119,9 @@ describe('GenerateResults 按轮次选用', () => {
   })
 
   it('shows the adopted tag instead of a button on the adopted round', () => {
-    const wrapper = mountResults(
-      [round({ round: 'gen-1' }), round({ round: 'gen-2' })],
-      { adoptedRound: 'gen-2' },
-    )
+    const wrapper = mountResults([round({ round: 'gen-1' }), round({ round: 'gen-2' })], {
+      adoptedRound: 'gen-2',
+    })
     expect(adoptButtons(wrapper)).toHaveLength(1)
     expect(adoptButtons(wrapper)[0].text()).toContain('选用')
     const heads = wrapper.findAll('.candidate-head')
@@ -141,10 +140,9 @@ describe('GenerateResults 按轮次选用', () => {
   })
 
   it('disables every adopt button while one round is being adopted', () => {
-    const wrapper = mountResults(
-      [round({ round: 'gen-1' }), round({ round: 'gen-2' })],
-      { adoptingRound: 'gen-2' },
-    )
+    const wrapper = mountResults([round({ round: 'gen-1' }), round({ round: 'gen-2' })], {
+      adoptingRound: 'gen-2',
+    })
     const buttons = adoptButtons(wrapper)
     expect(buttons).toHaveLength(2)
     for (const button of buttons) {

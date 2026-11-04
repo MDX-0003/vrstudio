@@ -283,9 +283,7 @@ describe('GenerateStep', () => {
       hint: '',
     }
     const wrapper = await mountStep(data)
-    const buttons = wrapper
-      .findAll('button')
-      .filter((item) => item.text().includes('选用'))
+    const buttons = wrapper.findAll('button').filter((item) => item.text().includes('选用'))
     expect(buttons).toHaveLength(2)
     await buttons[0].trigger('click')
     await flushPromises()
@@ -300,9 +298,7 @@ describe('GenerateStep', () => {
     data.rounds = { rounds: [videoRound('gen-a', '2026-10-30T04:30:39Z')], hint: '' }
     data.adopt_round = 'gen-a'
     const wrapper = await mountStep(data)
-    expect(
-      wrapper.findAll('button').filter((item) => item.text().includes('选用')),
-    ).toHaveLength(0)
+    expect(wrapper.findAll('button').filter((item) => item.text().includes('选用'))).toHaveLength(0)
     expect(wrapper.text()).toContain('已采用')
     expect(wrapper.text()).toContain('当前采用轮次：gen-a')
     wrapper.unmount()
@@ -331,9 +327,7 @@ describe('GenerateStep', () => {
       await vi.advanceTimersByTimeAsync(400)
       await flushPromises()
 
-      const values = (bar.props('resolutionOptions') as OutputOption[]).map(
-        (item) => item.value,
-      )
+      const values = (bar.props('resolutionOptions') as OutputOption[]).map((item) => item.value)
       expect(values).toEqual(['480p', '720p', '1080p', '4K'])
       wrapper.unmount()
     } finally {

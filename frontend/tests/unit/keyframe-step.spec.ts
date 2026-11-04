@@ -135,7 +135,10 @@ function info(overrides: Partial<CaseInfo['keyframe']> = {}): CaseInfo {
       complete: false,
       ...overrides,
     },
-    raw_frames: [rawFrame('first_frame_raw', '首帧原始图'), rawFrame('last_frame_raw', '尾帧原始图')],
+    raw_frames: [
+      rawFrame('first_frame_raw', '首帧原始图'),
+      rawFrame('last_frame_raw', '尾帧原始图'),
+    ],
     assets: [],
     submit_entries: [],
     submit_roles: null,
@@ -242,9 +245,7 @@ describe('KeyframeStep 四格输入', () => {
 
   it('disables handoff and states why until both frames are picked', async () => {
     const wrapper = await mountStep()
-    const handoff = wrapper
-      .findAll('button')
-      .find((item) => item.text().includes('交接给视频步'))!
+    const handoff = wrapper.findAll('button').find((item) => item.text().includes('交接给视频步'))!
     expect(handoff.attributes('disabled')).toBeDefined()
     expect(wrapper.text()).toContain('尾帧未定稿')
     wrapper.unmount()
