@@ -12,7 +12,8 @@ vi.mock('@/api/case', () => ({
 }))
 
 import MergeStep from '@/views/wizard/MergeStep.vue'
-import { setMergeInput } from '@/api/case'
+import OutputModeSelect from '@/components/assets/OutputModeSelect.vue'
+import { runOperation, setMergeInput } from '@/api/case'
 import type { CaseInfo } from '@/types/case-info'
 
 const ButtonStub = defineComponent({
@@ -42,6 +43,17 @@ const UploadStub = defineComponent({
   template: '<div class="upload-stub" />',
 })
 
+const SelectStub = defineComponent({
+  props: { modelValue: String },
+  emits: ['update:modelValue'],
+  template: '<select><slot /></select>',
+})
+
+const OptionStub = defineComponent({
+  props: { value: String, label: String },
+  template: '<option :value="value">{{ label }}</option>',
+})
+
 const stubs = {
   'el-button': ButtonStub,
   'el-alert': AlertStub,
@@ -50,6 +62,8 @@ const stubs = {
   'el-icon': true,
   'el-empty': true,
   'el-checkbox': true,
+  'el-select': SelectStub,
+  'el-option': OptionStub,
   AssetPickerDialog: PickerStub,
   AssetUploadDialog: UploadStub,
 }
@@ -81,7 +95,11 @@ function button(wrapper: ReturnType<typeof mount>, label: string) {
   return found
 }
 
-function imageInfo(mergeInput: string | null = null, withAssets = true): CaseInfo {
+function imageInfo(
+  mergeInput: string | null = null,
+  withAssets = true,
+  withOutputOptions = true,
+): CaseInfo {
   return {
     flow: 'fullRedrawImg',
     gates: {
@@ -92,6 +110,12 @@ function imageInfo(mergeInput: string | null = null, withAssets = true): CaseInf
     },
     outputs: [],
     merge_input: mergeInput,
+    output_options: withOutputOptions
+      ? [
+          { mode: 'case', width: 8192, height: 4096 },
+          { mode: 'input', width: 856, height: 428 },
+        ]
+      : [{ mode: 'case', width: 8192, height: 4096 }],
     assets: withAssets
       ? [
           {
@@ -124,9 +148,13 @@ function imageInfo(mergeInput: string | null = null, withAssets = true): CaseInf
   } as unknown as CaseInfo
 }
 
-async function mountImage(mergeInput: string | null = null, withAssets = true) {
+async function mountImage(
+  mergeInput: string | null = null,
+  withAssets = true,
+  withOutputOptions = true,
+) {
   const wrapper = mount(MergeStep, {
-    props: { caseName: 'p1', info: imageInfo(mergeInput, withAssets) },
+    props: { caseName: 'p1', info: imageInfo(mergeInput, withAssets, withOutputOptions) },
     global: { stubs },
   })
   await flushPromises()
@@ -174,6 +202,31 @@ describe('MergeStep 拼接输入（fullRedrawImg）', () => {
     expect(setMergeInput).toHaveBeenCalledWith('p1', null)
     wrapper.unmount()
   })
+
+  it('offers both output sizes and sends the chosen mode', async () => {
+    vi.mocked(runOperation).mockClear()
+    const wrapper = await mountImage()
+    const labels = wrapper.findAll('option').map((item) => item.text())
+    expect(labels).toContain('案例分辨率 8192×4096')
+    expect(labels).toContain('跟随输入 856×428')
+
+    const select = wrapper.findComponent(OutputModeSelect)
+    expect(select.props('modelValue')).toBe('case')
+    select.vm.$emit('update:modelValue', 'input')
+    await flushPromises()
+    expect(select.props('modelValue')).toBe('input')
+
+    await button(wrapper, '开始拼接').trigger('click')
+    await flushPromises()
+    expect(runOperation).toHaveBeenCalledWith('p1', 'merge', { output_mode: 'input' })
+    wrapper.unmount()
+  })
+
+  it('hides the output select when only the case size is available', async () => {
+    const wrapper = await mountImage(null, true, false)
+    expect(wrapper.findComponent(SelectStub).exists()).toBe(false)
+    wrapper.unmount()
+  })
 })
 
 describe('MergeStep 拼接输入（fullredraw 视频）', () => {
@@ -188,6 +241,10 @@ describe('MergeStep 拼接输入（fullredraw 视频）', () => {
       },
       outputs: [],
       merge_input: mergeInput,
+      output_options: [
+        { mode: 'case', width: 8192, height: 4096 },
+        { mode: 'input', width: 856, height: 428 },
+      ],
       assets: withAssets
         ? [
             {
@@ -256,6 +313,24 @@ describe('MergeStep 拼接输入（fullredraw 视频）', () => {
     await button(wrapper, '用回生成结果').trigger('click')
     await flushPromises()
     expect(setMergeInput).toHaveBeenCalledWith('p1', null)
+    wrapper.unmount()
+  })
+
+  it('sends the chosen output mode with 裁回原尺寸', async () => {
+    vi.mocked(runOperation).mockClear()
+    const wrapper = await mountVideo()
+    const labels = wrapper.findAll('option').map((item) => item.text())
+    expect(labels).toContain('案例分辨率 8192×4096')
+    expect(labels).toContain('跟随输入 856×428')
+
+    const select = wrapper.findComponent(OutputModeSelect)
+    expect(select.props('modelValue')).toBe('case')
+    select.vm.$emit('update:modelValue', 'input')
+    await flushPromises()
+
+    await button(wrapper, '裁回原尺寸').trigger('click')
+    await flushPromises()
+    expect(runOperation).toHaveBeenCalledWith('p1', 'recompose', { output_mode: 'input' })
     wrapper.unmount()
   })
 })

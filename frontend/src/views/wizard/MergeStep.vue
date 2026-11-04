@@ -4,11 +4,17 @@ import { ElMessage } from 'element-plus'
 import { Download, Refresh, VideoPlay } from '@element-plus/icons-vue'
 import { fetchCase, runOperation } from '@/api/case'
 import MergeInputControls from '@/components/assets/MergeInputControls.vue'
+import OutputModeSelect from '@/components/assets/OutputModeSelect.vue'
 import FileRow from '@/components/common/FileRow.vue'
 import { useCaseTasks } from '@/composables/useCaseTasks'
 import { gateBlocked } from '@/utils/gates'
 import { taskStatusMeta } from '@/constants/taskStatus'
-import type { FullRedrawImageReport, CaseInfo, PatchImageReport } from '@/types/case-info'
+import type {
+  FullRedrawImageReport,
+  CaseInfo,
+  OutputMode,
+  PatchImageReport,
+} from '@/types/case-info'
 
 const props = defineProps<{ caseName: string; info: CaseInfo }>()
 const emit = defineEmits<{ updated: [data: CaseInfo] }>()
@@ -29,6 +35,12 @@ const isPatchImg = computed(() => props.info.flow === 'patchimg')
 const isFullRedrawImg = computed(() => props.info.flow === 'fullRedrawImg')
 const imageMergeLabel = computed(() => (isPatchImg.value ? '贴回' : '拼接'))
 const mergeInputKind = computed<'image' | 'video'>(() => (isImageFlow.value ? 'image' : 'video'))
+const outputOptions = computed(() => props.info.output_options ?? [])
+const outputMode = ref<OutputMode>('case')
+const showOutputMode = computed(() => outputOptions.value.length > 1)
+watch(outputOptions, (options) => {
+  if (!options.some((item) => item.mode === outputMode.value)) outputMode.value = 'case'
+})
 const mergeGate = computed(() => props.info.gates.merge)
 const padGate = computed(() => props.info.gates.pad)
 const recomposeGate = computed(() => props.info.gates.recompose)
@@ -59,7 +71,11 @@ async function runOp(op: 'merge' | 'pad' | 'recompose'): Promise<void> {
   running.value = op
   startedAt = Date.now()
   try {
-    const payload = op === 'merge' && !isImageFlow.value ? { allow_crop: allowCrop.value } : {}
+    const payload: Record<string, unknown> = {}
+    if (op === 'merge' && !isImageFlow.value) payload.allow_crop = allowCrop.value
+    if (op === 'recompose' || (op === 'merge' && isFullRedrawImg.value)) {
+      payload.output_mode = outputMode.value
+    }
     await runOperation(props.caseName, op, payload)
     start()
   } catch (err) {
@@ -119,6 +135,7 @@ watch(latest, async (task) => {
             >
               开始{{ imageMergeLabel }}
             </el-button>
+            <OutputModeSelect v-if="showOutputMode" v-model="outputMode" :options="outputOptions" />
             <span v-if="mergeGate?.ok" class="muted"> 已有成片；再跑一次会覆盖同名文件 </span>
           </div>
           <MergeInputControls
@@ -243,6 +260,7 @@ watch(latest, async (task) => {
             >
               裁回原尺寸
             </el-button>
+            <OutputModeSelect v-if="showOutputMode" v-model="outputMode" :options="outputOptions" />
           </div>
           <el-alert
             v-if="padGate && !padGate.ok"

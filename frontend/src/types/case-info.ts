@@ -339,6 +339,14 @@ export interface RoleSpec {
   reserved: boolean
 }
 
+export type OutputMode = 'case' | 'input'
+
+export interface OutputOption {
+  mode: OutputMode
+  width: number
+  height: number
+}
+
 export interface CaseInfo {
   name: string
   flow: Flow
@@ -358,6 +366,8 @@ export interface CaseInfo {
   adopt_index?: number | null
   /** fullRedrawImg 的拼接输入素材 id；null = 用生成采用的结果。 */
   merge_input?: string | null
+  /** 本次可选的输出尺寸：案例分辨率，以及输入更小时跟随输入的尺寸。 */
+  output_options?: OutputOption[]
   /** 图片流程的生成轮次（最新在前）；视频流程为空数组。 */
   image_rounds?: ImageRound[]
   /** 图片流程 merge 的 report.json；还没出片时为 null。 */
