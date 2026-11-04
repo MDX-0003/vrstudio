@@ -221,6 +221,23 @@ def test_fullredrawimg_step_files_show_the_library_input(tmp_path, client):
     assert "image_pad.json" in names
 
 
+def test_fullredrawimg_step_files_show_the_follow_input_image(tmp_path, client):
+    """跟随输入写出的 ``<版本>_image_<W>x<H>.png`` 要出现在拼接输出里。"""
+    src = _png(tmp_path)
+    case_mod.create("f1", "fullRedrawImg", src, root=tmp_path)
+    _extract_version(tmp_path, "f1", "image_pad.json", result="result.png")
+    case_mod.set_adopt("f1", "img-1", root=tmp_path, index=0)
+    out = case_mod.case_dir("f1", tmp_path) / "out"
+    out.mkdir()
+    (out / "v1_image_856x428.png").write_bytes(b"png")
+
+    files = web_app._step_files(case_mod.load("f1", tmp_path))
+    outputs = files["merge"]["outputs"]
+    assert [item["name"] for item in outputs] == [
+        "v1_image_856x428.png", "report.json"]
+    assert outputs[0]["exists"] is True
+
+
 def test_merge_input_op_sets_and_clears_the_pointer(tmp_path, client):
     src = _png(tmp_path)
     case_mod.create("f1", "fullRedrawImg", src, root=tmp_path)

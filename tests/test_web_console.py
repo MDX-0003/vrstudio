@@ -1218,6 +1218,35 @@ def test_step_files_fullredraw_reports_names_and_times(client, fullredraw_case, 
         "round-1.mp4", "round-1_recompose.json"]
 
 
+def test_step_files_fullredraw_shows_the_follow_input_output(
+        client, fullredraw_case, tmp_path):
+    """跟随输入写出的 ``<轮次>_<W>x<H>.mp4`` 要出现在步骤输出里，
+    而不是显示一个从未写过的案例分辨率路径。"""
+    out = tmp_path / "f1" / "out"
+    (out / "round-1_1260x630.mp4").write_bytes(b"small")
+    (out / "round-1_1260x630_recompose.json").write_text("{}", encoding="utf-8")
+    (out / "round-1.mp4").unlink()
+    (out / "round-1_recompose.json").unlink()
+
+    files = client.get("/api/case/f1").json()["step_files"]["recompose"]["outputs"]
+    assert [f["name"] for f in files] == [
+        "round-1_1260x630.mp4", "round-1_1260x630_recompose.json"]
+    assert all(f["exists"] for f in files)
+    assert files[0]["open_url"]
+
+
+def test_step_files_fullredraw_ignores_other_rounds_and_stray_mp4(
+        client, fullredraw_case, tmp_path):
+    """共享前缀的其它轮次与没有报告的散件都不算这一轮的产物。"""
+    out = tmp_path / "f1" / "out"
+    (out / "round-10.mp4").write_bytes(b"other round")
+    (out / "round-10_recompose.json").write_text("{}", encoding="utf-8")
+    (out / "round-1_extra.mp4").write_bytes(b"stray")
+
+    files = client.get("/api/case/f1").json()["step_files"]["recompose"]["outputs"]
+    assert [f["name"] for f in files] == ["round-1.mp4", "round-1_recompose.json"]
+
+
 def test_step_files_mtime_changes_when_the_step_reruns(client, fullredraw_case, tmp_path):
     cdir = case_mod.case_dir("f1", tmp_path)
     padded = cdir / "seedance_input.mp4"

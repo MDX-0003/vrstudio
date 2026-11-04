@@ -1218,6 +1218,25 @@ def _generation_groups(case: case_mod.Case, inputs: list[dict],
     return {"groups": groups}
 
 
+def _step_outputs(cdir: Path, base: str, suffix: str,
+                  report_suffix: str | None = None) -> list[Path]:
+    """某一步在 ``out/`` 里真实写出的产物。
+
+    认 ``<base><suffix>``（案例分辨率）与 ``<base>_*<suffix>``（跟随输入的
+    尺寸后缀），``report_suffix`` 非空时要求旁边有成对报告——与
+    ``_output_files`` 的成片判据一致，不把散件当产物。按 mtime 升序。
+    """
+    outdir = cdir / "out"
+    if not outdir.is_dir():
+        return []
+    files = [p for p in outdir.glob(f"{base}*{suffix}")
+             if p.stem == base or p.stem.startswith(base + "_")]
+    if report_suffix is not None:
+        files = [p for p in files
+                 if p.with_name(p.stem + report_suffix).is_file()]
+    return sorted(files, key=_output_sort_key)
+
+
 def _fullredraw_step_files(case: case_mod.Case, cdir: Path) -> dict:
     """fullredraw：源 → 扩宽件 → 采用结果 → 还原成片。
 
@@ -1244,8 +1263,16 @@ def _fullredraw_step_files(case: case_mod.Case, cdir: Path) -> dict:
     recompose_input = case.merge_input_file(_ctx["cases_root"]) or result
     outputs = []
     if case.adopt_round:
-        out = cdir / "out" / f"{case.adopt_round}.mp4"
-        outputs = [out, out.with_name(out.stem + "_recompose.json")]
+        # 步骤页显示这一轮真实写出的文件；案例分辨率与跟随输入的尺寸后缀
+        # 都可能存在，按 mtime 一并列出。一份都没有时才退回计划路径。
+        actual = _step_outputs(cdir, case.adopt_round, ".mp4",
+                               "_recompose.json")
+        if not actual:
+            actual = [cdir / "out" / f"{case.adopt_round}.mp4"]
+        for path in actual:
+            outputs.append(file_entry(path))
+            outputs.append(file_entry(
+                path.with_name(path.stem + "_recompose.json")))
     return {
         "pad": {
             "inputs": [file_entry(source)],
@@ -1256,7 +1283,7 @@ def _fullredraw_step_files(case: case_mod.Case, cdir: Path) -> dict:
             result),
         "recompose": {
             "inputs": [file_entry(recompose_input), file_entry(manifest)],
-            "outputs": [file_entry(p) for p in outputs],
+            "outputs": outputs,
         },
     }
 
@@ -1344,7 +1371,12 @@ def _fullredraw_img_step_files(case: case_mod.Case, cdir: Path) -> dict:
     upload = d / "upload.png"
     upload_mask = d / "upload_mask.png"
     result = d / "result.png"
-    out = cdir / "out" / f"{case.extract_current}_image.png"
+    # 拼接输出既可能是案例分辨率 ``<版本>_image.png``，也可能是跟随输入的
+    # ``<版本>_image_<W>x<H>.png``；按实际文件列出，一份都没有时退回计划路径。
+    base = f"{case.extract_current}_image"
+    images = _step_outputs(cdir, base, ".png")
+    if not images:
+        images = [cdir / "out" / f"{base}.png"]
     steps["extract"] = {
         "inputs": source,
         "outputs": [file_entry(padded), file_entry(mask), file_entry(manifest)],
@@ -1355,7 +1387,8 @@ def _fullredraw_img_step_files(case: case_mod.Case, cdir: Path) -> dict:
     stitch_input = _stitch_input_file(case, cdir, result)
     steps["merge"] = {
         "inputs": [file_entry(stitch_input), file_entry(manifest)],
-        "outputs": [file_entry(out), file_entry(d / "report.json")],
+        "outputs": ([file_entry(p) for p in images]
+                    + [file_entry(d / "report.json")]),
     }
     return steps
 

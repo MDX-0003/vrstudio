@@ -47,7 +47,9 @@ const recomposeGate = computed(() => props.info.gates.recompose)
 const patchFiles = computed(() => props.info.step_files.merge)
 const padFiles = computed(() => props.info.step_files.pad)
 const recomposeFiles = computed(() => props.info.step_files.recompose)
-const outputs = computed(() => props.info.outputs)
+// 后端 ``_outputs`` 按 mtime 升序（对比页取最后一项作默认）；成片面板反过来
+// 展示，最新一份排在最上面。
+const outputs = computed(() => [...props.info.outputs].reverse())
 const patchReport = computed<PatchImageReport | null>(() =>
   props.info.flow === 'patchimg' ? ((props.info.image_report as PatchImageReport) ?? null) : null,
 )
