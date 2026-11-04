@@ -35,8 +35,14 @@ from vrstudio.relight.align import (
     matrix_at_full_size,
     warp_to_gt,
 )
-from vrstudio.relight.compose import clipped_fraction, light_compose, relight, soft_clip
-from vrstudio.relight.fields import estimate_fields
+from vrstudio.relight.compose import (
+    LightCompose,
+    clipped_fraction,
+    light_compose,
+    relight,
+    soft_clip,
+)
+from vrstudio.relight.fields import estimate_fields, linear_to_srgb8, srgb_to_linear
 
 runner = CliRunner()
 
@@ -159,6 +165,46 @@ def test_soft_clip_is_monotone_and_bounded():
     assert clipped_fraction(midtones) == 0.0
     assert np.array_equal(soft_clip(midtones), midtones)
     assert clipped_fraction(clipped) == 0.0
+
+
+def _reference_soft_clip(bgr8, knee=0.72, max_out=0.98):
+    x = np.clip(bgr8.astype(np.float32), 0, 255) / 255.0
+    y = 0.0722 * x[..., 0] + 0.7152 * x[..., 1] + 0.2126 * x[..., 2]
+    over = y > knee
+    y_clipped = y.copy()
+    span = max(max_out - knee, 1e-3)
+    y_clipped[over] = max_out - span * np.exp(-(y[over] - knee) / span)
+    scaled = x * (y_clipped / np.maximum(y, 1e-6))[..., None] * 255.0
+    return np.clip(scaled, 0, 255).astype(np.uint8)
+
+
+def test_soft_clip_matches_the_reference_including_overexposure():
+    rng = np.random.default_rng(7)
+    image = rng.integers(0, 256, (48, 64, 3), dtype=np.uint8)
+    image[:8, :8] = 255
+    image[20:24, 30:40] = 230
+    assert np.array_equal(soft_clip(image), _reference_soft_clip(image))
+
+
+def _reference_apply(gt8, gain, visibility, white_balance):
+    gt_linear = srgb_to_linear(gt8).astype(np.float32)
+    out_linear = (np.einsum("...k,ck->...c", gt_linear, white_balance)
+                  * gain[..., None] * visibility[..., None])
+    return linear_to_srgb8(np.clip(out_linear, 0.0, 1.0))
+
+
+def test_light_compose_matches_the_reference_formula():
+    rng = np.random.default_rng(5)
+    gt = rng.integers(0, 256, (64, 96, 3), dtype=np.uint8)
+    gain = rng.uniform(0.4, 1.6, (64, 96)).astype(np.float32)
+    visibility = rng.uniform(0.5, 1.5, (64, 96)).astype(np.float32)
+    white_balance = np.array(
+        [[1.02, 0.01, 0.0], [0.0, 0.99, 0.02], [0.01, 0.0, 1.01]], np.float32)
+
+    got = LightCompose(gain=gain, visibility=visibility,
+                       white_balance=white_balance).apply(gt)
+    want = _reference_apply(gt, gain, visibility, white_balance)
+    assert int(np.abs(got.astype(np.int16) - want).max()) == 0
 
 
 # ── CLI：退出码、输出、报告 ────────────────────────────────────────────────

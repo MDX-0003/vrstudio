@@ -21,7 +21,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from .fields import LightFields, linear_to_srgb8, srgb_to_linear
+from .fields import LightFields, linear_to_srgb8_inplace, srgb_to_linear
 
 
 @dataclass(frozen=True)
@@ -39,11 +39,11 @@ class LightCompose:
 
     def apply(self, gt8: np.ndarray) -> np.ndarray:
         """把光场乘到一帧上，返回同尺寸 8-bit BGR。"""
-        gt_linear = srgb_to_linear(gt8).astype(np.float32)
-        out_linear = (np.einsum("...k,ck->...c", gt_linear, self.white_balance)
-                      * self.gain[..., None]
-                      * self.visibility[..., None])
-        return linear_to_srgb8(np.clip(out_linear, 0.0, 1.0))
+        gt_linear = srgb_to_linear(gt8)
+        out_linear = np.einsum("...k,ck->...c", gt_linear, self.white_balance)
+        np.multiply(out_linear, self.gain[..., None], out=out_linear)
+        np.multiply(out_linear, self.visibility[..., None], out=out_linear)
+        return linear_to_srgb8_inplace(out_linear)
 
 
 def light_compose(fields: LightFields, size: tuple[int, int],
@@ -53,11 +53,13 @@ def light_compose(fields: LightFields, size: tuple[int, int],
     gain = cv2.resize(fields.gain, (width, height), interpolation=cv2.INTER_LINEAR)
     visibility = cv2.resize(fields.visibility, (width, height),
                             interpolation=cv2.INTER_LINEAR)
+    np.power(gain, np.float32(strength), out=gain)
+    np.power(visibility, np.float32(local_shading * strength), out=visibility)
     white_balance = ((1.0 - strength) * np.eye(3, dtype=np.float32)
                      + strength * fields.white_balance)
     return LightCompose(
-        gain=np.power(gain, strength).astype(np.float32),
-        visibility=np.power(visibility, local_shading * strength).astype(np.float32),
+        gain=gain,
+        visibility=visibility,
         white_balance=white_balance.astype(np.float32),
     )
 
@@ -70,15 +72,26 @@ def relight(gt8: np.ndarray, fields: LightFields,
 
 
 def soft_clip(bgr8: np.ndarray, knee: float = 0.72, max_out: float = 0.98) -> np.ndarray:
-    """高光软裁切：亮度过 ``knee`` 后按指数压向 ``max_out``，色相保持不变。"""
-    x = np.clip(bgr8.astype(np.float32), 0, 255) / 255.0
-    y = 0.0722 * x[..., 0] + 0.7152 * x[..., 1] + 0.2126 * x[..., 2]
+    """高光软裁切：亮度过 ``knee`` 后按指数压向 ``max_out``，色相保持不变。
+
+    只有过曝像素需要浮点运算；其余像素在旧实现里经过 ``/255 * 1 * 255`` 的
+    往返，对 0–255 每个值都精确回到原值，所以这里直接复制。亮度按通道计算，
+    不物化整张 float32 BGR，省掉 8K 上约 400 MB 的临时数组。
+    """
+    y = (0.0722 * (bgr8[..., 0].astype(np.float32) / 255.0)
+         + 0.7152 * (bgr8[..., 1].astype(np.float32) / 255.0)
+         + 0.2126 * (bgr8[..., 2].astype(np.float32) / 255.0))
     over = y > knee
-    y_clipped = y.copy()
+    if not over.any():
+        return bgr8.copy()
     span = max(max_out - knee, 1e-3)
-    y_clipped[over] = max_out - span * np.exp(-(y[over] - knee) / span)
-    scaled = x * (y_clipped / np.maximum(y, 1e-6))[..., None] * 255.0
-    return np.clip(scaled, 0, 255).astype(np.uint8)
+    y_over = y[over]
+    ratio = (max_out - span * np.exp(-(y_over - knee) / span)) / np.maximum(y_over, 1e-6)
+    out = bgr8.copy()
+    out[over] = np.clip(
+        (bgr8[over].astype(np.float32) / 255.0) * ratio[:, None] * 255.0,
+        0, 255).astype(np.uint8)
+    return out
 
 
 def clipped_fraction(bgr8: np.ndarray, threshold: int = 250) -> float:

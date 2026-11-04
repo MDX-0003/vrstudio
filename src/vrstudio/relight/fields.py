@@ -61,11 +61,28 @@ class LightFields:
 
 
 def srgb_to_linear(bgr8: np.ndarray) -> np.ndarray:
+    # For the uint8 input the old clip+astype pair was an identity copy; skip it
+    # so a contiguous frame goes straight into the LUT.
+    if bgr8.dtype == np.uint8:
+        src = bgr8 if bgr8.flags.c_contiguous else np.ascontiguousarray(bgr8)
+        return cv2.LUT(src, LUT_SRGB_TO_LINEAR)
     return cv2.LUT(np.clip(bgr8, 0, 255).astype(np.uint8), LUT_SRGB_TO_LINEAR)
 
 
 def linear_to_srgb8(linear: np.ndarray) -> np.ndarray:
     return LUT_LINEAR_TO_SRGB8[np.clip(linear * 65535.0, 0, 65535).astype(np.uint16)]
+
+
+def linear_to_srgb8_inplace(linear: np.ndarray) -> np.ndarray:
+    """``linear_to_srgb8`` for an array the caller owns, reusing its memory.
+
+    Same arithmetic and same LUT: multiply by 65535, clip, cast to uint16, index.
+    The separate ``clip(..., 0, 1)`` is unnecessary because the 65535 clip covers
+    both ends. ``linear`` must be writable and disposable.
+    """
+    np.multiply(linear, 65535.0, out=linear)
+    np.clip(linear, 0, 65535, out=linear)
+    return LUT_LINEAR_TO_SRGB8[linear.astype(np.uint16)]
 
 
 def luma(linear_bgr: np.ndarray) -> np.ndarray:
