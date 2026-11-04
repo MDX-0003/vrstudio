@@ -350,6 +350,12 @@ def assemble(case: case_mod.Case, root: str | Path | None = None,
                 "mask 与首尾原始帧由流程或工作台提供，不参与提交")
         refs = chosen
         mask = _flow_mask(case, root)
+        if (case.flow == "fullredraw" and mask is not None
+                and not any(c.kind == "image" for c in refs)):
+            # 视频流程只有 pad 时，mask 是图片列表唯一一项；mglc 把首项当目标
+            # IP 库资产校验，而 mask 是控制图，不是内容参考。fullredraw 的 mask
+            # 只是冗余带提示，没有前置图片时不提交；提示词由 mask_note 同步去掉。
+            mask = None
 
     canvas, source = _geometry(case, root, refs, mode)
     return Submission(refs=tuple(refs), mask=mask,

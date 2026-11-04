@@ -62,16 +62,29 @@ def test_candidates_list_pad_before_file_assets(tmp_path, src_video):
     assert cands[1].source == "asset"
 
 
-def test_assemble_fullredraw_appends_mask_and_geometry(tmp_path, src_video):
+def test_assemble_fullredraw_drops_mask_without_a_preceding_image(tmp_path, src_video):
     _fullredraw_case(tmp_path, src_video)
     sub = gen.assemble(case_mod.load("e2e", tmp_path), tmp_path)
     assert [c.id for c in sub.refs] == ["pad"]
-    assert sub.mask is not None and sub.mask.name == "seedance_input_mask.png"
+    assert sub.mask is None
     assert sub.template == "360-closure"
     assert sub.canvas_size == (300, 128) and sub.source_size == (256, 128)
     payload = sub.payload()
-    assert [a["role"] for a in payload["assets"]] == ["edit_master", "mask"]
-    assert payload["assets"][1]["id"] == "pad_mask"
+    assert [a["role"] for a in payload["assets"]] == ["edit_master"]
+
+
+def test_assemble_fullredraw_keeps_mask_after_a_scene_ref(tmp_path, src_video):
+    _fullredraw_case(tmp_path, src_video)
+    scene = tmp_path / "scene.png"
+    scene.write_bytes(b"scene")
+    case_mod.add_assets("e2e", [(scene, "scene_ref")], root=tmp_path)
+    case_mod.set_submit_selected("e2e", ["pad", "i1"], root=tmp_path)
+    sub = gen.assemble(case_mod.load("e2e", tmp_path), tmp_path)
+    assert [c.id for c in sub.refs] == ["pad", "i1"]
+    assert sub.mask is not None and sub.mask.name == "seedance_input_mask.png"
+    payload = sub.payload()
+    assert [a["role"] for a in payload["assets"]] == ["edit_master", "scene_ref", "mask"]
+    assert payload["assets"][2]["id"] == "pad_mask"
 
 
 def test_assemble_without_selection_is_an_error(tmp_path, src_video):
