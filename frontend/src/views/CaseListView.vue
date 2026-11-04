@@ -125,7 +125,7 @@ const sourceUploadOpen = ref(false)
 const lastUploaded = ref<{ uploadId: string; name: string } | null>(null)
 
 const createImageFlow = computed(() => isImageFlow(form.flow))
-/** relight 建 case 不绑源文件：GT 与氛围图进 case 之后在素材步选定。 */
+/** relight 建 case 不绑源文件：GT 与氛围依据进 case 之后在素材步选定。 */
 const createNoSource = computed(() => form.flow === 'gen' || form.flow === 'relight')
 /** 弹窗要不要选源文件：gen 与 relight 都不需要。 */
 const needsSource = computed(() => !createNoSource.value)
@@ -403,7 +403,7 @@ onMounted(loadCases)
         </el-form-item>
         <el-form-item v-else-if="form.flow === 'relight'" label="下一步">
           <div class="field-hint">
-            重打光 case 建完进入「素材」步：在那里选定底版（视频或图片）与氛围图，
+            重打光 case 建完进入「素材」步：在那里选定底版（视频或图片）与氛围依据（图片或视频），
             再运行重打光。建 case 这一步不绑任何源文件。
           </div>
         </el-form-item>

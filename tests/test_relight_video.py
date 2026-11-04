@@ -231,7 +231,7 @@ def test_case_flag_requires_both_slots(sources):
     case_mod.add_relight_candidate("rl", case_mod.RELIGHT_GT, video, tmp_path)
     result = run_video_cli("--case", "rl", "--cases-dir", str(tmp_path))
     assert result.exit_code == 2, result.output
-    assert "还缺氛围图" in result.output
+    assert "还缺氛围依据" in result.output
 
 
 def test_case_flag_rejects_explicit_paths(sources):

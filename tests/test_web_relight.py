@@ -101,13 +101,29 @@ def test_slot_op_sets_both_slots(tmp_path, client):
     assert rsp.json()["relight"]["gt"]["asset"] == gt_asset.id
 
 
-def test_slot_op_rejects_video_atmo(tmp_path, client):
+def test_slot_op_accepts_video_atmo_only_with_video_gt(tmp_path, client):
     client.post("/api/cases", json={"flow": "relight", "name": "rl1"})
-    video = _video(tmp_path / "atmo.mp4")
+    video = _video(tmp_path / "gt.mp4")
+    atmo = _video(tmp_path / "atmo.mp4")
+    # 底版还没选时，视频氛围可以先放进槽位。
     rsp = client.post("/api/case/rl1/assets",
-                      json={"op": "slot", "role": "relight_atmo", "path": str(video)})
+                      json={"op": "slot", "role": "relight_atmo", "path": str(atmo)})
+    assert rsp.status_code == 200, rsp.text
+
+    # 图片底版与视频氛围不能共存。
+    rsp = client.post("/api/case/rl1/assets",
+                      json={"op": "slot", "role": "relight_gt",
+                            "path": str(_png(tmp_path, "gt.png"))})
     assert rsp.status_code == 400
-    assert "relight_atmo" in rsp.json()["error"]
+    assert "视频氛围只适用于视频底版" in rsp.json()["error"]
+
+    rsp = client.post("/api/case/rl1/assets",
+                      json={"op": "slot", "role": "relight_gt", "path": str(video)})
+    assert rsp.status_code == 200, rsp.text
+    info = client.get("/api/case/rl1").json()
+    assert info["relight"]["media"] == "video"
+    assert info["relight"]["atmo"]["kind"] == "video"
+    assert info["gates"]["assets"]["ok"] is True
 
 
 def test_slot_op_rejects_unknown_role(tmp_path, client):
@@ -158,7 +174,7 @@ def test_gates_wait_for_both_slots(tmp_path, client):
                       "path": str(_png(tmp_path, "gt.png"))})
     info = client.get("/api/case/rl1").json()
     assert info["gates"]["assets"]["ok"] is False
-    assert "氛围图" in info["gates"]["assets"]["reason"]
+    assert "氛围依据" in info["gates"]["assets"]["reason"]
 
     client.post("/api/case/rl1/assets",
                 json={"op": "slot", "role": "relight_atmo",

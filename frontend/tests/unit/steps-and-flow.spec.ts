@@ -168,7 +168,7 @@ describe('flow steps', () => {
     ])
     expect(nextStepForFlow('relight', {})).toEqual({
       key: 'assets',
-      label: '等待选定底版与氛围图',
+      label: '等待选定底版与氛围依据',
       actionable: true,
     })
     expect(nextStepForFlow('relight', { assets: { ok: true } })).toEqual({

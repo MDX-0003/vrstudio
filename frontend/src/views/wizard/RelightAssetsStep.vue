@@ -26,10 +26,12 @@ const pickerOpen = ref(false)
 const pickerRole = ref<'relight_gt' | 'relight_atmo'>('relight_gt')
 const busy = ref(false)
 
-/** 底版候选收视频与图片（选 video 模式就是全收）；氛围图只收图片。 */
-const pickerMode = computed<'video' | 'image'>(() =>
-  pickerRole.value === 'relight_gt' ? 'video' : 'image',
-)
+/** 底版候选收视频与图片；氛围在底版是视频（或还没选）时收两种，图片底版只收图片。 */
+const atmoAcceptsVideo = computed(() => gt.value?.kind !== 'image')
+const pickerMode = computed<'video' | 'image'>(() => {
+  if (pickerRole.value === 'relight_gt') return 'video'
+  return atmoAcceptsVideo.value ? 'video' : 'image'
+})
 const gtCandidates = computed(
   () => props.info.assets.filter((asset) => asset.role === 'relight_gt').length,
 )
@@ -56,7 +58,7 @@ async function onPicked(ids: string[]): Promise<void> {
   try {
     const data = await pickRelightSlot(props.caseName, pickerRole.value, row.id)
     emit('updated', data)
-    ElMessage.success(pickerRole.value === 'relight_gt' ? '底版已选定' : '氛围图已选定')
+    ElMessage.success(pickerRole.value === 'relight_gt' ? '底版已选定' : '氛围依据已选定')
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : '切换槽位失败')
   } finally {
@@ -94,7 +96,7 @@ function sizeText(slot: RelightSlot | null): string {
           v-if="gate && !gate.ok"
           type="info"
           :closable="false"
-          :title="gate.reason || '底版与氛围图都选定后才能重打光'"
+          :title="gate.reason || '底版与氛围依据都选定后才能重打光'"
           class="gate-alert"
         />
         <el-alert
@@ -128,13 +130,13 @@ function sizeText(slot: RelightSlot | null): string {
 
           <article class="slot" :class="{ filled: Boolean(atmo) }">
             <header>
-              <h3>氛围图</h3>
+              <h3>氛围依据</h3>
               <el-tag v-if="atmo" size="small" effect="light">{{ sizeText(atmo) }}</el-tag>
               <el-tag v-else size="small" effect="plain" type="info">未选</el-tag>
             </header>
             <p class="muted slot-help">
-              只提供低频光照、色温与遮挡：与底版同宽高的图片。美术手工加工后的结果也在这里上传——
-              导出 fullRedrawImg 候选、在外部工具改完、再传进来就行。
+              只提供低频光照、色温与遮挡：与底版同宽高的图片，或视频底版下同时长的视频。
+              图片走固定光场，视频走逐帧光场；fullredraw 的重绘成片可以直接传进来。
             </p>
             <FileRow v-if="atmo" :entry="atmo.entry" />
             <div class="slot-actions">
@@ -164,13 +166,13 @@ function sizeText(slot: RelightSlot | null): string {
       :case-name="caseName"
       :info="info"
       :mode="pickerMode"
-      :title="pickerRole === 'relight_gt' ? '选择重打光底版' : '选择氛围图'"
+      :title="pickerRole === 'relight_gt' ? '选择重打光底版' : '选择氛围依据'"
       :hint="
         pickerRole === 'relight_gt'
           ? '从本 case 的素材库里选一条底版候选。底版提供结构与细节，视频走整段、图片只出一帧。'
-          : '从本 case 的素材库里选一张氛围图。美术每改一版就上传一份，这里可以来回切换。'
+          : '从本 case 的素材库里选氛围依据：图片，或与视频底版同时长、只改氛围的重绘视频。'
       "
-      :confirm-text="pickerRole === 'relight_gt' ? '选作底版' : '选作氛围图'"
+      :confirm-text="pickerRole === 'relight_gt' ? '选作底版' : '选作氛围依据'"
       @confirm="onPicked"
       @updated="emit('updated', $event)"
     />
@@ -179,6 +181,7 @@ function sizeText(slot: RelightSlot | null): string {
       destination="slot"
       :case-name="caseName"
       :slot-role="uploadRole"
+      :slot-accepts-video="uploadRole === 'relight_gt' || atmoAcceptsVideo"
       @added="onUploaded"
     />
   </div>

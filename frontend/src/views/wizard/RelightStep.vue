@@ -21,6 +21,14 @@ interface RelightReport {
   timing?: Record<string, number>
   ref_frame?: number
   ref_matched?: number
+  atmo_kind?: 'image' | 'video'
+  fields_mode?: 'fixed' | 'per_frame'
+  atmo_frames?: number
+  atmo_fps?: string
+  atmo_mapping?: 'normalized_progress' | 'time' | 'sequential'
+  atmo_ref_frame?: number
+  atmo_short?: boolean
+  atmo_match?: { min: number; mean: number; frames: number } | null
   align: {
     trusted: boolean
     inliers: number
@@ -131,6 +139,19 @@ function reportTime(r: RelightReport | null, fallbackMtime?: number | null): str
   if (r?.started_at) return formatTime(r.started_at)
   if (fallbackMtime) return formatDate(new Date(fallbackMtime * 1000))
   return '时间未知'
+}
+
+const MAPPING_LABELS: Record<string, string> = {
+  normalized_progress: '按进度',
+  time: '按时间',
+  sequential: '逐帧',
+}
+
+function atmoLabel(r: RelightReport): string {
+  if (r.atmo_kind !== 'video') return '图片 · 固定光场'
+  const frames = r.atmo_frames ? `${r.atmo_frames} 帧` : '帧数未知'
+  const mapping = r.atmo_mapping ? MAPPING_LABELS[r.atmo_mapping] ?? r.atmo_mapping : '按进度'
+  return `视频 · 逐帧光场（${frames}，${mapping}对齐）`
 }
 
 const TIMING_LABELS: Record<string, string> = {
@@ -246,7 +267,7 @@ const percent = (value: number | undefined): string =>
           v-if="!hasSlots"
           type="warning"
           :closable="false"
-          :title="props.info.gates.assets?.reason || '先在素材步选定底版与氛围图'"
+          :title="props.info.gates.assets?.reason || '先在素材步选定底版与氛围依据'"
           class="gate-alert"
         />
 
@@ -362,7 +383,7 @@ const percent = (value: number | undefined): string =>
               :entry="file"
             />
             <span v-if="!(props.info.step_files.relight?.inputs ?? []).length" class="muted">
-              还没有选定底版与氛围图
+              还没有选定底版与氛围依据
             </span>
           </div>
           <div class="file-group">
@@ -403,6 +424,10 @@ const percent = (value: number | undefined): string =>
               <span>缓存</span>
               <span>{{ cacheLabel(report.cache) }}</span>
             </template>
+            <template v-if="report.atmo_kind">
+              <span>氛围依据</span>
+              <span>{{ atmoLabel(report) }}</span>
+            </template>
             <span>对齐内点 / 匹配</span>
             <span>{{ report.align.inliers }} / {{ report.align.matches }}</span>
             <span>缩放 · 旋转</span>
@@ -417,11 +442,24 @@ const percent = (value: number | undefined): string =>
               {{ report.light.gain_mean }} / {{ report.light.gain_p05 }} /
               {{ report.light.gain_p95 }}
             </span>
+            <span v-else>逐帧光场（随氛围帧变化）</span>
             <span>可见度均值</span>
-            <span v-if="report.light">{{ report.light.visibility_mean }}</span>
+            <span>{{ report.light ? report.light.visibility_mean : '—' }}</span>
             <template v-if="report.ref_frame !== undefined">
               <span>参考帧</span>
-              <span>{{ report.ref_frame }}</span>
+              <span>
+                {{ report.ref_frame }}
+                <template v-if="report.atmo_ref_frame !== undefined">
+                  → 氛围 {{ report.atmo_ref_frame }}
+                </template>
+              </span>
+            </template>
+            <template v-if="report.atmo_match">
+              <span>氛围逐帧结构相关</span>
+              <span>
+                {{ report.atmo_match.min.toFixed(3) }} / {{ report.atmo_match.mean.toFixed(3) }}
+                （最低 / 均值）
+              </span>
             </template>
             <span>高光裁切</span>
             <span>{{ report.clip ? percent(report.clip.clipped_before ?? undefined) : '未开启' }}</span>
@@ -431,6 +469,13 @@ const percent = (value: number | undefined): string =>
           <p v-if="timingSummary(report)" class="timing-line mono">
             分段耗时：{{ timingSummary(report) }}
           </p>
+          <el-alert
+            v-if="report?.atmo_short"
+            type="warning"
+            :closable="false"
+            title="氛围视频比 GT 短：后段复用了氛围的最后一帧"
+            class="gate-alert"
+          />
           <el-alert
             v-if="reportError"
             type="warning"

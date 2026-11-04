@@ -395,8 +395,9 @@ def save(case: Case, root: str | Path | None = None) -> Case:
         lines += ["", "[merge]", f"input = {_s(case.merge_input)}"]
     if case.flow == "relight":
         # 槽位约束在每次写盘时检查，所以「多挂一条别的角色」在 add_assets 就失败，
-        # 不会等到下次 load 才暴露。
+        # 不会等到下次 load 才暴露。配对规则同样在写盘时检查：视频氛围必须配视频底版。
         _check_relight_assets(case, case_toml(case.name, root))
+        check_relight_pair(case, case_toml(case.name, root))
         if case.relight:
             lines += ["", "[relight]"]
             lines += [_kv(key, value) for key, value in case.relight.items()
@@ -568,6 +569,25 @@ def _parse_relight(raw, path: Path) -> dict | None:
             raise CaseError(f"{path}: [relight] {key} 必须是数字")
         out[key] = value
     return out
+
+
+def check_relight_pair(case: Case, path: Path | None = None) -> None:
+    """两个槽位都在时，视频氛围只能配视频底版。
+
+    底版还没选时允许先把视频氛围候选放进库并选中（门控只提示缺底版）；坏组合只在
+    两侧都存在时才成立。写盘（``save``）与运行入口都会调用这一条；``load`` 不调用，
+    这样手写坏组合的 case 仍能被改成合法状态。
+    """
+    if case.flow != "relight":
+        return
+    gt, atmo = case.relight_slots()
+    if gt is None or atmo is None:
+        return
+    if atmo.kind == "video" and gt.kind != "video":
+        where = f"{path}: " if path is not None else ""
+        raise CaseError(
+            f"{where}氛围依据 {atmo.id} 是视频，但底版 {gt.id} 是图片；"
+            "视频氛围只适用于视频底版")
 
 
 def _check_relight_assets(case: Case, path: Path) -> None:
@@ -945,6 +965,16 @@ def add_relight_candidate(name: str, role: str, path: str | Path,
     src = Path(path)
     if not src.is_file():
         raise CaseError(f"文件不存在：{src}")
+    kind = kind_of(src)
+    gt, atmo = case.relight_slots()
+    if role == RELIGHT_ATMO and kind == "video" and gt is not None and gt.kind != "video":
+        raise CaseError(
+            f"氛围依据 {src.name} 是视频，但底版 {gt.id} 是图片；"
+            "视频氛围只适用于视频底版")
+    if role == RELIGHT_GT and kind != "video" and atmo is not None and atmo.kind == "video":
+        raise CaseError(
+            f"底版 {src.name} 是{kind}，但氛围依据 {atmo.id} 是视频；"
+            "视频氛围只适用于视频底版")
     digest = file_sha256(src)
     same = next((a for a in case.assets
                  if a.role == role and a.sha256 == digest), None)

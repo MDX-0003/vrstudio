@@ -40,8 +40,10 @@ const props = defineProps<{
   destination?: 'assets' | 'source' | 'slot' | 'merge-input'
   /** 源文件类型：视频流程收视频，图片流程收图片；加入素材库时忽略。 */
   sourceKind?: 'video' | 'image'
-  /** slot 目的地的角色：relight_gt 收视频或图片，relight_atmo 只收图片。 */
+  /** slot 目的地的角色：relight_gt 收视频或图片；relight_atmo 由 slotAcceptsVideo 决定。 */
   slotRole?: 'relight_gt' | 'relight_atmo'
+  /** 氛围槽位在视频底版下也接受视频；缺省按角色（只有底版槽位收视频）。 */
+  slotAcceptsVideo?: boolean
 }>()
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
@@ -54,9 +56,9 @@ const isSlot = computed(() => props.destination === 'slot')
 const isMergeInput = computed(() => props.destination === 'merge-input')
 /** 槽位、源文件与拼接输入都一次只收一个文件：都只有一个位置。 */
 const singleFile = computed(() => isSource.value || isSlot.value || isMergeInput.value)
-const slotAcceptsVideo = computed(() => props.slotRole === 'relight_gt')
+const acceptsVideo = computed(() => props.slotAcceptsVideo ?? props.slotRole === 'relight_gt')
 const slotTitle = computed(() =>
-  props.slotRole === 'relight_atmo' ? '上传氛围图' : '上传重打光底版',
+  props.slotRole === 'relight_atmo' ? '上传氛围依据' : '上传重打光底版',
 )
 const dialogTitle = computed(() => {
   if (isMergeInput.value) return '上传拼接输入'
@@ -75,7 +77,7 @@ const sourceButton = computed(() => (sourceKind.value === 'image' ? '用作源�
 const accept = computed(() => {
   if (isMergeInput.value) return '.png,.jpg,.jpeg,.webp'
   if (isSlot.value) {
-    return slotAcceptsVideo.value ? '.mp4,.mov,.mkv,.avi,.png,.jpg,.jpeg,.webp' : '.png,.jpg,.jpeg,.webp'
+    return acceptsVideo.value ? '.mp4,.mov,.mkv,.avi,.png,.jpg,.jpeg,.webp' : '.png,.jpg,.jpeg,.webp'
   }
   return isSource.value ? sourceAccept.value : '.mp4,.mov,.mkv,.avi,.png,.jpg,.jpeg,.webp'
 })
@@ -217,8 +219,8 @@ function addFiles(files: File[]): void {
       )
       continue
     }
-    if (isSlot.value && kind === 'video' && !slotAcceptsVideo.value) {
-      ElMessage.warning(`${file.name}：氛围图只支持 png/jpg/webp`)
+    if (isSlot.value && kind === 'video' && !acceptsVideo.value) {
+      ElMessage.warning(`${file.name}：这个槽位只支持 png/jpg/webp`)
       continue
     }
     if (isMergeInput.value && kind === 'video') {

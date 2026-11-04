@@ -35,7 +35,7 @@ export function nextStepForFlow(flow: Flow, gates: Gates = {}): NextStep {
   }
 
   if (flow === 'relight') {
-    if (!gates.assets?.ok) return { key: 'assets', label: '等待选定底版与氛围图', actionable: true }
+    if (!gates.assets?.ok) return { key: 'assets', label: '等待选定底版与氛围依据', actionable: true }
     if (!gates.relight?.ok) return { key: 'relight', label: '可以重打光', actionable: true }
     return { key: 'compare', label: '可以对比', actionable: true }
   }

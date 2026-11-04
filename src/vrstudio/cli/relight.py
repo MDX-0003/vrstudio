@@ -46,9 +46,12 @@ from ..relight.align import (
     estimate_similarity,
     gray8,
     reference_small,
+    structure_correlation,
     structure_score,
     warp_to_gt,
+    warp_with_matrix,
 )
+from ..relight.atmo import AtmoMapping, mapping_for, work_frame, work_size_for
 from ..relight.compose import clipped_fraction, light_compose, soft_clip
 from ..relight.compose import relight as compose_relight
 from ..relight.fields import LightFields, estimate_fields
@@ -159,6 +162,15 @@ class FixedLight:
 
 
 @dataclass(frozen=True)
+class FixedGeometry:
+    """视频氛围路径的固定几何：逐帧光场只需要相似变换，不需要参考帧的光场。"""
+
+    alignment: AlignResult
+    ref_frame: int
+    ref_matched: float
+
+
+@dataclass(frozen=True)
 class SetupTiming:
     """固定光照准备各阶段耗时（秒）：选帧、参考帧解码、匹配、光照场。"""
 
@@ -174,6 +186,15 @@ class ResolvedReference:
     """定下的固定光照、是否来自缓存，以及准备阶段的计时。"""
 
     fixed: FixedLight
+    from_cache: bool
+    timing: SetupTiming
+
+
+@dataclass(frozen=True)
+class ResolvedGeometry:
+    """视频氛围路径：定下的相似变换、是否来自缓存，以及准备阶段的计时。"""
+
+    fixed: FixedGeometry
     from_cache: bool
     timing: SetupTiming
 
@@ -214,6 +235,154 @@ def _check_video(size: tuple[int, int]) -> None:
         _param_error(f"GT 视频必须是 2:1 的 ERP，收到 {width}x{height}")
     if width % 2 or height % 2:
         _param_error(f"yuv420p 需要偶数宽高，收到 {width}x{height}")
+
+
+def _check_atmo_video(size: tuple[int, int]) -> None:
+    """氛围视频只要求 2:1；不要求与 GT 同分辨率，也不参与编码。"""
+    width, height = size
+    if width != 2 * height:
+        _param_error(f"氛围视频必须是 2:1 的 ERP，收到 {width}x{height}")
+
+
+def _read_atmo_frame(info, conf, index: int) -> np.ndarray | None:
+    """按帧号取一帧氛围视频；帧率未知时顺序解码到目标帧。"""
+    if index < 0:
+        return None
+    if info.fps_float > 0:
+        with FrameReader(info, conf, seek=index / info.fps_float, count=1) as reader:
+            for frame in reader:
+                return np.array(frame, copy=True)
+        return None
+    with FrameReader(info, conf) as reader:
+        for current, frame in enumerate(reader):
+            if current == index:
+                return np.array(frame, copy=True)
+    return None
+
+
+@dataclass
+class _BestPair:
+    """成对扫描时留下的最佳参考帧：GT 与氛围都留在 2K 工作尺度。"""
+
+    score: float = -np.inf
+    index: int = 0
+    gt_small: np.ndarray | None = None
+    atmo_small: np.ndarray | None = None
+
+
+class _AtmoTrack:
+    """顺序读氛围视频，按映射把 GT 帧号推进到目标帧；短了复用最后一帧。"""
+
+    def __init__(self, mapping: AtmoMapping, work: tuple[int, int]):
+        self.mapping = mapping
+        self.work = work
+        self.index = -1
+        self.small: np.ndarray | None = None
+        self.short = False
+
+    def small_for(self, frames: Iterator[np.ndarray],
+                  gt_index: int) -> np.ndarray | None:
+        target = self.mapping.index_for(gt_index)
+        while self.index < target:
+            try:
+                frame = next(frames)
+            except StopIteration:
+                if self.small is not None and target > self.index:
+                    self.short = True
+                break
+            self.index += 1
+            self.small = work_frame(frame, self.work)
+        return self.small
+
+
+def _resolve_pair_reference(open_gt: Callable[..., Iterator[np.ndarray]],
+                            open_atmo: Callable[..., Iterator[np.ndarray]],
+                            atmo_info, mapping: AtmoMapping,
+                            gt_size: tuple[int, int], ref_frame: int | None,
+                            log: Log, *, cached: relight_cache.CachedFixed | None = None,
+                            conf=None) -> ResolvedGeometry:
+    """视频氛围路径的参考帧对：GT 第 N 帧与它映射到的氛围帧。
+
+    对齐仍只估一次；命中缓存时跳过成对扫描与 SIFT。逐帧光场不需要参考帧的光场，
+    所以这里只返回相似变换。
+    """
+    work = work_size_for(*gt_size)
+    if cached is not None:
+        log.info(f"reference: frame {cached.ref_frame} (cached), "
+                 f"structure {cached.ref_matched:.3f}")
+        return ResolvedGeometry(
+            fixed=FixedGeometry(cached.alignment, cached.ref_frame,
+                                cached.ref_matched),
+            from_cache=True,
+            timing=SetupTiming(cache_hit=True, scan=0.0, read=0.0,
+                               align=0.0, fields=0.0))
+
+    setup_start = time.perf_counter()
+    if ref_frame is None:
+        best = _BestPair()
+        scanned = 0
+        track = _AtmoTrack(mapping, work)
+        # 扫描的生成器在 break 时停在 FrameReader 的 with 里；closing 让它及时退出，
+        # 否则那一路 ffmpeg 会挂着（与图片氛围路径同一个原因）。
+        with closing(open_gt()) as gt_frames, closing(open_atmo()) as atmo_frames:
+            atmo_iter = iter(atmo_frames)
+            for index, frame in enumerate(gt_frames):
+                scanned += 1
+                atmo_small = track.small_for(atmo_iter, index)
+                if atmo_small is None:
+                    break
+                gt_small = work_frame(frame, work)
+                gray = gray8(gt_small)
+                if float(gray.std()) < MIN_REFERENCE_STRUCTURE:
+                    continue
+                score = structure_score(gray, gray8(atmo_small))
+                if score > best.score:
+                    best = _BestPair(score, index, gt_small, atmo_small)
+                if index >= MAX_REFERENCE_SCAN:
+                    break
+        scan = time.perf_counter() - setup_start
+        if best.gt_small is None or best.atmo_small is None:
+            _runtime_error(f"前 {scanned} 对帧里没有带结构的画面（可能是黑场或空镜）")
+        ref_index, gt_small, atmo_small = best.index, best.gt_small, best.atmo_small
+        score = best.score
+        read = 0.0
+        log.info(f"reference: frame {ref_index} -> atmo "
+                 f"{mapping.index_for(ref_index)}, structure {score:.3f}")
+    else:
+        if ref_frame < 0:
+            _param_error(f"--ref-frame 必须从 0 起，收到 {ref_frame}")
+        read_start = time.perf_counter()
+        reference = _read_frame(open_gt, ref_frame)
+        if reference is None:
+            _param_error(f"--ref-frame {ref_frame} 超出视频帧数")
+        atmo_target = mapping.index_for(ref_frame)
+        atmo_frame = _read_atmo_frame(atmo_info, conf, atmo_target)
+        read = time.perf_counter() - read_start
+        if atmo_frame is None:
+            _runtime_error(
+                f"氛围视频取不到第 {atmo_target} 帧（GT 参考帧 {ref_frame} 的对应帧）")
+        gt_small = work_frame(reference, work)
+        atmo_small = work_frame(atmo_frame, work)
+        ref_index = ref_frame
+        score = structure_score(gray8(gt_small), gray8(atmo_small))
+        log.info(f"reference: frame {ref_index} -> atmo {atmo_target}, "
+                 f"structure {score:.3f}")
+        scan = 0.0
+
+    if score < MIN_STRUCTURE_CORRELATION:
+        # 与图片氛围路径同一条理由：未对齐的带通相关只作提示，真正的闸门是
+        # ``_check_alignment`` 的对齐后重合度。
+        log.warn(f"参考帧对未对齐时的结构重合度只有 {score:.3f}；"
+                 f"按对齐后的重合度判定。")
+
+    align_start = time.perf_counter()
+    alignment = estimate_similarity(gt_small, atmo_small)
+    align = time.perf_counter() - align_start
+    return ResolvedGeometry(
+        fixed=FixedGeometry(alignment, ref_index, score),
+        from_cache=False,
+        timing=SetupTiming(cache_hit=False, scan=scan, read=read,
+                           align=align, fields=0.0))
 
 
 @dataclass
@@ -345,15 +514,17 @@ def _write_report(report: Path | None, summary: dict) -> None:
     typer.echo(f"report -> {report}")
 
 
-def _video_report(fixed: FixedLight, base: dict, frames: int, fps: str, *,
-                  kind: str, started_at: datetime, finished_at: datetime,
-                  cache: dict, timing: dict,
-                  sample: dict | None = None) -> dict:
+def _video_report(fixed: FixedLight | FixedGeometry, base: dict, frames: int,
+                  fps: str, *, kind: str, started_at: datetime,
+                  finished_at: datetime, cache: dict, timing: dict,
+                  sample: dict | None = None,
+                  atmo_source: dict | None = None) -> dict:
     """视频版报告：``clip``/``light`` 与图像版同构，新增帧数、帧率、参考帧与计时。
 
     ``sample`` 只在 ``--sample`` 时出现，记录小样的采样帧号。``kind``/``started_at``/
     ``finished_at``/``cache``/``timing`` 是决策 65 的运行记录：前端重点显示时间戳，
-    分段耗时作为次要信息。
+    分段耗时作为次要信息。``atmo_source`` 记录氛围依据的类型与光场模式：图片氛围是
+    固定光场，视频氛围是逐帧光场并带映射与逐帧结构相关。
     """
     summary = {
         "gt": base["gt"], "atmo": base["atmo"], "size": base["size"],
@@ -366,12 +537,14 @@ def _video_report(fixed: FixedLight, base: dict, frames: int, fps: str, *,
         "params": base["params"], "align": base["align"],
         "clip": base["clip"], "light": base["light"], "seconds": base["seconds"],
     }
+    if atmo_source is not None:
+        summary.update(atmo_source)
     if sample is not None:
         summary["sample"] = sample
     return summary
 
 
-def _check_alignment(fixed: FixedLight) -> None:
+def _check_alignment(fixed: FixedLight | FixedGeometry) -> None:
     alignment = fixed.alignment
     typer.echo(f"align: inliers={alignment.inliers} matches={alignment.matches} "
                f"scale={alignment.scale:.5f} angle={alignment.angle_deg:.4f}° "
@@ -463,12 +636,14 @@ def _sample_indices(frames: int, count: int) -> list[int]:
 
 @dataclass(frozen=True)
 class SampleOutput:
-    """小样输出与三段累计耗时（秒）：seek 解码、合成、写图。"""
+    """小样输出与各段累计耗时（秒）：GT/氛围解码、合成、写图。"""
 
     paths: list[Path]
     decode: float
     compose: float
     write: float
+    atmo_decode: float = 0.0
+    match: dict | None = None
 
 
 def _write_samples(out_dir: Path, info, conf, light, indices: list[int],
@@ -502,6 +677,27 @@ def _write_samples(out_dir: Path, info, conf, light, indices: list[int],
     return SampleOutput(paths=written, decode=decode, compose=compose, write=write)
 
 
+def _frame_opener(info, conf) -> Callable[..., Iterator[np.ndarray]]:
+    """打开视频；传 ``index`` 时按帧号定位，只取一帧。"""
+    def open_frames(index: int | None = None) -> Iterator[np.ndarray]:
+        if index is None:
+            with FrameReader(info, conf) as reader:
+                yield from reader
+            return
+        if info.fps_float > 0:
+            with FrameReader(info, conf, seek=index / info.fps_float,
+                             count=1) as reader:
+                yield from reader
+            return
+        with FrameReader(info, conf) as reader:
+            for current, frame in enumerate(reader):
+                if current == index:
+                    yield frame
+                    return
+
+    return open_frames
+
+
 def _relight_video(inputs: RelightInputs, params: Params, conf,
                    log: Log, *, ref_frame: int | None, sample: int | None,
                    crf: int | None, started: float,
@@ -528,22 +724,7 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
              f"{mode} scene={params.scene} strength={params.strength} "
              f"local-shading={params.local_shading}")
 
-    def open_frames(index: int | None = None) -> Iterator[np.ndarray]:
-        """打开视频；传 ``index`` 时按帧号定位，只取一帧。"""
-        if index is None:
-            with FrameReader(info, conf) as reader:
-                yield from reader
-            return
-        if info.fps_float > 0:
-            with FrameReader(info, conf, seek=index / info.fps_float,
-                             count=1) as reader:
-                yield from reader
-            return
-        with FrameReader(info, conf) as reader:
-            for current, frame in enumerate(reader):
-                if current == index:
-                    yield frame
-                    return
+    open_frames = _frame_opener(info, conf)
 
     cached = None
     cache_key = None
@@ -624,7 +805,8 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
             kind="sample", started_at=started_at,
             finished_at=started_at + timedelta(seconds=total),
             cache=cache, timing=timing,
-            sample={"count": len(written), "frames": indices}))
+            sample={"count": len(written), "frames": indices},
+            atmo_source={"atmo_kind": "image", "fields_mode": "fixed"}))
         return
 
     sample_out = None
@@ -699,13 +881,328 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
         fixed, base, written, info.fps,
         kind="full", started_at=started_at,
         finished_at=started_at + timedelta(seconds=total),
-        cache=cache, timing=timing))
+        cache=cache, timing=timing,
+        atmo_source={"atmo_kind": "image", "fields_mode": "fixed"}))
+
+
+@dataclass(frozen=True)
+class PairRender:
+    """视频氛围整段渲染的结果：帧数、裁切统计、计时、逐帧结构相关。"""
+
+    frames: int
+    clip: dict | None
+    timing: dict
+    match: dict | None
+    short: bool
+
+
+def _match_stats(values: list[float]) -> dict | None:
+    if not values:
+        return None
+    return {"min": round(float(np.min(values)), 4),
+            "mean": round(float(np.mean(values)), 4),
+            "frames": len(values)}
+
+
+def _compose_pair(gt_frame: np.ndarray, atmo_small: np.ndarray,
+                  alignment: AlignResult, params: Params,
+                  work: tuple[int, int],
+                  size: tuple[int, int]) -> tuple[np.ndarray, float]:
+    """一帧 GT 与对应氛围帧：2K 上估光场、原尺寸乘算。
+
+    ``strength=0`` 时不估光场，直接返回 GT 的副本；这与 ``light_compose`` 的
+    单位变换等价，但省掉每帧一次的引导滤波与 8K 光场放大。
+    """
+    gt_small = work_frame(gt_frame, work)
+    aligned = warp_with_matrix(atmo_small, alignment.matrix, work)
+    match = structure_correlation(gray8(gt_small), gray8(aligned))
+    if params.strength == 0.0:
+        return np.ascontiguousarray(gt_frame), match
+    fields = estimate_fields(gt_small, aligned)
+    light = light_compose(fields, size, params.strength, params.local_shading)
+    return light.apply(np.ascontiguousarray(gt_frame)), match
+
+
+def _write_samples_pair(out_dir: Path, gt_info, atmo_info, conf,
+                        fixed: FixedGeometry, mapping: AtmoMapping,
+                        params: Params, indices: list[int], log: Log,
+                        work: tuple[int, int]) -> SampleOutput:
+    """视频氛围的小样：每个采样点同时取 GT 帧与映射到的氛围帧。"""
+    if out_dir.exists() and not out_dir.is_dir():
+        _param_error(f"--sample 要求 --out 是目录，但它是文件：{out_dir}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    matches: list[float] = []
+    decode = atmo_decode = compose = write = 0.0
+    open_gt = _frame_opener(gt_info, conf)
+    for index in indices:
+        decode_start = time.perf_counter()
+        frame = _read_frame(open_gt, index)
+        decode += time.perf_counter() - decode_start
+        if frame is None:
+            log.warn(f"GT 第 {index} 帧取不到，跳过")
+            continue
+        atmo_start = time.perf_counter()
+        atmo_frame = _read_atmo_frame(atmo_info, conf, mapping.index_for(index))
+        atmo_decode += time.perf_counter() - atmo_start
+        if atmo_frame is None:
+            log.warn(f"氛围第 {mapping.index_for(index)} 帧取不到，跳过 GT 第 {index} 帧")
+            continue
+        atmo_small = work_frame(atmo_frame, work)
+        compose_start = time.perf_counter()
+        relit, match = _compose_pair(frame, atmo_small, fixed.alignment,
+                                     params, work, gt_info.size)
+        if params.highlight_clip:
+            relit = soft_clip(relit, params.clip_knee, params.clip_max)
+        compose += time.perf_counter() - compose_start
+        matches.append(match)
+        path = out_dir / f"sample_{index:06d}.png"
+        write_start = time.perf_counter()
+        write_png(path, relit)
+        write += time.perf_counter() - write_start
+        written.append(path)
+        log.info(f"sample: frame {index} -> atmo {mapping.index_for(index)} "
+                 f"-> {path.name}")
+    return SampleOutput(paths=written, decode=decode, compose=compose,
+                        write=write, atmo_decode=atmo_decode,
+                        match=_match_stats(matches))
+
+
+def _render_pair(inputs: RelightInputs, gt_info, atmo_info,
+                 fixed: FixedGeometry, mapping: AtmoMapping, params: Params,
+                 conf, log: Log, video_cfg: dict,
+                 work: tuple[int, int]) -> PairRender:
+    """整段渲染：两路顺序读，每帧取对应氛围帧、估光场、乘算、编码。"""
+    meter = RateMeter(gt_info.frames or None, log)
+    log.step("render pass")
+    render_decode = render_atmo_decode = render_compose = render_write = 0.0
+    matches: list[float] = []
+    sample_out: np.ndarray | None = None
+    track = _AtmoTrack(mapping, work)
+    render_start = time.perf_counter()
+    loop_end = render_start
+    try:
+        with FrameWriter(inputs.out, gt_info.size, gt_info.fps, video_cfg,
+                         audio_from=inputs.gt, config=conf) as writer:
+            with FrameReader(gt_info, conf) as gt_reader, \
+                    FrameReader(atmo_info, conf) as atmo_reader:
+                gt_iter = iter(gt_reader)
+                atmo_iter = iter(atmo_reader)
+                index = -1
+                while True:
+                    decode_start = time.perf_counter()
+                    try:
+                        frame = next(gt_iter)
+                    except StopIteration:
+                        break
+                    index += 1
+                    render_decode += time.perf_counter() - decode_start
+                    atmo_start = time.perf_counter()
+                    atmo_small = track.small_for(atmo_iter, index)
+                    render_atmo_decode += time.perf_counter() - atmo_start
+                    if atmo_small is None:
+                        raise VideoIOError("氛围视频解码不出任何帧")
+                    compose_start = time.perf_counter()
+                    relit, match = _compose_pair(frame, atmo_small,
+                                                 fixed.alignment, params,
+                                                 work, gt_info.size)
+                    matches.append(match)
+                    if index == fixed.ref_frame:
+                        sample_out = relit
+                    if params.highlight_clip:
+                        relit = soft_clip(relit, params.clip_knee, params.clip_max)
+                    render_compose += time.perf_counter() - compose_start
+                    write_start = time.perf_counter()
+                    writer.write(relit)
+                    render_write += time.perf_counter() - write_start
+                    meter.tick()
+            loop_end = time.perf_counter()
+        render_flush = time.perf_counter() - loop_end
+        render_total = time.perf_counter() - render_start
+        written = writer.frames_written
+    except VideoIOError as exc:
+        Path(inputs.out).unlink(missing_ok=True)
+        _runtime_error(f"编解码失败：{exc}")
+    if not written:
+        Path(inputs.out).unlink(missing_ok=True)
+        _runtime_error("GT 视频解码不出任何帧")
+
+    clip_stats = None
+    if params.highlight_clip:
+        clip_stats = {"knee": params.clip_knee, "max": params.clip_max,
+                      "clipped_before": round(clipped_fraction(sample_out), 5)
+                      if sample_out is not None else None}
+        log.info(f"clip: over-exposure of the reference frame "
+                 f"{clip_stats['clipped_before']}")
+    meter.done()
+    timing = {
+        "render_decode": round(render_decode, 3),
+        "render_decode_atmo": round(render_atmo_decode, 3),
+        "render_compose": round(render_compose, 3),
+        "render_write": round(render_write, 3),
+        "render_flush": round(render_flush, 3),
+        "render_total": round(render_total, 3),
+    }
+    return PairRender(frames=written, clip=clip_stats, timing=timing,
+                      match=_match_stats(matches), short=track.short)
+
+
+def _relight_video_atmo(inputs: RelightInputs, params: Params, conf,
+                        log: Log, *, ref_frame: int | None, sample: int | None,
+                        crf: int | None, started: float,
+                        started_at: datetime) -> None:
+    """视频 GT + 视频氛围：固定相似变换，逐帧从对应氛围帧重估光场。"""
+    video_cfg = dict(conf.video, **({"crf": crf} if crf is not None else {}))
+    try:
+        gt_info = probe(inputs.gt, conf)
+        atmo_info = probe(inputs.atmo, conf)
+    except VideoIOError as exc:
+        _runtime_error(str(exc))
+    _check_video(gt_info.size)
+    _check_atmo_video(atmo_info.size)
+    width, height = gt_info.size
+    mapping = mapping_for(gt_info.frames, gt_info.fps_float,
+                          atmo_info.frames, atmo_info.fps_float)
+    work = work_size_for(width, height)
+    if not gt_info.frames:
+        log.info("GT ffprobe 未报告帧数：进度条只有速率，没有 ETA")
+    mode = f"sample={sample}" if sample is not None else "整段"
+    log.step(f"relight: {width}x{height} {gt_info.frames or '?'} frames @ {gt_info.fps} "
+             f"{mode} scene={params.scene} strength={params.strength} "
+             f"local-shading={params.local_shading} atmo=video "
+             f"{atmo_info.size[0]}x{atmo_info.size[1]} "
+             f"{atmo_info.frames or '?'} frames @ {atmo_info.fps} "
+             f"mapping={mapping.mode}")
+
+    open_gt = _frame_opener(gt_info, conf)
+
+    def open_atmo(index: int | None = None) -> Iterator[np.ndarray]:
+        yield from _frame_opener(atmo_info, conf)(index)
+
+    cached = None
+    cache_key = None
+    cache_load = 0.0
+    if inputs.cache_file is not None:
+        cache_key = relight_cache.CacheKey(
+            gt_sha256=inputs.gt_sha256, gt_size=inputs.gt_size,
+            gt_mtime_ns=inputs.gt_mtime_ns,
+            atmo_sha256=inputs.atmo_sha256, atmo_size=inputs.atmo_size,
+            atmo_mtime_ns=inputs.atmo_mtime_ns,
+            ref_frame="auto" if ref_frame is None else ref_frame,
+        )
+        load_start = time.perf_counter()
+        cached = relight_cache.load(inputs.cache_file, cache_key)
+        cache_load = time.perf_counter() - load_start
+        if cached is not None:
+            log.info(f"fixed: cache hit, reference frame {cached.ref_frame}")
+        else:
+            log.info("fixed: cache miss; scanning paired reference frame")
+
+    try:
+        resolved = _resolve_pair_reference(
+            open_gt, open_atmo, atmo_info, mapping, (width, height),
+            ref_frame, log, cached=cached, conf=conf)
+    except VideoIOError as exc:
+        _runtime_error(str(exc))
+    fixed = resolved.fixed
+    _check_alignment(fixed)
+    if (inputs.cache_file is not None and cache_key is not None
+            and not resolved.from_cache):
+        saved = relight_cache.save(
+            inputs.cache_file, cache_key,
+            relight_cache.CachedFixed(ref_frame=fixed.ref_frame,
+                                      ref_matched=fixed.ref_matched,
+                                      alignment=fixed.alignment))
+        if not saved:
+            log.warn(f"fixed: 缓存写入失败，下次仍会重算：{inputs.cache_file}")
+
+    cache = {"enabled": inputs.cache_file is not None,
+             "hit": resolved.from_cache, "load": round(cache_load, 3)}
+    setup_timing = {
+        "scan": round(resolved.timing.scan, 3),
+        "read": round(resolved.timing.read, 3),
+        "align": round(resolved.timing.align, 3),
+        "fields": round(resolved.timing.fields, 3),
+    }
+    atmo_source = {
+        "atmo_kind": "video",
+        "fields_mode": "per_frame",
+        "atmo_frames": atmo_info.frames,
+        "atmo_fps": atmo_info.fps,
+        "atmo_mapping": mapping.mode,
+        "atmo_ref_frame": mapping.index_for(fixed.ref_frame),
+    }
+
+    if sample is not None:
+        indices = _sample_indices(gt_info.frames, sample)
+        if not gt_info.frames:
+            log.warn("GT ffprobe 未报告帧数：小样从片头连续取，不是全片均匀采样")
+        samples = _write_samples_pair(
+            inputs.out, gt_info, atmo_info, conf, fixed, mapping, params,
+            indices, log, work)
+        written = samples.paths
+        if not written:
+            _runtime_error("小样一帧都没写出来：GT 或氛围视频解码不出任何帧")
+        total = time.perf_counter() - started
+        base = build_report(
+            gt=str(inputs.gt), atmo=str(inputs.atmo), size=(width, height),
+            params=params.as_dict(), align=align_report(fixed.alignment, width),
+            clip=None, light=None, seconds=total,
+        )
+        timing = {
+            "cache_load": round(cache_load, 3),
+            **setup_timing,
+            "sample_decode": round(samples.decode, 3),
+            "sample_decode_atmo": round(samples.atmo_decode, 3),
+            "sample_compose": round(samples.compose, 3),
+            "sample_write": round(samples.write, 3),
+            "total": base["seconds"],
+        }
+        log.info("timing: " + ", ".join(f"{key}={value:.2f}s"
+                                        for key, value in timing.items()))
+        typer.echo(f"wrote {len(written)} sample frames -> {inputs.out}")
+        _write_report(inputs.report, _video_report(
+            fixed, base, gt_info.frames, gt_info.fps,
+            kind="sample", started_at=started_at,
+            finished_at=started_at + timedelta(seconds=total),
+            cache=cache, timing=timing,
+            sample={"count": len(written), "frames": indices},
+            atmo_source={**atmo_source, "atmo_match": samples.match}))
+        return
+
+    render = _render_pair(inputs, gt_info, atmo_info, fixed, mapping, params,
+                          conf, log, video_cfg, work)
+    total = time.perf_counter() - started
+    base = build_report(
+        gt=str(inputs.gt), atmo=str(inputs.atmo), size=(width, height),
+        params=params.as_dict(), align=align_report(fixed.alignment, width),
+        clip=render.clip, light=None, seconds=total,
+    )
+    timing = {
+        "cache_load": round(cache_load, 3),
+        **setup_timing,
+        **render.timing,
+        "total": base["seconds"],
+    }
+    log.info("timing: " + ", ".join(f"{key}={value:.2f}s"
+                                    for key, value in timing.items()))
+    typer.echo(f"wrote {inputs.out}  ({render.frames} frames)")
+    _write_report(inputs.report, _video_report(
+        fixed, base, render.frames, gt_info.fps,
+        kind="full", started_at=started_at,
+        finished_at=started_at + timedelta(seconds=total),
+        cache=cache, timing=timing,
+        atmo_source={**atmo_source, "atmo_match": render.match,
+                     "atmo_short": render.short}))
 
 
 @app.command()
 def relight(
     gt: Path = typer.Option(None, "--gt", help="真 GT：2:1 ERP；视频走整段，图片走单帧"),
-    atmo: Path = typer.Option(None, "--atmo", help="AI 氛围图：与 GT 同尺寸、同比例"),
+    atmo: Path = typer.Option(
+        None, "--atmo",
+        help="AI 氛围依据：图片（整段复用固定光场）或视频（逐帧光场）；"
+             "图片与 GT 同尺寸，视频只要求 2:1"),
     out: Path = typer.Option(
         None, "--out", help="输出：图片 GT 写 PNG，视频 GT 写 MP4；--sample 时按目录写 PNG"),
     case: str = typer.Option(
@@ -723,7 +1220,8 @@ def relight(
     clip_max: float = typer.Option(0.98, "--clip-max", help="软裁切上限（亮度 0..1）"),
     ref_frame: int | None = typer.Option(
         None, "--ref-frame",
-        help="仅视频 GT：对齐与估光照场用的帧（0 起）；缺省自动选，指定即首帧"),
+        help="仅视频 GT：对齐与估光照场用的帧（0 起）；缺省自动选。"
+             "氛围是视频时，同时决定与它配对的那一帧"),
     sample: int | None = typer.Option(
         None, "--sample",
         help="仅视频 GT：只渲染 N 帧均匀采样的小样 PNG 到 --out 目录，不编码整段"),
@@ -738,7 +1236,7 @@ def relight(
     overrides: list[str] = typer.Option([], "--set", help="配置覆盖 key=value，可重复"),
     quiet: bool = typer.Option(False, "--quiet"),
 ) -> None:
-    """把 AI 氛围图的光照搬到真 GT 上：图片出单帧，视频出整段（固定机位）。"""
+    """把 AI 氛围依据的光照搬到真 GT 上：图片出单帧，视频出整段（固定机位）。"""
     started = time.perf_counter()
     started_at = _now()
     log = Log(quiet=quiet)
@@ -752,9 +1250,12 @@ def relight(
 
     try:
         kind = kind_of(inputs.gt)
+        atmo_kind = kind_of(inputs.atmo)
     except CaseError as exc:
         _param_error(str(exc))
     if kind == "image":
+        if atmo_kind == "video":
+            _param_error("氛围依据是视频，但底版是图片：视频氛围只适用于视频底版")
         if ref_frame is not None:
             _param_error("--ref-frame 只适用于视频 GT：图片 GT 没有参考帧的概念")
         if sample is not None:
@@ -775,9 +1276,15 @@ def relight(
         _relight_image(inputs.gt, inputs.atmo, inputs.out, params,
                        dump_light=dump_light, report=inputs.report, started=started)
     else:
-        _relight_video(inputs, params, _conf(config, overrides), log,
-                       ref_frame=ref_frame, sample=sample, crf=crf,
-                       started=started, started_at=started_at)
+        conf = _conf(config, overrides)
+        if atmo_kind == "video":
+            _relight_video_atmo(inputs, params, conf, log,
+                                ref_frame=ref_frame, sample=sample, crf=crf,
+                                started=started, started_at=started_at)
+        else:
+            _relight_video(inputs, params, conf, log,
+                           ref_frame=ref_frame, sample=sample, crf=crf,
+                           started=started, started_at=started_at)
     if case:
         _record_into_case(case, cases_dir, inputs.out, sample is not None)
 
@@ -807,9 +1314,13 @@ def _resolve_inputs(gt: Path | None, atmo: Path | None, out: Path | None,
         _param_error(str(exc))
     if loaded.flow != "relight":
         _param_error(f"case {case} 是 {loaded.flow} 流，不是 relight")
+    try:
+        case_mod.check_relight_pair(loaded)
+    except CaseError as exc:
+        _param_error(str(exc))
     gt_asset, atmo_asset = loaded.relight_slots()
     if gt_asset is None or atmo_asset is None:
-        missing = "底版" if gt_asset is None else "氛围图"
+        missing = "底版" if gt_asset is None else "氛围依据"
         _param_error(f"case {case} 还缺{missing}：先放好两个槽位"
                      f"（vrstudio case relight --case {case} …）")
     cdir = loaded.dir(cases_dir)

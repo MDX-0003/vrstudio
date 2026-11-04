@@ -459,11 +459,26 @@ def test_relight_rejects_stray_roles(tmp_path, relight_media):
         case_mod.add_assets("rl", [(video, "motion_ref")], root=tmp_path)
 
 
-def test_relight_atmo_must_be_image(tmp_path, relight_media):
+def test_relight_video_atmo_needs_video_gt(tmp_path, relight_media):
+    """图片底版配视频氛围：按真实原因拒绝，且不留下半条候选。"""
+    video, still, _ = relight_media
+    case_mod.create("rl", "relight", root=tmp_path)
+    case_mod.add_relight_candidate("rl", case_mod.RELIGHT_GT, still, tmp_path)
+    with pytest.raises(CaseError, match="视频氛围只适用于视频底版"):
+        case_mod.add_relight_candidate("rl", case_mod.RELIGHT_ATMO, video, tmp_path)
+    assert len(case_mod.load("rl", tmp_path).assets) == 1
+
+
+def test_relight_video_atmo_can_be_chosen_before_gt(tmp_path, relight_media):
+    """底版未选时允许先放视频氛围候选；配视频底版后合法。"""
     video, _, _ = relight_media
     case_mod.create("rl", "relight", root=tmp_path)
-    with pytest.raises(CaseError, match="relight_atmo"):
-        case_mod.add_relight_candidate("rl", case_mod.RELIGHT_ATMO, video, tmp_path)
+    case, atmo_id = case_mod.add_relight_candidate(
+        "rl", case_mod.RELIGHT_ATMO, video, tmp_path)
+    assert case.relight_slots() == (None, case.asset(atmo_id))
+    case, gt_id = case_mod.add_relight_candidate(
+        "rl", case_mod.RELIGHT_GT, video, tmp_path)
+    assert case.relight_slots()[0].id == gt_id
 
 
 def test_relight_draft_round_trips_and_rejects_unknown_keys(tmp_path):

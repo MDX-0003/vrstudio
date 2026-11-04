@@ -1620,13 +1620,20 @@ def _gates(case: case_mod.Case, extracts: list[dict],
         }
     elif case.flow == "relight":
         gt, atmo = case.relight_slots()
-        slots_ok = gt is not None and atmo is not None
+        pair_error = None
+        try:
+            case_mod.check_relight_pair(case)
+        except CaseError as exc:
+            pair_error = str(exc)
+        slots_ok = gt is not None and atmo is not None and pair_error is None
         if not case.assets:
-            asset_reason = "先在素材步选定底版与氛围图"
+            asset_reason = "先在素材步选定底版与氛围依据"
         elif gt is None:
             asset_reason = "还缺底版：选一个 2:1 ERP 的视频或图片"
         elif atmo is None:
-            asset_reason = "还缺氛围图：上传或选一张与底版同宽高的图片"
+            asset_reason = "还缺氛围依据：上传或选一张图片，或与视频底版同时长的视频"
+        elif pair_error:
+            asset_reason = pair_error
         else:
             asset_reason = ""
         current = _relight_current(case, cdir)
@@ -1634,7 +1641,7 @@ def _gates(case: case_mod.Case, extracts: list[dict],
             "assets": {
                 "ok": slots_ok,
                 "reason": asset_reason,
-                "evidence": (f"在 {cdir}\\assets\\ 检测到底版 {gt.path} 与氛围图 "
+                "evidence": (f"在 {cdir}\\assets\\ 检测到底版 {gt.path} 与氛围依据 "
                              f"{atmo.path}，两个槽位已写入 case.toml" if slots_ok else ""),
             },
             "relight": {

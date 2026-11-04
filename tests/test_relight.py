@@ -446,7 +446,9 @@ def test_video_strength_zero_keeps_gt_pixels(tmp_path):
     assert set(report) == {
         "gt", "atmo", "size", "frames", "fps", "kind", "started_at",
         "finished_at", "cache", "timing", "ref_frame", "ref_matched",
-        "params", "align", "clip", "light", "seconds"}
+        "params", "align", "clip", "light", "seconds",
+        "atmo_kind", "fields_mode"}
+    assert report["atmo_kind"] == "image" and report["fields_mode"] == "fixed"
     assert report["size"] == [VW, VH] and report["frames"] == VN
     assert report["kind"] == "full"
     assert datetime.fromisoformat(report["finished_at"]) >= datetime.fromisoformat(
