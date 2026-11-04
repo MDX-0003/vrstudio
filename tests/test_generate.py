@@ -175,6 +175,29 @@ def test_submit_dry_run_gen_writes_refs_and_omits_input(tmp_path, src_video, mon
     assert data["assets"][0]["path"].endswith(".mp4")
 
 
+def test_refs_payload_carries_no_sd_asset_ids(tmp_path, src_video, monkeypatch):
+    """决策 75：参考素材只按本地路径提交，清单与 vrgen argv 都不带 asset id。
+
+    平台在 generate 时自动上传登记；带手动 asset id 会让任务异步失败报
+    「第 1 个参考资产不属于目标 IP 库或与文件不匹配」（2026-11-03 实测）。
+    """
+    case_mod.create("g1", "gen", src_video, root=tmp_path)
+    case_mod.set_submit_selected("g1", ["v1"], root=tmp_path)
+    monkeypatch.setattr(gen, "probe", lambda path: _gen_info())
+    r = runner.invoke(gen.app, ["submit", "--case", "g1", "--dry-run",
+                                "--resolution", "1080p", "--cases-dir", str(tmp_path)])
+    assert r.exit_code == 0, r.output
+    lines = [line.strip() for line in r.output.splitlines()]
+    refs_path = Path(lines[lines.index("--refs") + 1])
+    data = json.loads(refs_path.read_text(encoding="utf-8"))
+    for item in data["assets"]:
+        assert set(item) <= {"id", "kind", "role", "path", "sha256"}
+        assert not [key for key in item if "asset" in key.lower()]
+    for flag in ("--asset-id", "--video-asset-id", "--audio-asset-id"):
+        assert flag not in lines
+    assert "--asset-id" not in r.output and "--video-asset-id" not in r.output
+
+
 def test_submit_dry_run_gen_passes_explicit_aspect(tmp_path, src_video, monkeypatch):
     case_mod.create("g1", "gen", src_video, root=tmp_path)
     case_mod.set_submit_selected("g1", ["v1"], root=tmp_path)
