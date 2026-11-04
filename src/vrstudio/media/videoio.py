@@ -21,6 +21,7 @@ not play. Pixel-baseline tests that need an exact round trip pin
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,9 @@ from .binres import ffmpeg, ffprobe
 
 FRAME_PIX_FMT = "bgr24"
 _BYTES_PER_PIXEL = 3
+#: 管道分块读取的块大小。Windows 下实测 8K 帧整帧一次读 298 ms/帧，64 KB 分块
+#: 62 ms/帧；更大的块（4 MB）反而退化，所以固定在这里，不暴露成配置。
+_READ_CHUNK = 1 << 16
 
 
 @dataclass(frozen=True)
@@ -123,6 +127,11 @@ class FrameReader:
     clip closes the pipe, ffmpeg sees EPIPE and exits nonzero, and treating that as
     a decode failure would make "grab the middle frame" impossible. Only a nonzero
     exit *after* the stream was consumed to the end is reported.
+
+    Each frame gets its own buffer. Callers keep frames (reference-frame scans,
+    samples, ``list(reader)``), so a reused buffer would let frame N+1 overwrite
+    frame N; ownership passes to the caller and the buffer goes away with the last
+    reference. The generator drops its own reference right after yielding.
     """
 
     def __init__(self, info: VideoInfo, config=None, seek: float | None = None,
@@ -148,12 +157,24 @@ class FrameReader:
 
     def __iter__(self) -> Iterator[np.ndarray]:
         assert self._proc is not None and self._proc.stdout is not None
+        fd = self._proc.stdout.fileno()
         while True:
-            buf = self._proc.stdout.read(self._frame_bytes)
-            if not buf or len(buf) < self._frame_bytes:
+            frame = np.empty(self._frame_bytes, np.uint8)
+            view = memoryview(frame)
+            got = 0
+            while got < self._frame_bytes:
+                chunk = os.read(fd, min(_READ_CHUNK, self._frame_bytes - got))
+                if not chunk:
+                    break
+                view[got:got + len(chunk)] = chunk
+                got += len(chunk)
+            view.release()
+            if got < self._frame_bytes:
                 self._exhausted = True
                 break
-            yield np.frombuffer(buf, np.uint8).reshape(self.height, self.width, _BYTES_PER_PIXEL)
+            yield frame.reshape(self.height, self.width, _BYTES_PER_PIXEL)
+            # 生成器在 yield 处挂起时会持有这一帧；先解引用，下一帧申请之前释放。
+            frame = None
 
     def __exit__(self, exc_type, exc, tb) -> None:
         if self._proc is None:
@@ -219,7 +240,8 @@ class FrameWriter:
                 f"frame {frame.shape[1]}x{frame.shape[0]} != declared "
                 f"{self.width}x{self.height}"
             )
-        self._proc.stdin.write(np.ascontiguousarray(frame).tobytes())
+        # memoryview 直接写管道：8K 帧省掉 tobytes() 的 100 MB 复制。
+        self._proc.stdin.write(np.ascontiguousarray(frame).data.cast("B"))
         self.frames_written += 1
 
     def __exit__(self, exc_type, exc, tb) -> None:

@@ -55,6 +55,24 @@ def _write(path, frames, conf) -> None:
             writer.write(frame)
 
 
+def test_reader_hands_out_independent_buffers(tmp_path):
+    """每帧一个独立缓冲：保留旧帧的调用方（扫描、小样、list）不能被下一帧覆盖。"""
+    conf = config_mod.load()
+    conf.data["video"]["preset"] = "ultrafast"
+    conf.data["video"]["crf"] = 0
+    src = tmp_path / "src.mp4"
+    _write(src, _closed_erp(), conf)
+
+    with FrameReader(probe(src, conf), conf) as reader:
+        frames = list(reader)
+    assert len(frames) == N
+    first = frames[0].copy()
+    frames[1][...] = 0
+    assert np.array_equal(frames[0], first)
+    assert (frames[0].__array_interface__["data"][0]
+            != frames[1].__array_interface__["data"][0])
+
+
 def test_video_roundtrip_through_files(tmp_path):
     conf = config_mod.load()
     conf.data["video"]["preset"] = "ultrafast"

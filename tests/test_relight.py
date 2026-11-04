@@ -14,6 +14,7 @@ CLI 三条错误路径分别对应退出码：比例/尺寸/参数越界是 2，
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
@@ -43,6 +44,7 @@ from vrstudio.relight.compose import (
     soft_clip,
 )
 from vrstudio.relight.fields import estimate_fields, linear_to_srgb8, srgb_to_linear
+from vrstudio.relight.bands import executor, workers_for
 
 runner = CliRunner()
 
@@ -205,6 +207,73 @@ def test_light_compose_matches_the_reference_formula():
                        white_balance=white_balance).apply(gt)
     want = _reference_apply(gt, gain, visibility, white_balance)
     assert int(np.abs(got.astype(np.int16) - want).max()) == 0
+
+
+# ── 行带并行：切带不改变任何像素 ───────────────────────────────────────────
+
+
+def test_banded_apply_is_bit_identical():
+    rng = np.random.default_rng(21)
+    gt = rng.integers(0, 256, (97, 128, 3), dtype=np.uint8)
+    gain = rng.uniform(0.4, 1.6, (97, 128)).astype(np.float32)
+    visibility = rng.uniform(0.5, 1.5, (97, 128)).astype(np.float32)
+    white_balance = np.array(
+        [[0.98, 0.01, 0.0], [0.0, 1.01, 0.02], [0.03, 0.0, 0.99]], np.float32)
+    light = LightCompose(gain=gain, visibility=visibility,
+                         white_balance=white_balance)
+
+    want = light.apply(gt)
+    for workers in (2, 3, 7):
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            got = light.apply(gt, pool=pool, workers=workers)
+        assert np.array_equal(got, want), f"workers={workers}"
+
+
+def test_banded_soft_clip_is_bit_identical():
+    rng = np.random.default_rng(22)
+    image = rng.integers(0, 256, (65, 96, 3), dtype=np.uint8)
+    image[:8, :8] = 255
+    image[20:24, 30:40] = 230
+
+    want = soft_clip(image)
+    for workers in (2, 3, 5):
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            got = soft_clip(image, pool=pool, workers=workers)
+        assert np.array_equal(got, want), f"workers={workers}"
+
+
+def test_banded_light_compose_is_bit_identical():
+    gt = textured_erp(256, 128, seed=41)
+    atmo = np.clip(gt.astype(np.float32) * 0.8, 0, 255).astype(np.uint8)
+    fields = estimate_fields(gt, atmo)
+
+    want = light_compose(fields, (256, 128), 0.8, 0.4)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        got = light_compose(fields, (256, 128), 0.8, 0.4, pool=pool, workers=4)
+    assert np.array_equal(got.gain, want.gain)
+    assert np.array_equal(got.visibility, want.visibility)
+    assert np.array_equal(got.white_balance, want.white_balance)
+    assert np.array_equal(got.apply(gt), want.apply(gt))
+
+
+def test_threaded_fields_match_serial():
+    gt = textured_erp(256, 128, seed=31)
+    atmo = np.clip(gt.astype(np.float32) * 0.75, 0, 255).astype(np.uint8)
+
+    want = estimate_fields(gt, atmo)
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        got = estimate_fields(gt, atmo, pool=pool)
+    for name in ("gain", "visibility", "light", "gt_light", "white_balance"):
+        assert np.array_equal(getattr(got, name), getattr(want, name)), name
+
+
+def test_worker_count_leaves_cores_for_codecs():
+    """线程数按机器推导：小机器串行、上限 16、串行时不建线程池。"""
+    assert workers_for(2) == 1
+    assert workers_for(5) == 1
+    assert workers_for(20) == 16
+    assert workers_for(64) == 16
+    assert executor(1) is None
 
 
 # ── CLI：退出码、输出、报告 ────────────────────────────────────────────────

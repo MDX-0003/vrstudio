@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable, Iterator
-from contextlib import closing
+from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -52,6 +52,7 @@ from ..relight.align import (
     warp_with_matrix,
 )
 from ..relight.atmo import AtmoMapping, mapping_for, work_frame, work_size_for
+from ..relight.bands import executor, workers_for
 from ..relight.compose import clipped_fraction, light_compose, soft_clip
 from ..relight.compose import relight as compose_relight
 from ..relight.fields import LightFields, estimate_fields
@@ -654,26 +655,29 @@ def _write_samples(out_dir: Path, info, conf, light, indices: list[int],
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     decode = compose = write = 0.0
-    for index in indices:
-        seek = index / info.fps_float if info.fps_float > 0 else 0.0
-        decode_start = time.perf_counter()
-        with FrameReader(info, conf, seek=seek, count=1) as reader:
-            frame = next(iter(reader), None)
-        decode += time.perf_counter() - decode_start
-        if frame is None:
-            log.warn(f"第 {index} 帧取不到（seek {seek:.3f}s），跳过")
-            continue
-        compose_start = time.perf_counter()
-        relit = light.apply(np.ascontiguousarray(frame))
-        if params.highlight_clip:
-            relit = soft_clip(relit, params.clip_knee, params.clip_max)
-        compose += time.perf_counter() - compose_start
-        path = out_dir / f"sample_{index:06d}.png"
-        write_start = time.perf_counter()
-        write_png(path, relit)
-        write += time.perf_counter() - write_start
-        written.append(path)
-        log.info(f"sample: frame {index} -> {path.name}")
+    workers = workers_for()
+    with (executor(workers) or nullcontext()) as pool:
+        for index in indices:
+            seek = index / info.fps_float if info.fps_float > 0 else 0.0
+            decode_start = time.perf_counter()
+            with FrameReader(info, conf, seek=seek, count=1) as reader:
+                frame = next(iter(reader), None)
+            decode += time.perf_counter() - decode_start
+            if frame is None:
+                log.warn(f"第 {index} 帧取不到（seek {seek:.3f}s），跳过")
+                continue
+            compose_start = time.perf_counter()
+            relit = light.apply(np.ascontiguousarray(frame), pool=pool, workers=workers)
+            if params.highlight_clip:
+                relit = soft_clip(relit, params.clip_knee, params.clip_max,
+                                  pool=pool, workers=workers)
+            compose += time.perf_counter() - compose_start
+            path = out_dir / f"sample_{index:06d}.png"
+            write_start = time.perf_counter()
+            write_png(path, relit)
+            write += time.perf_counter() - write_start
+            written.append(path)
+            log.info(f"sample: frame {index} -> {path.name}")
     return SampleOutput(paths=written, decode=decode, compose=compose, write=write)
 
 
@@ -809,12 +813,14 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
             atmo_source={"atmo_kind": "image", "fields_mode": "fixed"}))
         return
 
-    sample_out = None
+    clip_before = None
     meter = RateMeter(info.frames or None, log)
     log.step("render pass")
     render_decode = render_compose = render_write = 0.0
     render_start = time.perf_counter()
     loop_end = render_start
+    workers = workers_for()
+    pool = executor(workers)
     try:
         with FrameWriter(inputs.out, info.size, info.fps, video_cfg,
                          audio_from=inputs.gt, config=conf) as writer:
@@ -828,11 +834,15 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
                         break
                     render_decode += time.perf_counter() - decode_start
                     compose_start = time.perf_counter()
-                    relit = light.apply(np.ascontiguousarray(frame))
-                    if writer.frames_written == fixed.ref_frame:
-                        sample_out = relit
+                    relit = light.apply(np.ascontiguousarray(frame),
+                                        pool=pool, workers=workers)
+                    # 小样统计在参考帧那一刻算完，只留一个浮点数，不跨整段持有 8K 帧。
+                    if (params.highlight_clip
+                            and writer.frames_written == fixed.ref_frame):
+                        clip_before = clipped_fraction(relit)
                     if params.highlight_clip:
-                        relit = soft_clip(relit, params.clip_knee, params.clip_max)
+                        relit = soft_clip(relit, params.clip_knee, params.clip_max,
+                                          pool=pool, workers=workers)
                     render_compose += time.perf_counter() - compose_start
                     write_start = time.perf_counter()
                     writer.write(relit)
@@ -845,6 +855,9 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
     except VideoIOError as exc:
         Path(inputs.out).unlink(missing_ok=True)
         _runtime_error(f"编码失败：{exc}")
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True)
     if not written:
         Path(inputs.out).unlink(missing_ok=True)
         _runtime_error("GT 视频解码不出任何帧")
@@ -852,8 +865,8 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
     clip_stats = None
     if params.highlight_clip:
         clip_stats = {"knee": params.clip_knee, "max": params.clip_max,
-                      "clipped_before": round(clipped_fraction(sample_out), 5)
-                      if sample_out is not None else None}
+                      "clipped_before": round(clip_before, 5)
+                      if clip_before is not None else None}
         log.info(f"clip: over-exposure of the reference frame "
                  f"{clip_stats['clipped_before']}")
     meter.done()
@@ -907,7 +920,8 @@ def _match_stats(values: list[float]) -> dict | None:
 def _compose_pair(gt_frame: np.ndarray, atmo_small: np.ndarray,
                   alignment: AlignResult, params: Params,
                   work: tuple[int, int],
-                  size: tuple[int, int]) -> tuple[np.ndarray, float]:
+                  size: tuple[int, int], *,
+                  pool=None, workers: int = 1) -> tuple[np.ndarray, float]:
     """一帧 GT 与对应氛围帧：2K 上估光场、原尺寸乘算。
 
     ``strength=0`` 时不估光场，直接返回 GT 的副本；这与 ``light_compose`` 的
@@ -918,9 +932,11 @@ def _compose_pair(gt_frame: np.ndarray, atmo_small: np.ndarray,
     match = structure_correlation(gray8(gt_small), gray8(aligned))
     if params.strength == 0.0:
         return np.ascontiguousarray(gt_frame), match
-    fields = estimate_fields(gt_small, aligned)
-    light = light_compose(fields, size, params.strength, params.local_shading)
-    return light.apply(np.ascontiguousarray(gt_frame)), match
+    fields = estimate_fields(gt_small, aligned, pool=pool)
+    light = light_compose(fields, size, params.strength, params.local_shading,
+                          pool=pool, workers=workers)
+    return light.apply(np.ascontiguousarray(gt_frame),
+                       pool=pool, workers=workers), match
 
 
 def _write_samples_pair(out_dir: Path, gt_info, atmo_info, conf,
@@ -935,34 +951,38 @@ def _write_samples_pair(out_dir: Path, gt_info, atmo_info, conf,
     matches: list[float] = []
     decode = atmo_decode = compose = write = 0.0
     open_gt = _frame_opener(gt_info, conf)
-    for index in indices:
-        decode_start = time.perf_counter()
-        frame = _read_frame(open_gt, index)
-        decode += time.perf_counter() - decode_start
-        if frame is None:
-            log.warn(f"GT 第 {index} 帧取不到，跳过")
-            continue
-        atmo_start = time.perf_counter()
-        atmo_frame = _read_atmo_frame(atmo_info, conf, mapping.index_for(index))
-        atmo_decode += time.perf_counter() - atmo_start
-        if atmo_frame is None:
-            log.warn(f"氛围第 {mapping.index_for(index)} 帧取不到，跳过 GT 第 {index} 帧")
-            continue
-        atmo_small = work_frame(atmo_frame, work)
-        compose_start = time.perf_counter()
-        relit, match = _compose_pair(frame, atmo_small, fixed.alignment,
-                                     params, work, gt_info.size)
-        if params.highlight_clip:
-            relit = soft_clip(relit, params.clip_knee, params.clip_max)
-        compose += time.perf_counter() - compose_start
-        matches.append(match)
-        path = out_dir / f"sample_{index:06d}.png"
-        write_start = time.perf_counter()
-        write_png(path, relit)
-        write += time.perf_counter() - write_start
-        written.append(path)
-        log.info(f"sample: frame {index} -> atmo {mapping.index_for(index)} "
-                 f"-> {path.name}")
+    workers = workers_for()
+    with (executor(workers) or nullcontext()) as pool:
+        for index in indices:
+            decode_start = time.perf_counter()
+            frame = _read_frame(open_gt, index)
+            decode += time.perf_counter() - decode_start
+            if frame is None:
+                log.warn(f"GT 第 {index} 帧取不到，跳过")
+                continue
+            atmo_start = time.perf_counter()
+            atmo_frame = _read_atmo_frame(atmo_info, conf, mapping.index_for(index))
+            atmo_decode += time.perf_counter() - atmo_start
+            if atmo_frame is None:
+                log.warn(f"氛围第 {mapping.index_for(index)} 帧取不到，跳过 GT 第 {index} 帧")
+                continue
+            atmo_small = work_frame(atmo_frame, work)
+            compose_start = time.perf_counter()
+            relit, match = _compose_pair(frame, atmo_small, fixed.alignment,
+                                         params, work, gt_info.size,
+                                         pool=pool, workers=workers)
+            if params.highlight_clip:
+                relit = soft_clip(relit, params.clip_knee, params.clip_max,
+                                  pool=pool, workers=workers)
+            compose += time.perf_counter() - compose_start
+            matches.append(match)
+            path = out_dir / f"sample_{index:06d}.png"
+            write_start = time.perf_counter()
+            write_png(path, relit)
+            write += time.perf_counter() - write_start
+            written.append(path)
+            log.info(f"sample: frame {index} -> atmo {mapping.index_for(index)} "
+                     f"-> {path.name}")
     return SampleOutput(paths=written, decode=decode, compose=compose,
                         write=write, atmo_decode=atmo_decode,
                         match=_match_stats(matches))
@@ -977,8 +997,10 @@ def _render_pair(inputs: RelightInputs, gt_info, atmo_info,
     log.step("render pass")
     render_decode = render_atmo_decode = render_compose = render_write = 0.0
     matches: list[float] = []
-    sample_out: np.ndarray | None = None
+    clip_before: float | None = None
     track = _AtmoTrack(mapping, work)
+    workers = workers_for()
+    pool = executor(workers)
     render_start = time.perf_counter()
     loop_end = render_start
     try:
@@ -1005,12 +1027,14 @@ def _render_pair(inputs: RelightInputs, gt_info, atmo_info,
                     compose_start = time.perf_counter()
                     relit, match = _compose_pair(frame, atmo_small,
                                                  fixed.alignment, params,
-                                                 work, gt_info.size)
+                                                 work, gt_info.size,
+                                                 pool=pool, workers=workers)
                     matches.append(match)
-                    if index == fixed.ref_frame:
-                        sample_out = relit
+                    if params.highlight_clip and index == fixed.ref_frame:
+                        clip_before = clipped_fraction(relit)
                     if params.highlight_clip:
-                        relit = soft_clip(relit, params.clip_knee, params.clip_max)
+                        relit = soft_clip(relit, params.clip_knee, params.clip_max,
+                                          pool=pool, workers=workers)
                     render_compose += time.perf_counter() - compose_start
                     write_start = time.perf_counter()
                     writer.write(relit)
@@ -1023,6 +1047,9 @@ def _render_pair(inputs: RelightInputs, gt_info, atmo_info,
     except VideoIOError as exc:
         Path(inputs.out).unlink(missing_ok=True)
         _runtime_error(f"编解码失败：{exc}")
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True)
     if not written:
         Path(inputs.out).unlink(missing_ok=True)
         _runtime_error("GT 视频解码不出任何帧")
@@ -1030,8 +1057,8 @@ def _render_pair(inputs: RelightInputs, gt_info, atmo_info,
     clip_stats = None
     if params.highlight_clip:
         clip_stats = {"knee": params.clip_knee, "max": params.clip_max,
-                      "clipped_before": round(clipped_fraction(sample_out), 5)
-                      if sample_out is not None else None}
+                      "clipped_before": round(clip_before, 5)
+                      if clip_before is not None else None}
         log.info(f"clip: over-exposure of the reference frame "
                  f"{clip_stats['clipped_before']}")
     meter.done()

@@ -21,6 +21,7 @@ import cv2
 import numpy as np
 
 from .align import work_size
+from .bands import run_tasks
 
 GUIDED_RADIUS_2K = 12
 GUIDED_EPS = 300.0
@@ -127,8 +128,14 @@ def white_balance_matrix(light: np.ndarray, gt_light: np.ndarray) -> np.ndarray:
     return (rgb / max(y, 1e-6)).astype(np.float32)
 
 
-def estimate_fields(gt8: np.ndarray, atmo8: np.ndarray) -> LightFields:
-    """在 2K 上估计照明表示；输入是同尺寸 8-bit BGR 图（氛围图已对齐）。"""
+def estimate_fields(gt8: np.ndarray, atmo8: np.ndarray, *,
+                    pool=None) -> LightFields:
+    """在 2K 上估计照明表示；输入是同尺寸 8-bit BGR 图（氛围图已对齐）。
+
+    ``pool`` 给出时 6 次引导滤波并行（3 个 GT 通道 + 3 个氛围通道）。每次调用
+    仍然完整计算自己的引导统计量，不共享中间量；并行只改变执行顺序的等待方式，
+    不改变任何一次滤波的输入与输出。
+    """
     height, width = gt8.shape[:2]
     work_w, work_h = work_size(width, height)
     gt_lin = srgb_to_linear(cv2.resize(gt8, (work_w, work_h),
@@ -137,8 +144,10 @@ def estimate_fields(gt8: np.ndarray, atmo8: np.ndarray) -> LightFields:
                                         interpolation=cv2.INTER_AREA)).astype(np.float32)
 
     guide = luma(gt_lin)
-    gt_light = np.stack([guided(guide, gt_lin[..., c]) for c in range(3)], axis=-1)
-    light = np.stack([guided(guide, atmo_lin[..., c]) for c in range(3)], axis=-1)
+    channels = [gt_lin[..., c] for c in range(3)] + [atmo_lin[..., c] for c in range(3)]
+    smoothed = run_tasks(6, lambda i: guided(guide, channels[i]), pool)
+    gt_light = np.stack(smoothed[:3], axis=-1)
+    light = np.stack(smoothed[3:], axis=-1)
     light_y = luma(light)
 
     gain = (light_y + 1e-4) / np.maximum(luma(gt_light) + 1e-4, 1e-6)

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime
 
 import cv2
@@ -197,6 +198,21 @@ def test_sample_writes_frames_without_encoding(sources):
     assert report["timing"]["sample_compose"] > 0
     assert "render_total" not in report["timing"]
     assert report["cache"] == {"enabled": False, "hit": False, "load": 0.0}
+
+
+def test_full_render_leaves_no_threads(sources):
+    """线程池随渲染结束关闭：一次渲染不能留下存活的 ThreadPoolExecutor 线程。"""
+    tmp_path, video, atmo, _ = sources
+    before = {thread.name for thread in threading.enumerate()}
+
+    out = tmp_path / "out.mp4"
+    result = run_video_cli("--gt", str(video), "--atmo", str(atmo),
+                           "--out", str(out), "--highlight-clip",
+                           "--set", "video.preset=ultrafast")
+    assert result.exit_code == 0, result.output
+
+    leaked = {thread.name for thread in threading.enumerate()} - before
+    assert not [name for name in leaked if name.startswith("ThreadPoolExecutor")], leaked
 
 
 def test_retired_command_name_is_gone(sources):

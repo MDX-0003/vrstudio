@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import cv2
 import numpy as np
@@ -151,6 +152,24 @@ def test_video_atmo_light_follows_the_moving_blob(tmp_path):
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["fields_mode"] == "per_frame"
     assert report["atmo_match"]["mean"] > 0.0
+
+
+@requires_ffmpeg
+def test_full_render_leaves_no_threads(tmp_path):
+    """线程池随渲染结束关闭：一次渲染不能留下存活的 ThreadPoolExecutor 线程。"""
+    frames = [video_erp_without_edges() for _ in range(VN)]
+    src = write_video(tmp_path / "gt.mp4", frames)
+    atmo = write_video(tmp_path / "atmo.mp4", moving_light_frames())
+    before = {thread.name for thread in threading.enumerate()}
+
+    result = run_cli("--gt", str(src), "--atmo", str(atmo),
+                     "--out", str(tmp_path / "out.mp4"),
+                     "--strength", "1", "--ref-frame", "0", "--crf", "0",
+                     "--set", "video.preset=ultrafast")
+    assert result.exit_code == 0, result.output
+
+    leaked = {thread.name for thread in threading.enumerate()} - before
+    assert not [name for name in leaked if name.startswith("ThreadPoolExecutor")], leaked
 
 
 @requires_ffmpeg
