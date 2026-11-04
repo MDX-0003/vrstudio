@@ -1290,6 +1290,36 @@ def test_outputs_fallback_and_partial_flag(client, patch_case, tmp_path, monkeyp
     assert outs[0]["partial"] is False
 
 
+def test_outputs_fullredraw_requires_the_recompose_report(client, fullredraw_case, tmp_path):
+    """out/ 里的散件不是成片：只有 recompose 写下报告的 mp4 才进列表。"""
+    out = tmp_path / "f1" / "out"
+    (out / "stray.mp4").write_bytes(b"stray")
+    (out / "older.mp4").write_bytes(b"older")
+    (out / "older_recompose.json").write_text("{}", encoding="utf-8")
+    os.utime(out / "round-1.mp4", (2_000, 2_000))
+    os.utime(out / "older.mp4", (1_000, 1_000))
+    os.utime(out / "stray.mp4", (3_000, 3_000))
+
+    outs = client.get("/api/case/f1").json()["outputs"]
+    assert [o["file"] for o in outs] == ["older.mp4", "round-1.mp4"]
+
+
+def test_outputs_are_sorted_by_mtime_not_filename(client, patch_case, tmp_path):
+    """版本名是时间戳以外的写法时，仍按 mtime 升序，最后一项才是最新成片。"""
+    _mk_extract("p1", tmp_path, "v1")
+    _mk_extract("p1", tmp_path, "v2")
+    case_mod.set_extract_current("p1", "v2", root=tmp_path)
+    out = tmp_path / "p1" / "out"
+    out.mkdir()
+    (out / "v1_space.mp4").write_bytes(b"old")
+    (out / "v2_space.mp4").write_bytes(b"new")
+    os.utime(out / "v1_space.mp4", (2_000, 2_000))
+    os.utime(out / "v2_space.mp4", (1_000, 1_000))
+
+    outs = client.get("/api/case/p1").json()["outputs"]
+    assert [o["file"] for o in outs] == ["v2_space.mp4", "v1_space.mp4"]
+
+
 def test_old_out_names_are_not_in_the_fallback_chain(client, patch_case, tmp_path):
     _mk_extract("p1", tmp_path, "v1")
     case_mod.set_extract_current("p1", "v1", root=tmp_path)

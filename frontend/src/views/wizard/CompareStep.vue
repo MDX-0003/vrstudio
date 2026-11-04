@@ -65,8 +65,9 @@ const selected = computed(
 const currentFile = computed(() => props.info.relight?.current?.name ?? '')
 /**
  * 右路成片的默认选中：relight 跟随 ``[relight] current``（后端已兜底取 out/ 最新，
- * out/ 里混入的非产物文件不会带偏默认值）；其余流程取列表最后一项（升序最新）。
- * 旧实现直接取 outputs[0]（升序第一份，即最旧一份），跑过多轮 merge 的 case 会看错图。
+ * out/ 里混入的非产物文件不会带偏默认值）；其余流程取列表最后一项——后端
+ * ``_outputs`` 按 mtime 升序返回，最后一项就是最新一份。旧实现直接取 outputs[0]
+ * （升序第一份，即最旧一份），跑过多轮 merge 的 case 会看错图。
  */
 function defaultSelection(rows: OutputFile[]): string {
   const pinned = isRelight.value ? currentFile.value : ''
@@ -442,7 +443,7 @@ function onKeydown(event: KeyboardEvent): void {
 
     <template v-else>
       <div class="compare-top">
-        <label v-if="isStill || isRelight" class="ctl">
+        <label class="ctl">
           <span>右路成片</span>
           <el-select
             :model-value="selectedFile"

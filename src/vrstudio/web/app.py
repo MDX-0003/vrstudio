@@ -818,27 +818,47 @@ def _output_entry(case: case_mod.Case, path: Path) -> dict:
     }
 
 
+def _output_sort_key(path: Path) -> tuple[float, str]:
+    """按修改时间升序、文件名兜底；对比页默认取列表最后一项（即最新一份）。"""
+    try:
+        return (path.stat().st_mtime, path.name)
+    except OSError:
+        return (0.0, path.name)
+
+
 def _output_files(case: case_mod.Case) -> list[tuple[Path, str | None, bool]]:
     """成片文件、patch 版本名与是否仅空间段；列表与详情共用同一套选择规则。
 
-    返回 ``(路径, patch 版本名或 None, 是否 space-only)``。列表页只取路径与数量，
-    不再读代理 sidecar、也不打开源片取帧数。
+    返回 ``(路径, patch 版本名或 None, 是否 space-only)``，按修改时间升序。
+    列表页只取路径与数量，不再读代理 sidecar、也不打开源片取帧数。
+
+    只收流程自己写出的成片，``out/`` 里混进来的散件不展示：
+    patch 认 ``<版本>_space.mp4`` / ``<版本>_frame.mp4``（frame 优先），
+    fullredraw 认旁边有 recompose 报告 ``<轮次>_recompose.json`` 的 mp4。
     """
     odir = case.dir(_ctx["cases_root"]) / "out"
     if not odir.is_dir():
         return []
     if case.flow in case_mod.IMAGE_FLOWS:
-        return [(p, None, False) for p in sorted(odir.glob("*.png"))]
+        return [(p, None, False)
+                for p in sorted(odir.glob("*.png"), key=_output_sort_key)]
     if case.flow == "relight":
         # 底版可能是视频也可能是图片，交付物两种后缀都会出现；小样在 out/samples/
         # 子目录里，不是 out/ 的直接子文件，所以这里不会误收。
-        return [(p, None, False) for p in sorted(odir.iterdir())
-                if p.is_file() and p.suffix.lower() in _RELICHT_OUT_SUFFIXES]
-    files = sorted(odir.glob("*.mp4"))
+        return [(p, None, False)
+                for p in sorted((p for p in odir.iterdir()
+                                 if p.is_file()
+                                 and p.suffix.lower() in _RELICHT_OUT_SUFFIXES),
+                                key=_output_sort_key)]
+    if case.flow == "fullredraw":
+        files = [p for p in odir.glob("*.mp4")
+                 if p.with_name(f"{p.stem}_recompose.json").is_file()]
+        return [(p, None, False) for p in sorted(files, key=_output_sort_key)]
     if case.flow != "patch":
-        return [(p, None, False) for p in files]
+        # gen 的采用结果在 case/result.mp4，out/ 不是它的产物目录。
+        return []
     chosen: dict[str, tuple[str, Path]] = {}
-    for p in files:
+    for p in odir.glob("*.mp4"):
         stem = p.stem
         if stem.endswith("_frame"):
             chosen[stem[:-len("_frame")]] = ("frame", p)
@@ -846,8 +866,8 @@ def _output_files(case: case_mod.Case) -> list[tuple[Path, str | None, bool]]:
             version = stem[:-len("_space")]
             if chosen.get(version, ("", None))[0] != "frame":
                 chosen[version] = ("space", p)
-    return [(path, version, kind == "space") for version in sorted(chosen)
-            for kind, path in (chosen[version],)]
+    rows = [(path, version, kind == "space") for version, (kind, path) in chosen.items()]
+    return sorted(rows, key=lambda row: _output_sort_key(row[0]))
 
 
 def _outputs(case: case_mod.Case) -> list[dict]:

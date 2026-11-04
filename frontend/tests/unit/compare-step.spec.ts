@@ -166,6 +166,65 @@ describe('CompareStep 图片流程', () => {
   })
 })
 
+function videoOut(file: string, mtime: number): OutputFile {
+  return {
+    file,
+    name: file,
+    exists: true,
+    mtime,
+    size: 1,
+    open_url: `/file?root=cases&p=f1%2Fout%2F${file}`,
+    proxy_url: `/video/outproxy/f1/${file}`,
+    proxy_state: 'missing',
+    proxy_width: null,
+  }
+}
+
+/** fullredraw 的成片名是轮次哈希，不能按文件名判断新旧；顺序由后端按 mtime 给出。 */
+function fullredrawCase(): CaseInfo {
+  return {
+    name: 'f1',
+    flow: 'fullredraw',
+    source_url: '/video/source/f1',
+    source_file: {
+      name: 'ue.mp4',
+      rel: 'sources/ue.mp4',
+      path: 'E:/x/ue.mp4',
+      exists: true,
+      open_url: '/file?root=sources&p=ue.mp4',
+    },
+    proxy: null,
+    outputs: [videoOut('older.mp4', 1_000), videoOut('newer.mp4', 2_000)],
+    gates: {},
+    assets: [],
+  } as unknown as CaseInfo
+}
+
+describe('CompareStep 视频流程', () => {
+  it('offers the output dropdown for fullredraw and defaults to the newest output', async () => {
+    const wrapper = await mountCompare(fullredrawCase(), 'f1')
+    expect(wrapper.findAll('video')).toHaveLength(2)
+    expect(wrapper.findAll('video')[1].attributes('src')).toContain('newer.mp4')
+    const outputLabel = wrapper
+      .findAll('label.ctl')
+      .find((node) => node.text().includes('右路成片'))
+    expect(outputLabel).toBeDefined()
+    wrapper.unmount()
+  })
+
+  it('switches the right video when an older output is chosen', async () => {
+    const wrapper = await mountCompare(fullredrawCase(), 'f1')
+    const outputLabel = wrapper
+      .findAll('label.ctl')
+      .find((node) => node.text().includes('右路成片'))
+    expect(outputLabel).toBeDefined()
+    await outputLabel!.find('select').setValue('older.mp4')
+    await flushPromises()
+    expect(wrapper.findAll('video')[1].attributes('src')).toContain('older.mp4')
+    wrapper.unmount()
+  })
+})
+
 function relightOut(file: string): OutputFile {
   return {
     file,
