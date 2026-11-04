@@ -44,6 +44,8 @@ restore_interp     = "lanczos4"
 boundary_repair    = "off"                  # off | feather（红蓝 / 绿红过渡）
 boundary_repair_pct = 15.0   # feather 时 T = max(8, round(L * pct/100))
 max_sample_rows    = 256     # 配准粗搜索时纵向降采样到的行数（精度/速度权衡）
+gate_max_frames    = 48      # 闸门段最多分析的帧数：按总帧数均匀抽样；0 = 分析全部帧。
+                             # d* 是整段一个常量，闸门结论是段级的，逐帧配准不改变结论。
 aspect_drift_warn_pct = 2.0  # 工具返回的宽高比与画布差多少就告警（输出仍是 WxH，
                              # 闭合是横向的，但内容会被拉伸）
 

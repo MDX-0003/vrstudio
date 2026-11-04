@@ -23,9 +23,31 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from .blend import blend_block
+from .blend import blend_block, blend_into
 
 RepairKind = str  # "off" | "feather"
+
+
+class ComposeBuffers:
+    """Scratch arrays for one streaming pass.
+
+    The video loop processes thousands of frames at 4K/8K, and allocating the
+    float64 temporaries per frame costs more in page faults than the arithmetic
+    they serve (measured: 8K rounding 160 ms fresh vs 28 ms reused). One instance
+    is created per pass and passed explicitly; nothing is cached at module level,
+    so two concurrent passes cannot share state.
+    """
+
+    def __init__(self) -> None:
+        self._arrays: dict[str, np.ndarray] = {}
+
+    def take(self, name: str, shape: tuple[int, ...], dtype) -> np.ndarray:
+        """Return a buffer for ``name``, allocating it on first use or shape change."""
+        current = self._arrays.get(name)
+        if current is None or current.shape != shape or current.dtype != dtype:
+            current = np.empty(shape, dtype)
+            self._arrays[name] = current
+        return current
 
 
 @dataclass(frozen=True)
@@ -118,6 +140,48 @@ def recompose(canvas: np.ndarray, spec: RecomposeSpec) -> np.ndarray:
 def finalize(out: np.ndarray) -> np.ndarray:
     """The single quantisation step: float64 -> uint8."""
     return np.clip(np.rint(out), 0, 255).astype(np.uint8)
+
+
+def recompose_u8(
+    canvas: np.ndarray,
+    spec: RecomposeSpec,
+    buffers: ComposeBuffers | None = None,
+) -> np.ndarray:
+    """``finalize(recompose(canvas, spec))`` without materialising ``R`` in float64.
+
+    ``R`` is copied straight from the canvas and only the blend band is rounded,
+    which is what makes the video pass cheap: the region is already uint8 and its
+    float64 round trip is an identity. The blend itself keeps the float64
+    expression from :func:`blend_block`, so the output is bit-identical to the
+    float path. ``buffers`` is reused across frames; without it a fresh set is
+    allocated, which is correct but pays the allocation cost.
+    """
+    if spec.repair == "feather":
+        # Repair reads both ends of the assembled frame in float64. It is off by
+        # default and rare; keeping one implementation is worth more than the
+        # allocation saved here.
+        return finalize(recompose(canvas, spec))
+
+    G, R, B = slice_regions(canvas, spec)
+    buf = buffers if buffers is not None else ComposeBuffers()
+    band = buf.take("band", B.shape, np.float64)
+    temp = buf.take("temp", B.shape, np.float64)
+    shifted = buf.take("shifted", B.shape, G.dtype) if spec.d_star else None
+    blend_into(G, B, spec.d_star, spec.weight, spec.endpoint_lock_px,
+               band, temp, shifted)
+
+    np.rint(band, out=band)
+    np.clip(band, 0, 255, out=band)
+    band_u8 = buf.take("band_u8", B.shape, np.uint8)
+    band_u8[...] = band
+
+    out_shape = (B.shape[0], spec.W) + B.shape[2:]
+    out = buf.take("frame_u8", out_shape, np.uint8)
+    out[:, : spec.R_width] = R
+    out[:, spec.R_width :] = band_u8
+    if out.shape[1] != spec.W:
+        raise ValueError(f"recomposed width {out.shape[1]} != W {spec.W}")
+    return out
 
 
 #: Named interpolations for the canvas restore, so config carries a word not an int.

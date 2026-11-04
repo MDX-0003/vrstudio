@@ -57,6 +57,7 @@ _FALLBACK: dict = {
         "boundary_repair": "off",
         "boundary_repair_pct": 15.0,
         "max_sample_rows": 256,
+        "gate_max_frames": 48,
         "aspect_drift_warn_pct": 2.0,
         # 决策 69：0.80 -> 0.60。放宽后闸门只证明"两端足够像"，
         # 高对比接缝的重影风险交给人工看片。

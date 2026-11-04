@@ -28,13 +28,27 @@ from ..redraw.blend import endpoint_lock_px as lock_px_from_pct
 from ..redraw.geometry import restore_height
 from ..redraw.manifest import Manifest
 from ..progress import Log, RateMeter
-from ..redraw.recompose_core import RecomposeSpec, finalize, recompose, restore_canvas, slice_regions
+from ..redraw.recompose_core import (ComposeBuffers, RecomposeSpec, recompose_u8,
+                                     restore_canvas, slice_regions)
 from ..redraw.registration import (RegistrationResult, circular_translate,
                                    gate_registration, to_gray)
 from ..redraw.report import (BlendReport, RecomposeReport, RegistrationReport, RepairReport)
 from ..redraw.verify_core import SeamAccumulator, verdict
 from ..media.videoio import FrameReader, FrameWriter, probe
 
+
+
+def _sample_indices(total: int, count: int) -> list[int]:
+    """Evenly spaced frame indices to analyse in the gate pass.
+
+    ``d*`` is one constant for the whole clip and the gate answers a clip-level
+    question, so registering every frame buys no accuracy. Sampling spreads the
+    checks over the clip instead of taking only the head. ``count <= 0`` or a
+    clip no longer than ``count`` returns every frame.
+    """
+    if total <= 0 or count <= 0 or total <= count:
+        return list(range(max(total, 0)))
+    return sorted({int(round(v)) for v in np.linspace(0, total - 1, count)})
 
 
 def _summarise_registration(ds: list[int], maes: list[float], quals: list[float],
@@ -182,9 +196,16 @@ def main(
         corrs: list[float] = []
         base: list[float] = []
         meter = RateMeter(info.frames or None, log)
+        gate_max = int(conf.get("recompose.gate_max_frames", 48))
+        gate_total = info.frames or int(round(info.duration_s * info.fps_float))
+        sampled = _sample_indices(gate_total, gate_max) if gate_total > 0 else []
+        sample_set = set(sampled) if len(sampled) < gate_total else None
         log.step("gate pass: registration + canvas baseline")
         with FrameReader(info, conf) as reader:
-            for frame in reader:
+            for index, frame in enumerate(reader):
+                meter.tick()
+                if sample_set is not None and index not in sample_set:
+                    continue
                 canvas = restore_canvas(frame, canvas_size, interp)
                 G, R, B = slice_regions(canvas, spec)
                 res = circular_translate(G, B, search_px, max_rows)
@@ -193,7 +214,9 @@ def main(
                 quals.append(res.quality)
                 corrs.append(res.correlation)
                 base.append(float(np.abs(np.diff(to_gray(R), axis=1)).mean()))
-                meter.tick()
+        if sample_set is not None:
+            log.info(f"    gate analysed {len(ds)} of {gate_total} frames "
+                     f"(recompose.gate_max_frames = {gate_max})")
         if ds:
             reg = _summarise_registration(ds, maes, quals, corrs, base, mode)
             reg = replace(reg, search_px=search_px)
@@ -229,6 +252,7 @@ def main(
     alpha = float(conf.get("recompose.per_frame_ema_alpha", 0.05))
     ema = float(reg.d_star)
     acc = SeamAccumulator(plan.W)
+    buffers = ComposeBuffers()
     meter = RateMeter(info.frames or None, log)
     log.step("render pass")
     try:
@@ -243,10 +267,10 @@ def main(
                         ema = alpha * d_now + (1.0 - alpha) * ema
                         d_use = int(round(ema))
                         per_frame_d.append(d_use)
-                        frame_out = recompose(canvas, replace(spec_render, d_star=d_use))
+                        u8 = recompose_u8(canvas, replace(spec_render, d_star=d_use),
+                                          buffers)
                     else:
-                        frame_out = recompose(canvas, spec_render)
-                    u8 = finalize(frame_out)
+                        u8 = recompose_u8(canvas, spec_render, buffers)
                     acc.add(u8)
                     writer.write(u8)
                     meter.tick()

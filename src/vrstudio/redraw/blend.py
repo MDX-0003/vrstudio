@@ -43,6 +43,64 @@ def _broadcast(w: np.ndarray, ndim: int) -> np.ndarray:
     return w[None, :, None] if ndim == 3 else w[None, :]
 
 
+def _shift_into(a: np.ndarray, shift: int, out: np.ndarray) -> np.ndarray:
+    """Circular shift along the column axis, written into ``out``.
+
+    Identical to ``np.roll(a, shift, axis=1)`` but without allocating the result.
+    The video pass calls this once per frame with a reused buffer.
+    """
+    n = a.shape[1]
+    s = int(shift) % n if n else 0
+    if s == 0:
+        out[...] = a
+    else:
+        out[:, s:] = a[:, : n - s]
+        out[:, :s] = a[:, n - s :]
+    return out
+
+
+def blend_into(
+    G: np.ndarray,
+    B: np.ndarray,
+    d_star: int,
+    kind: BlendWeight,
+    endpoint_lock_px: int,
+    out: np.ndarray,
+    temp: np.ndarray,
+    shifted: np.ndarray | None = None,
+) -> np.ndarray:
+    """Blend ``B`` into ``roll(G, d*)`` into caller-owned buffers.
+
+    ``out`` receives the float64 band; ``temp`` is scratch of the same shape and
+    ``shifted`` (optional) receives the shifted ``G``. Passing the three buffers
+    in lets a streaming pass reuse them instead of allocating hundreds of
+    megabytes per frame, which on 8K material costs more in page faults than the
+    arithmetic itself. The expression and its order match :func:`blend_block`, so
+    the values are bit-identical.
+    """
+    if G.shape != B.shape:
+        raise ValueError(f"G {G.shape} and B {B.shape} must match")
+    L = B.shape[1]
+    w = _broadcast(weights(L, kind), B.ndim)
+    if d_star:
+        src = shifted if shifted is not None else np.roll(G, d_star, axis=1)
+        if shifted is not None:
+            _shift_into(G, d_star, shifted)
+    else:
+        src = G
+    np.multiply(B, 1.0 - w, out=out)
+    np.multiply(src, w, out=temp)
+    np.add(out, temp, out=out)
+
+    E = int(endpoint_lock_px)
+    if E > 0 and L:
+        E = min(E, L // 2)              # never let the two locks collide
+        if E > 0:
+            out[:, :E] = B[:, :E]
+            out[:, L - E :] = G[:, L - E :]
+    return out
+
+
 def blend_block(
     G: np.ndarray,
     B: np.ndarray,
@@ -57,18 +115,9 @@ def blend_block(
     """
     if G.shape != B.shape:
         raise ValueError(f"G {G.shape} and B {B.shape} must match")
-    L = B.shape[1]
-    w = _broadcast(weights(L, kind), B.ndim)
-    shifted = np.roll(G, d_star, axis=1) if d_star else G
-    out = B.astype(np.float64) * (1.0 - w) + shifted.astype(np.float64) * w
-
-    E = int(endpoint_lock_px)
-    if E > 0 and L:
-        E = min(E, L // 2)              # never let the two locks collide
-        if E > 0:
-            out[:, :E] = B[:, :E]
-            out[:, L - E :] = G[:, L - E :]
-    return out
+    out = np.empty(B.shape, np.float64)
+    temp = np.empty(B.shape, np.float64)
+    return blend_into(G, B, d_star, kind, endpoint_lock_px, out, temp)
 
 
 def endpoint_lock_px(L: int, pct: float) -> int:
