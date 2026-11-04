@@ -62,6 +62,21 @@ describe('CaseListView', () => {
     expect(flowOptions.some((option) => option.value === 'relight')).toBe(true)
   })
 
+  it('默认按最近活动倒序，同值回退名称', async () => {
+    mocks.fetchCases.mockResolvedValue([
+      { ...BRIEF, name: 'old', updated_at: '2026-11-01 10:00', updated_ts: 100 },
+      { ...BRIEF, name: 'b-new', updated_at: '2026-11-03 10:00', updated_ts: 300 },
+      { ...BRIEF, name: 'a-new', updated_at: '2026-11-03 10:00', updated_ts: 300 },
+      { ...BRIEF, name: 'mid', updated_at: '2026-11-02 10:00', updated_ts: 200 },
+    ])
+    const wrapper = mountView()
+    await flushPromises()
+
+    const names = wrapper.findAll('.case-name').map((node) => node.text())
+    expect(names).toEqual(['a-new', 'b-new', 'mid', 'old'])
+    wrapper.unmount()
+  })
+
   it('删除按钮走确认弹窗并重新加载列表', async () => {
     vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm')
     vi.spyOn(ElMessage, 'success').mockImplementation(() => undefined as never)

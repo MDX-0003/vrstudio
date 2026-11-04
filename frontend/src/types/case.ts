@@ -15,6 +15,7 @@ export interface CaseRow {
   flow: Flow
   owner: string
   updatedAt: string
+  updatedTs: number
   taskStatus: TaskStatus
   taskLabel: string
   nextStepKey: string
@@ -35,6 +36,8 @@ export interface CaseBrief {
   flow: Flow
   gates: Gates
   updated_at: string | null
+  /** 最近活动的 epoch 秒；旧后端没有该字段时按 updated_at 解析。 */
+  updated_ts?: number | null
   outputs: number
   owner: string | null
   task_status: string | null

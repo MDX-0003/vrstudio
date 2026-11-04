@@ -34,6 +34,17 @@ function isImageFlow(flow: Flow): boolean {
 const keyword = ref('')
 const flowFilter = ref<Flow | 'all'>('all')
 const ownerFilter = ref('all')
+type SortKey = 'activity' | 'name' | 'owner' | 'flow' | 'outputs'
+const sortKey = ref<SortKey>('activity')
+const sortOrder = ref<'asc' | 'desc'>('desc')
+
+const SORT_OPTIONS: { value: SortKey; label: string }[] = [
+  { value: 'activity', label: '最近活动' },
+  { value: 'name', label: '名称' },
+  { value: 'owner', label: '负责人' },
+  { value: 'flow', label: '流程' },
+  { value: 'outputs', label: '成片数' },
+]
 
 const owners = computed(() => Array.from(new Set(rows.value.map((row) => row.owner))))
 
@@ -44,6 +55,26 @@ const filteredRows = computed(() => {
     const matchesFlow = flowFilter.value === 'all' || row.flow === flowFilter.value
     const matchesOwner = ownerFilter.value === 'all' || row.owner === ownerFilter.value
     return matchesWord && matchesFlow && matchesOwner
+  })
+})
+
+function primaryCompare(a: CaseRow, b: CaseRow): number {
+  if (sortKey.value === 'activity') return a.updatedTs - b.updatedTs
+  if (sortKey.value === 'outputs') return a.outputs - b.outputs
+  if (sortKey.value === 'owner') return a.owner.localeCompare(b.owner, 'zh-CN')
+  if (sortKey.value === 'flow') {
+    return flowInfo(a.flow).label.localeCompare(flowInfo(b.flow).label, 'zh-CN')
+  }
+  return a.name.localeCompare(b.name, 'zh-CN')
+}
+
+/** 排序只影响表格显示，不改 rows 的原始顺序；主键同值时固定按名称升序。 */
+const sortedRows = computed(() => {
+  const dir = sortOrder.value === 'asc' ? 1 : -1
+  return filteredRows.value.slice().sort((a, b) => {
+    const primary = primaryCompare(a, b)
+    if (primary !== 0) return dir * primary
+    return a.name.localeCompare(b.name, 'zh-CN')
   })
 })
 
@@ -61,6 +92,7 @@ function briefToRow(brief: CaseBrief): CaseRow {
     flow: brief.flow,
     owner: brief.owner ?? '未归属',
     updatedAt: brief.updated_at ?? '—',
+    updatedTs: brief.updated_ts ?? (brief.updated_at ? Date.parse(brief.updated_at) / 1000 : 0),
     taskStatus: taskStatusOf(brief.task_status),
     taskLabel: next.label,
     nextStepKey: next.key,
@@ -268,12 +300,24 @@ onMounted(loadCases)
         <el-option label="全部负责人" value="all" />
         <el-option v-for="owner in owners" :key="owner" :label="owner" :value="owner" />
       </el-select>
+      <el-select v-model="sortKey" style="width: 130px">
+        <el-option
+          v-for="option in SORT_OPTIONS"
+          :key="option.value"
+          :label="`按${option.label}`"
+          :value="option.value"
+        />
+      </el-select>
+      <el-select v-model="sortOrder" style="width: 96px">
+        <el-option label="倒序" value="desc" />
+        <el-option label="升序" value="asc" />
+      </el-select>
       <span class="spacer" />
       <span class="muted">{{ filteredRows.length }} 个 case</span>
     </div>
 
     <div class="panel">
-      <el-table v-loading="loading" :data="filteredRows" row-key="name" @row-click="openCase">
+      <el-table v-loading="loading" :data="sortedRows" row-key="name" @row-click="openCase">
         <el-table-column label="Case" min-width="180">
           <template #default="{ row }">
             <div class="case-name">{{ row.name }}</div>

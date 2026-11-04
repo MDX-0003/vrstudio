@@ -818,25 +818,25 @@ def _output_entry(case: case_mod.Case, path: Path) -> dict:
     }
 
 
-def _outputs(case: case_mod.Case) -> list[dict]:
-    """成片列表。patch 按版本选一个：``_frame.mp4`` 优先，缺失时回退 ``_space.mp4``。
+def _output_files(case: case_mod.Case) -> list[tuple[Path, str | None, bool]]:
+    """成片文件、patch 版本名与是否仅空间段；列表与详情共用同一套选择规则。
 
-    旧命名 ``<版本>.mp4`` 不进入回退链（由一次性迁移脚本改名）。
-    ``partial=True`` 表示只有空间合并段、时间轴不是整片，页面必须标注"仅中间段"。
+    返回 ``(路径, patch 版本名或 None, 是否 space-only)``。列表页只取路径与数量，
+    不再读代理 sidecar、也不打开源片取帧数。
     """
     odir = case.dir(_ctx["cases_root"]) / "out"
     if not odir.is_dir():
         return []
     if case.flow in case_mod.IMAGE_FLOWS:
-        return [_output_entry(case, p) for p in sorted(odir.glob("*.png"))]
+        return [(p, None, False) for p in sorted(odir.glob("*.png"))]
     if case.flow == "relight":
         # 底版可能是视频也可能是图片，交付物两种后缀都会出现；小样在 out/samples/
         # 子目录里，不是 out/ 的直接子文件，所以这里不会误收。
-        return [_output_entry(case, p) for p in sorted(odir.iterdir())
+        return [(p, None, False) for p in sorted(odir.iterdir())
                 if p.is_file() and p.suffix.lower() in _RELICHT_OUT_SUFFIXES]
     files = sorted(odir.glob("*.mp4"))
     if case.flow != "patch":
-        return [_output_entry(case, p) for p in files]
+        return [(p, None, False) for p in files]
     chosen: dict[str, tuple[str, Path]] = {}
     for p in files:
         stem = p.stem
@@ -846,12 +846,23 @@ def _outputs(case: case_mod.Case) -> list[dict]:
             version = stem[:-len("_space")]
             if chosen.get(version, ("", None))[0] != "frame":
                 chosen[version] = ("space", p)
+    return [(path, version, kind == "space") for version in sorted(chosen)
+            for kind, path in (chosen[version],)]
+
+
+def _outputs(case: case_mod.Case) -> list[dict]:
+    """成片列表。patch 按版本选一个：``_frame.mp4`` 优先，缺失时回退 ``_space.mp4``。
+
+    旧命名 ``<版本>.mp4`` 不进入回退链（由一次性迁移脚本改名）。
+    ``partial=True`` 表示只有空间合并段、时间轴不是整片，页面必须标注"仅中间段"。
+    """
     out = []
-    for version in sorted(chosen):
-        kind, path = chosen[version]
-        partial = kind == "space" and not _is_whole_extract(case, version)
-        out.append({**_output_entry(case, path),
-                    "version": version, "partial": partial})
+    for path, version, space_only in _output_files(case):
+        entry = _output_entry(case, path)
+        if version is not None:
+            entry["version"] = version
+            entry["partial"] = space_only and not _is_whole_extract(case, version)
+        out.append(entry)
     return out
 
 
@@ -1432,13 +1443,17 @@ def _step_files(case: case_mod.Case) -> dict:
 
 
 def _gates(case: case_mod.Case, extracts: list[dict],
-           details: list[dict] | None = None) -> dict:
+           details: list[dict] | None = None, *,
+           outs: list[dict] | None = None, list_only: bool = False) -> dict:
     """软向导的门控判据与证据（服务端唯一权威，前端只渲染结果）。
 
     每一步带两段文字：没完成时 reason 说差什么；完成时 evidence 说"在哪个
     绝对路径检测到了什么文件、所以认为完成、想重跑怎么办"——页面上每一次
     置灰/放行都可以对照文件复查。``details`` 透传给 ``_keyframe_state``，
     避免同一次请求里再解码一遍素材。
+
+    ``list_only=True`` 是列表页的轻量路径：不算首尾帧工作台状态（那会解码并
+    校验全部素材），也不重复计算成片列表。``outs`` 允许调用方传入已算好的条目。
     """
     cdir = case.dir(_ctx["cases_root"])
     missing = case_mod.draft_ready(case)
@@ -1448,7 +1463,8 @@ def _gates(case: case_mod.Case, extracts: list[dict],
     result_file = (case.flow in ("fullredraw", "gen") and (cdir / "result.mp4").is_file())
     pad_manifests = sorted(cdir.glob("*_pad.json"))
     padded = bool(pad_manifests)
-    outs = _outputs(case)
+    if outs is None:
+        outs = _outputs(case)
     has_out = bool(outs)
     out_names = "、".join(o["file"] for o in outs)
     partial_names = [o["file"] for o in outs if o.get("partial")]
@@ -1456,43 +1472,13 @@ def _gates(case: case_mod.Case, extracts: list[dict],
                     if partial_names else "")
     if case.flow == "patch":
         cur = cdir / "extracts" / (case.extract_current or "")
-        kf = _keyframe_state(case, details)
-        raw_ok = all((cur / name).is_file()
-                     for name in ("first_frame_raw.png", "last_frame_raw.png"))
-        primary = next((row for row in kf["refs"]
-                        if row["role"] == "subject_ref" and row["exists"]), None)
-        missing_refs = [row["asset"] for row in kf["refs"] if not row["exists"]]
-        if not extracted:
-            kf_reason = "先完成选区并运行抽取；首尾帧来自 clip 的首末帧"
-        elif not raw_ok:
-            kf_reason = "当前抽取版本没有两张原始帧；重新抽取一次"
-        elif kf["error"]:
-            kf_reason = kf["error"]
-        elif kf["stale"]:
-            kf_reason = "抽取版本已更新，需要重新定稿两帧"
-        elif missing_refs:
-            kf_reason = f"参考图文件不存在：{'、'.join(missing_refs)}；重新加入或删除"
-        elif primary is None:
-            kf_reason = "参考图清单缺少人物三视图；在首尾帧页加入一张并设为主三视图"
-        elif not kf["first"]:
-            kf_reason = "首帧还没定稿；在首尾帧步骤生成并挑选一张"
-        elif not kf["last"]:
-            kf_reason = "首帧已定，接着生成并挑选尾帧"
-        else:
-            kf_reason = ""
-        kf_ok = bool(extracted and raw_ok and primary is not None
-                     and not missing_refs and kf["complete"])
-        steps = {            "pick": {"ok": missing is None,
+        steps = {
+            "pick": {"ok": missing is None,
                      "reason": f"case.toml 里缺 [{missing}] 段，补齐后才能抽取" if missing else "",
                      "evidence": f"草稿三段（viewport/inner/frames）都在 {case_mod.case_toml(case.name, _ctx['cases_root'])} 里"},
             "extract": {"ok": extracted,
                         "reason": "" if extracted else "先完成选区并运行抽取",
                         "evidence": f"在 {cur}\\ 检测到 clip.json / clip.mp4 / clip_mask.png，当前抽取版本是 {case.extract_current}；想重新抽取，调好选区后再点一次按钮（会生成新版本，旧版本不动）"},
-            "keyframe": {"ok": kf_ok, "ready": extracted and raw_ok,
-                         "reason": kf_reason,
-                         "evidence": (f"在 {cur}\\ 检测到两张原始帧；keyframe.toml 指向首帧 "
-                                      f"{kf['first']['asset']} 与尾帧 {kf['last']['asset']}"
-                                      if kf_ok else "")},
             "generate": {"ok": extracted and (adopted or any(
                 e["has_result"] for e in extracts)),
                 "reason": "" if extracted else "抽取之后才能送生成",
@@ -1505,6 +1491,38 @@ def _gates(case: case_mod.Case, extracts: list[dict],
             "compare": {"ok": has_out, "reason": "" if has_out else "合并出片后可以在这里对比",
                         "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}{partial_note}"},
         }
+        if not list_only:
+            kf = _keyframe_state(case, details)
+            raw_ok = all((cur / name).is_file()
+                         for name in ("first_frame_raw.png", "last_frame_raw.png"))
+            primary = next((row for row in kf["refs"]
+                            if row["role"] == "subject_ref" and row["exists"]), None)
+            missing_refs = [row["asset"] for row in kf["refs"] if not row["exists"]]
+            if not extracted:
+                kf_reason = "先完成选区并运行抽取；首尾帧来自 clip 的首末帧"
+            elif not raw_ok:
+                kf_reason = "当前抽取版本没有两张原始帧；重新抽取一次"
+            elif kf["error"]:
+                kf_reason = kf["error"]
+            elif kf["stale"]:
+                kf_reason = "抽取版本已更新，需要重新定稿两帧"
+            elif missing_refs:
+                kf_reason = f"参考图文件不存在：{'、'.join(missing_refs)}；重新加入或删除"
+            elif primary is None:
+                kf_reason = "参考图清单缺少人物三视图；在首尾帧页加入一张并设为主三视图"
+            elif not kf["first"]:
+                kf_reason = "首帧还没定稿；在首尾帧步骤生成并挑选一张"
+            elif not kf["last"]:
+                kf_reason = "首帧已定，接着生成并挑选尾帧"
+            else:
+                kf_reason = ""
+            kf_ok = bool(extracted and raw_ok and primary is not None
+                         and not missing_refs and kf["complete"])
+            steps["keyframe"] = {"ok": kf_ok, "ready": extracted and raw_ok,
+                                 "reason": kf_reason,
+                                 "evidence": (f"在 {cur}\\ 检测到两张原始帧；keyframe.toml 指向首帧 "
+                                              f"{kf['first']['asset']} 与尾帧 {kf['last']['asset']}"
+                                              if kf_ok else "")}
     elif case.flow == "fullredraw":
         # evidence 只在 ok 时被页面读到，但仍须防御求值——全新 case 没有
         # manifest，无条件取 [0] 会让整个 /api/case 500（2026-10-16 验收发现）
@@ -1833,6 +1851,8 @@ async def api_cases(request):
         names = sorted(p.parent.name for p in _root().glob("*/case.toml"))
         infos = await asyncio.to_thread(
             lambda: [i for n in names if (i := _brief(n)) is not None])
+        # 默认按「最近活动」倒序：最常动、刚在做的 case 排最前。
+        infos.sort(key=lambda i: i.get("updated_ts") or 0.0, reverse=True)
         return JSONResponse(infos)
     # POST：建新 case。gen 不要求源文件但必须选模式；视频流程要视频；图片
     # 流程（patchimg/fullRedrawImg）要 2:1 ERP 图片，比例校验在 case.create。
@@ -1930,22 +1950,51 @@ async def api_cases(request):
                          "fps": round(fps, 3), "width": w})
 
 
+def _last_activity(case: case_mod.Case) -> tuple[str | None, float]:
+    """「最近活动」：配置、首尾帧草稿、成片、抽取与生成轮次里最新的 mtime。
+
+    只看文件名与 stat，不解码、不哈希；列表按它排序，所以口径要覆盖用户真正
+    会产生的动作：改配置写 case.toml，定稿写 keyframe.toml，抽取建 extracts/
+    目录，合并写成片，提交/轮询写 vrgen 轮次 run.json。
+    """
+    cdir = case.dir(_ctx["cases_root"])
+    paths = [cdir / "case.toml", cdir / "keyframe.toml",
+             cdir / "extracts", cdir / "extracts" / (case.extract_current or "")]
+    odir = cdir / "out"
+    if odir.is_dir():
+        paths.append(odir)
+        paths.extend(p for p in odir.iterdir() if p.is_file())
+    runs = _workdir() / case.name
+    if runs.is_dir():
+        paths.append(runs)
+        paths.extend(d / "run.json" for d in runs.iterdir() if d.is_dir())
+    best = 0.0
+    for path in paths:
+        try:
+            best = max(best, path.stat().st_mtime)
+        except OSError:
+            continue
+    if not best:
+        return None, 0.0
+    return datetime.fromtimestamp(best).strftime("%Y-%m-%d %H:%M"), best
+
+
 def _brief(name: str) -> dict | None:
     try:
         case = case_mod.load(name, _ctx["cases_root"])
     except CaseError:
         return None
     extracts = _extracts(case) if case.flow == "patch" else []
-    case_toml = case_mod.case_dir(name, _ctx["cases_root"]) / "case.toml"
-    try:
-        updated_at = datetime.fromtimestamp(case_toml.stat().st_mtime).strftime(
-            "%Y-%m-%d %H:%M")
-    except OSError:
-        updated_at = None
+    files = _output_files(case)
+    # 列表页只算「下一步」需要的门：不算素材明细、不解码图片、不哈希文件。
+    gates = _gates(case, extracts, outs=[{"file": p.name} for p, _v, _s in files],
+                   list_only=True)
+    updated_at, updated_ts = _last_activity(case)
     return {"name": case.name, "flow": case.flow,
-            "gates": _gates(case, extracts),
+            "gates": gates,
             "updated_at": updated_at,
-            "outputs": len(_outputs(case)),
+            "updated_ts": updated_ts,
+            "outputs": len(files),
             "owner": _meta().read(name).owner_name,
             "task_status": None}
 

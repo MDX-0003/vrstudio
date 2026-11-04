@@ -579,6 +579,45 @@ def test_cases_list_has_gates(client, patch_case):
     assert body[0]["task_status"] is None
 
 
+def test_cases_list_does_not_decode_or_hash_assets(client, patch_case, tmp_path,
+                                                  monkeypatch):
+    """列表页只回答「下一步」，不能为了 26 个 case 解码几十张 4K 图、算全部哈希。
+
+    首尾帧工作台的素材明细（宽高、存在性、sha256）属于 case 详情页；这里把它们
+    钉成一旦调用就失败，锁住轻量路径。
+    """
+    _add_image(patch_case, tmp_path, "ref", "subject_ref")
+
+    def boom(*args, **kwargs):
+        raise AssertionError("case 列表不应解码素材或哈希文件")
+
+    monkeypatch.setattr(web_app, "_media_meta", boom)
+    monkeypatch.setattr(case_mod, "check_assets", boom)
+    r = client.get("/api/cases")
+    assert r.status_code == 200
+    assert r.json()[0]["name"] == patch_case
+
+
+def test_cases_list_sorts_by_last_activity_desc(client, patch_case, tmp_path,
+                                                monkeypatch):
+    monkeypatch.setattr(web_app, "_workdir", lambda: tmp_path / "vrgen_runs")
+    src = tmp_path / "src2.mp4"
+    src.write_bytes(b"fake erp bytes")
+    case_mod.create("p2", "patch", src, root=tmp_path)
+    out = case_mod.case_dir("p2", tmp_path) / "out"
+    out.mkdir()
+    (out / "v1_frame.mp4").write_bytes(b"m")
+    old = time.time() - 3600
+    os.utime(case_mod.case_toml("p1", tmp_path), (old, old))
+    os.utime(case_mod.case_toml("p2", tmp_path), (old, old))
+
+    body = client.get("/api/cases").json()
+    assert [item["name"] for item in body] == ["p2", "p1"]
+    assert body[0]["updated_ts"] > body[1]["updated_ts"]
+    # 活动口径取的是成片 mtime，不是 case.toml 的旧时间。
+    assert body[0]["updated_ts"] > old + 1
+
+
 # ── 草稿 API ──────────────────────────────────────────────────────────────
 
 
