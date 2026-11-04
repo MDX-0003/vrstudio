@@ -66,6 +66,8 @@ class RecomposeReport:
     verify: dict = field(default_factory=dict)
     output_path: str = ""
     output_frames: int = 0
+    output_mode: str = "case"       # case | input
+    output_size: tuple[int, int] = (0, 0)
     warnings: tuple[str, ...] = ()
     schema: int = SCHEMA
     created_utc: str = field(default_factory=lambda: datetime.now(timezone.utc)
@@ -100,5 +102,7 @@ class RecomposeReport:
             verify=dict(raw.get("verify", {})),
             output_path=raw.get("output_path", ""),
             output_frames=int(raw.get("output_frames", 0)),
+            output_mode=str(raw.get("output_mode", "case")),
+            output_size=tuple(raw.get("output_size", (0, 0))),
             warnings=tuple(raw.get("warnings", ())),
         )

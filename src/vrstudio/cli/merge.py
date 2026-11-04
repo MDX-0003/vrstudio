@@ -265,11 +265,12 @@ def _check_stitch_input(generated, manifest, path: Path) -> None:
 
 
 def _merge_full(case, cases_dir, *, report: Path | None, quiet: bool,
-                progress_every: int) -> None:
+                progress_every: int, follow_input: bool = False) -> None:
     """fullRedrawImg 的收口：把 4K 21:9 结果 stitch 回 2:1 的源图尺寸。
 
     与 fullredraw 的视频 recompose 同一条单帧核心；模型裁画布或重构图时
-    ``stitch_image`` 按冗余带相关性拒绝出片。
+    ``stitch_image`` 按冗余带相关性拒绝出片。``follow_input`` 让输出按输入
+    像素密度缩放，成片加尺寸后缀，避免覆盖案例分辨率的成片。
     """
     if not case.extract_current:
         raise typer.Exit("merge: fullRedrawImg 还没有 extract 版本——先 extract")
@@ -318,19 +319,22 @@ def _merge_full(case, cases_dir, *, report: Path | None, quiet: bool,
                 interior_band=tuple(conf.get("verify.interior_band", (0.25, 0.75))),
                 max_wrap_percentile=float(conf.get("verify.max_wrap_percentile", 95)),
                 worst_interior_tol=float(conf.get("verify.worst_interior_tol", 1.0)),
+                follow_input=follow_input,
             )
         except ImageFlowError as exc:
             raise typer.Exit(f"merge: {exc}") from exc
 
         width, height = manifest.source.size
-        if stitched.image.shape[:2] != (int(height), int(width)):
+        out_w, out_h = stitched.output_size
+        if stitched.image.shape[:2] != (int(out_h), int(out_w)):
             raise typer.Exit(
                 f"merge: stitch 输出 {stitched.image.shape[1]}x"
-                f"{stitched.image.shape[0]} 与源图 {width}x{height} 不一致")
+                f"{stitched.image.shape[0]} 与预期 {out_w}x{out_h} 不一致")
 
         out_dir = case.dir(cases_dir) / "out"
         out_dir.mkdir(parents=True, exist_ok=True)
-        out = out_dir / f"{case.extract_current}_image.png"
+        suffix = "" if stitched.output_mode == "case" else f"_{out_w}x{out_h}"
+        out = out_dir / f"{case.extract_current}_image{suffix}.png"
         write_png(out, stitched.image)
 
         data = {
@@ -340,6 +344,8 @@ def _merge_full(case, cases_dir, *, report: Path | None, quiet: bool,
                       "sha256": case_mod.file_sha256(result_path)},
             "source": [int(width), int(height)],
             "canvas": list(manifest.canvas.size),
+            "output_size": [int(out_w), int(out_h)],
+            "output_mode": stitched.output_mode,
             "registration": {
                 "d_star": stitched.registration.d_star,
                 "correlation": stitched.registration.correlation,
@@ -360,9 +366,9 @@ def _merge_full(case, cases_dir, *, report: Path | None, quiet: bool,
                        allow_nan=False),
             encoding="utf-8")
 
-        log.phase(f"stitched {width}x{height}  d*={stitched.registration.d_star}"
+        log.phase(f"stitched {out_w}x{out_h}  d*={stitched.registration.d_star}"
                   f"  corr={stitched.registration.correlation:.3f}"
-                  f"  gate={stitched.gate}")
+                  f"  gate={stitched.gate}  mode={stitched.output_mode}")
         log.info(f"seam wrap {stitched.metrics.wrap:.3f} percentile "
                  f"{stitched.metrics.wrap_percentile:.1f} -> {stitched.verdict}")
         if abs(stitched.aspect_drift_pct) > 2.0:
@@ -407,11 +413,17 @@ def merge(
         False, "--allow-crop",
         help="允许比例不一致的 AI 成片按 cover 缩放后中心裁切；默认报错，"
              "firstLastFrame 正常路径不需要"),
+    follow_input: bool = typer.Option(
+        False, "--follow-input",
+        help="fullRedrawImg：输出按拼接输入的像素密度缩放，不放大到案例源分辨率；"
+             "成片加 _<宽>x<高> 后缀，避免覆盖案例分辨率的成片"),
     progress_every: int = typer.Option(0),
     quiet: bool = typer.Option(False, "-q"),
 ):
     if case_name:
         case = case_mod.load(case_name, cases_dir)
+        if follow_input and case.flow != "fullRedrawImg":
+            raise typer.Exit("merge: --follow-input 只用于 fullRedrawImg 的拼接")
         if case.flow == "patchimg":
             if input_video or ai or sidecar or output:
                 raise typer.Exit("merge: --case 与 --input/--ai/--sidecar/--output 互斥"
@@ -425,7 +437,7 @@ def merge(
                 raise typer.Exit("merge: --case 与 --input/--ai/--sidecar/--output 互斥"
                                  "（--case 模式全部自动定位）")
             _merge_full(case, cases_dir, report=report, quiet=quiet,
-                        progress_every=progress_every)
+                        progress_every=progress_every, follow_input=follow_input)
             return
         if input_video or ai or sidecar or output:
             raise typer.Exit("merge: --case 与 --input/--ai/--sidecar/--output 互斥"
@@ -433,6 +445,8 @@ def merge(
         resolved = resolve_case_inputs(case_name, cases_dir)
         input_video, ai, sidecar, output = (resolved["input"], resolved["ai"],
                                             resolved["sidecar"], resolved["output"])
+    elif follow_input:
+        raise typer.Exit("merge: --follow-input 只用于 fullRedrawImg 的 --case 拼接")
     elif not (input_video and ai and sidecar and output):
         raise typer.Exit("merge: 需要 --case，或完整的 --input/--ai/--sidecar/--output")
     t_start = time.time()

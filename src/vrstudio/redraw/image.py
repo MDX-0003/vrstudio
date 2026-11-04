@@ -25,8 +25,8 @@ from fractions import Fraction
 import numpy as np
 
 from .blend import endpoint_lock_px
-from .geometry import (PadPlan, PadSpec, parse_aspect, plan_pad, resolve_aspect,
-                       restore_height)
+from .geometry import (PadPlan, PadSpec, follow_input_plan, parse_aspect, plan_pad,
+                       resolve_aspect, restore_height)
 from .manifest import ImageManifest, LocalInfo, from_image_plan
 from .mask import make_mask
 from .pipeline import TransformContext, apply_chain, build_chain
@@ -61,6 +61,8 @@ class ImageStitch:
     verdict: str                 # the seam verdict: ok | warn | bad
     reasons: tuple[str, ...]
     aspect_drift_pct: float
+    output_mode: str = "case"    # case | input
+    output_size: tuple[int, int] = (0, 0)
 
 
 def plan_image(
@@ -195,8 +197,14 @@ def stitch_image(
     interior_band: tuple[float, float] = (0.25, 0.75),
     max_wrap_percentile: float = 95.0,
     worst_interior_tol: float = 1.0,
+    follow_input: bool = False,
 ) -> ImageStitch:
     """Turn one generated 21:9 canvas into a closed 2:1 panorama.
+
+    ``follow_input`` scales the geometry to the generated image's pixel density
+    instead of the case's source resolution; the output then keeps the source
+    aspect at a smaller size. It falls back to the case resolution when the input
+    is not smaller or the scaled band would be too narrow.
 
     Raises :class:`ImageFlowError` when the model reframed the canvas (band
     correlation below the threshold) or the manifest has no redundancy. A flat
@@ -211,16 +219,23 @@ def stitch_image(
             "P == 0: the canvas has no horizontal redundancy, so the 360 seam "
             "cannot be closed; use a target aspect wider than the source (21:9)")
 
-    canvas = restore_canvas(generated, plan.canvas_size, restore_interp)
+    output_plan = plan
+    if follow_input:
+        scaled = follow_input_plan(plan, generated.shape[1])
+        if scaled is not None:
+            output_plan = scaled
+    mode = "input" if output_plan is not plan else "case"
+
+    canvas = restore_canvas(generated, output_plan.canvas_size, restore_interp)
     spec = RecomposeSpec(
-        W=plan.W, Wc=plan.Wc, P=plan.P, L=plan.L, d_star=0,
+        W=output_plan.W, Wc=output_plan.Wc, P=output_plan.P, L=output_plan.L, d_star=0,
         weight=blend_weight,
-        endpoint_lock_px=endpoint_lock_px(plan.L, endpoint_lock_pct),
+        endpoint_lock_px=endpoint_lock_px(output_plan.L, endpoint_lock_pct),
         repair=repair,
         repair_px=int(repair_px),
     )
     G, _, B = slice_regions(canvas, spec)
-    search_px = int(round(plan.L * float(search_pct) / 100.0))
+    search_px = int(round(output_plan.L * float(search_pct) / 100.0))
     reg = circular_translate(G, B, search_px, max_sample_rows)
     gate = gate_registration(reg, min_band_correlation, warn_quality)
     if gate == "fail":
@@ -234,8 +249,9 @@ def stitch_image(
     metrics = seam_metrics(out, interior_band)
     status, reasons = verdict(metrics, None, max_wrap_percentile,
                               worst_interior_tol)
-    implied_h = restore_height((generated.shape[1], generated.shape[0]), plan.Wc)
-    drift = 100.0 * (implied_h / plan.H - 1.0) if plan.H else 0.0
+    implied_h = restore_height((generated.shape[1], generated.shape[0]),
+                               output_plan.Wc)
+    drift = 100.0 * (implied_h / output_plan.H - 1.0) if output_plan.H else 0.0
     return ImageStitch(
         image=out,
         registration=reg,
@@ -244,4 +260,6 @@ def stitch_image(
         verdict=status,
         reasons=tuple(reasons),
         aspect_drift_pct=drift,
+        output_mode=mode,
+        output_size=(output_plan.W, output_plan.H),
     )

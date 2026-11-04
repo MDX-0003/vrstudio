@@ -25,7 +25,7 @@ import typer
 
 from .. import config as config_mod
 from ..redraw.blend import endpoint_lock_px as lock_px_from_pct
-from ..redraw.geometry import restore_height
+from ..redraw.geometry import follow_input_plan, restore_height
 from ..redraw.manifest import Manifest
 from ..progress import Log, RateMeter
 from ..redraw.recompose_core import (ComposeBuffers, RecomposeSpec, recompose_u8,
@@ -89,7 +89,8 @@ def _gate(reg: RegistrationReport, conf) -> str:
 def main(
     src: Path = typer.Option(..., "--in", exists=True, dir_okay=False,
                              help="video returned by the AIGC tool"),
-    out: Path = typer.Option(..., "--out", help="final closed panorama, source width"),
+    out: Path = typer.Option(..., "--out", help="final closed panorama; without "
+                                                "--follow-input its size is the source width"),
     manifest: Path = typer.Option(..., "--manifest", exists=True, dir_okay=False,
                                   help="manifest written by `vrstudio pad`"),
     config: Path | None = typer.Option(None, "--config", help="TOML case config"),
@@ -105,6 +106,11 @@ def main(
                                             help="report path (default: alongside --out)"),
     dry_run: bool = typer.Option(False, "--dry-run",
                                  help="run the gate pass and print it, render nothing"),
+    follow_input: bool = typer.Option(
+        False, "--follow-input",
+        help="scale the output to the input's pixel density instead of the case's "
+             "source resolution; the file gets a _<W>x<H> suffix. Falls back to the "
+             "case resolution when the input is not smaller or the band is too narrow"),
     quiet: bool = typer.Option(False, "--quiet", help="suppress progress chatter"),
 ) -> None:
     """Slice the repainted canvas, register, blend, and write the closed panorama."""
@@ -141,37 +147,58 @@ def main(
     # Restoring to the known canvas keeps the output exactly W x H (the source's ERP
     # aspect) for any return size; a wrong returned aspect then shows up as a content
     # stretch plus the drift warning below, not as a wrong deliverable.
-    canvas_size = plan.canvas_size
-    canvas_h = plan.H
-    implied_h = restore_height(info.size, plan.Wc)
-    aspect_drift = 100.0 * (implied_h / plan.H - 1.0) if plan.H else 0.0
+    #
+    # --follow-input is the explicit exception: the canvas is replaced by one derived
+    # from the same plan_pad arithmetic at the input's pixel density, so the closure
+    # invariant is still asserted on real geometry rather than re-argued.
+    output_plan = plan
+    if follow_input:
+        scaled = follow_input_plan(plan, info.size[0])
+        if scaled is None:
+            log.warn("跟随输入不适用（输入不小于源分辨率，或缩放后冗余带过窄）："
+                     "按案例分辨率输出")
+        else:
+            output_plan = scaled
+    output_mode = "input" if output_plan is not plan else "case"
+    out_w, out_h = output_plan.W, output_plan.H
+    if output_mode == "input":
+        out = out.with_name(f"{out.stem}_{out_w}x{out_h}{out.suffix}")
+
+    canvas_size = output_plan.canvas_size
+    canvas_h = output_plan.H
+    implied_h = restore_height(info.size, output_plan.Wc)
+    aspect_drift = 100.0 * (implied_h / output_plan.H - 1.0) if output_plan.H else 0.0
     if abs(aspect_drift) > float(conf.get("recompose.aspect_drift_warn_pct", 2.0)):
         log.warn(
             f"the tool's aspect differs from the canvas: {info.size[0]}x{info.size[1]} "
             f"(aspect {info.size[0] / info.size[1]:.4f}) vs canvas "
-            f"{plan.canvas_size[0]}x{plan.canvas_size[1]} "
-            f"(aspect {plan.canvas_size[0] / plan.canvas_size[1]:.4f}), "
+            f"{output_plan.canvas_size[0]}x{output_plan.canvas_size[1]} "
+            f"(aspect {output_plan.canvas_size[0] / output_plan.canvas_size[1]:.4f}), "
             f"{aspect_drift:+.1f}% implied height. The output is still exactly "
-            f"{plan.W}x{plan.H} (closure is horizontal), but the content is stretched; "
+            f"{out_w}x{out_h} (closure is horizontal), but the content is stretched; "
             f"run `vrstudio calib` to see whether the framing itself moved."
         )
     interp = str(conf.get("recompose.restore_interp", "lanczos4"))
     weight = str(conf.get("recompose.blend_weight", "smoothstep"))
-    lock_px = lock_px_from_pct(plan.L, float(conf.get("recompose.endpoint_lock_pct", 0.0)))
+    lock_px = lock_px_from_pct(output_plan.L,
+                               float(conf.get("recompose.endpoint_lock_pct", 0.0)))
     repair = str(conf.get("recompose.boundary_repair", "off"))
-    repair_px = (max(8, int(round(plan.L * float(conf.get("recompose.boundary_repair_pct", 15.0)) / 100)))
-                 if repair == "feather" else 0)
-    spec = RecomposeSpec(W=plan.W, Wc=plan.Wc, P=plan.P, L=plan.L,
-                         weight=weight, endpoint_lock_px=lock_px,
+    repair_px = (max(8, int(round(output_plan.L * float(
+        conf.get("recompose.boundary_repair_pct", 15.0)) / 100)))
+        if repair == "feather" else 0)
+    spec = RecomposeSpec(W=output_plan.W, Wc=output_plan.Wc, P=output_plan.P,
+                         L=output_plan.L, weight=weight, endpoint_lock_px=lock_px,
                          repair=repair, repair_px=repair_px)
 
     log.info("recompose plan")
     for line in [
         f"canvas restore {info.size[0]}x{info.size[1]} -> {canvas_size[0]}x{canvas_size[1]}"
         f"   ({interp}, aspect {info.size[0] / info.size[1]:.4f})",
-        f"output         {plan.W}x{canvas_h}   regions G/R/B = "
-        f"{plan.L} / {spec.R_width} / {plan.L}",
-        f"wrap pair      canvas columns {plan.L - 1}, {plan.L}  (adjacent by construction)",
+        f"output         {out_w}x{canvas_h}   regions G/R/B = "
+        f"{output_plan.L} / {spec.R_width} / {output_plan.L}"
+        + (f"   (follow input)" if output_mode == "input" else ""),
+        f"wrap pair      canvas columns {output_plan.L - 1}, {output_plan.L}"
+        f"  (adjacent by construction)",
         f"blend          {weight}, endpoint lock {lock_px} columns"
         + (f", boundary repair {repair} T={repair_px}" if repair != "off" else ""),
     ]:
@@ -179,7 +206,7 @@ def main(
 
     registration = str(conf.get("recompose.registration", "circular_translate"))
     mode = str(conf.get("recompose.d_star_mode", "clip_median"))
-    search_px = int(round(plan.L * float(conf.get("recompose.search_pct", 25.0)) / 100.0))
+    search_px = int(round(output_plan.L * float(conf.get("recompose.search_pct", 25.0)) / 100.0))
     max_rows = int(conf.get("recompose.max_sample_rows", 256))
 
     reg = RegistrationReport(method=registration, search_px=search_px,
@@ -189,7 +216,7 @@ def main(
                              interior_baseline=0.0, verdict="ok")
     per_frame_d: list[int] = []
 
-    if registration != "none" and plan.L > 0:
+    if registration != "none" and output_plan.L > 0:
         ds: list[int] = []
         maes: list[float] = []
         quals: list[float] = []
@@ -239,7 +266,8 @@ def main(
             "inspect the result anyway."
         )
         _write_report(report_path, out, man, manifest, info, canvas_size, interp, reg,
-                      spec, repair_px, {}, 0, aspect_drift)
+                      spec, repair_px, {}, 0, aspect_drift,
+                      output_mode=output_mode, output_size=(out_w, out_h))
         raise typer.Exit(1)
     if reg.verdict == "warn":
         log.warn("registration is not decisive (flat cost curve); d* may be a coincidental match")
@@ -251,17 +279,17 @@ def main(
     spec_render = replace(spec, d_star=reg.d_star)
     alpha = float(conf.get("recompose.per_frame_ema_alpha", 0.05))
     ema = float(reg.d_star)
-    acc = SeamAccumulator(plan.W)
+    acc = SeamAccumulator(out_w)
     buffers = ComposeBuffers()
     meter = RateMeter(info.frames or None, log)
     log.step("render pass")
     try:
-        with FrameWriter(out, (plan.W, canvas_h), info.fps, conf.video,
+        with FrameWriter(out, (out_w, canvas_h), info.fps, conf.video,
                          audio_from=src, config=conf) as writer:
             with FrameReader(info, conf) as reader:
                 for frame in reader:
                     canvas = restore_canvas(frame, canvas_size, interp)
-                    if mode == "per_frame" and registration != "none" and plan.L > 0:
+                    if mode == "per_frame" and registration != "none" and output_plan.L > 0:
                         G, _, B = slice_regions(canvas, spec)
                         d_now = circular_translate(G, B, search_px, max_rows).d_star
                         ema = alpha * d_now + (1.0 - alpha) * ema
@@ -293,10 +321,11 @@ def main(
         (log.warn if status == "warn" else log.error)(reason)
 
     _write_report(report_path, out, man, manifest, info, canvas_size, interp, reg,
-                  spec, repair_px, metrics.as_dict(), written, aspect_drift)
+                  spec, repair_px, metrics.as_dict(), written, aspect_drift,
+                  output_mode=output_mode, output_size=(out_w, out_h))
 
     print()
-    print(f"final    {out}   {plan.W}x{canvas_h}   {written} frames")
+    print(f"final    {out}   {out_w}x{canvas_h}   {written} frames")
     if reg.verdict != "fail":
         print(f"wrap     {metrics.wrap:.3f} (percentile {metrics.wrap_percentile:.1f}); "
               f"interior worst {metrics.interior_max:.3f}")
@@ -308,7 +337,9 @@ def main(
 
 def _write_report(report_path, out: Path, man: Manifest, manifest: Path, info,
                   canvas_size, interp, reg, spec, repair_px, verify: dict,
-                  written: int, aspect_drift_pct: float = 0.0) -> None:
+                  written: int, aspect_drift_pct: float = 0.0,
+                  output_mode: str = "case",
+                  output_size: tuple[int, int] = (0, 0)) -> None:
     path = report_path or out.with_name(out.stem + "_recompose.json")
     RecomposeReport(
         manifest_path=Path(manifest).name,
@@ -325,5 +356,7 @@ def _write_report(report_path, out: Path, man: Manifest, manifest: Path, info,
         verify=verify,
         output_path=str(out),
         output_frames=written,
+        output_mode=output_mode,
+        output_size=output_size,
         warnings=man.warnings,
     ).save(path)

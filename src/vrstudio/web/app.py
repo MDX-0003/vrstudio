@@ -58,6 +58,7 @@ from ..media.videoio import VideoIOError
 from ..patch import sidecar as sidecar_mod
 from ..patch.projection import viewport_erp_rects, viewport_erp_size
 from ..procenv import decode_text, utf8_env
+from ..redraw.geometry import follow_input_plan
 from ..redraw.manifest import ImageManifest, Manifest
 from . import case_meta
 from .identity import (
@@ -1446,6 +1447,44 @@ def _relight_step_files(case: case_mod.Case, cdir: Path) -> dict:
     }
 
 
+def _output_options(case: case_mod.Case, cdir: Path) -> list[dict]:
+    """Output sizes this flow can produce right now.
+
+    The second option follows the recompose/merge input's pixel density; it is
+    computed with the same ``follow_input_plan`` the CLIs use, so the page never
+    re-implements the scale rule. The option is absent when the input is not
+    smaller or the scaled band would be too narrow.
+    """
+    plan = None
+    input_path: Path | None = None
+    if case.flow == "fullredraw":
+        manifests = sorted(cdir.glob("*_pad.json"))
+        if manifests:
+            try:
+                plan = Manifest.load(manifests[0]).to_pad_plan()
+            except (OSError, ValueError, TypeError):
+                plan = None
+        input_path = case.merge_input_file(_ctx["cases_root"]) or (cdir / "result.mp4")
+    elif case.flow == "fullRedrawImg" and case.extract_current:
+        d = cdir / "extracts" / case.extract_current
+        try:
+            plan = ImageManifest.load(d / "image_pad.json").to_pad_plan()
+        except (OSError, ValueError, TypeError):
+            plan = None
+        input_path = case.merge_input_file(_ctx["cases_root"]) or (d / "result.png")
+    if plan is None:
+        return []
+    options = [{"mode": "case", "width": plan.W, "height": plan.H}]
+    if input_path is not None and input_path.is_file():
+        kind = "video" if input_path.suffix.lower() in _VIDEO_EXTS else "image"
+        width = _media_meta(input_path, kind).get("width")
+        if width:
+            scaled = follow_input_plan(plan, int(width))
+            if scaled is not None:
+                options.append({"mode": "input", "width": scaled.W, "height": scaled.H})
+    return options
+
+
 def _step_files(case: case_mod.Case) -> dict:
     """每条 flow 的文件规范都不同，这里显式分流，禁止共用一张表。"""
     cdir = case.dir(_ctx["cases_root"])
@@ -1799,6 +1838,7 @@ def _case_info(name: str) -> dict | None:
     except CaseError:
         return None
     store = get_store(name) if case.flow in ("patch", "patchimg") else None
+    cdir = case.dir(_ctx["cases_root"])
     extracts = (_extracts(case)
                 if case.flow in ("patch", *case_mod.IMAGE_FLOWS) else [])
     # 素材明细要解码整批图片，一次请求只算一遍：assets / keyframe / gates 共用。
@@ -1836,6 +1876,7 @@ def _case_info(name: str) -> dict | None:
         "outputs": _outputs(case),
         "step_files": _step_files(case),
         "gates": _gates(case, extracts, assets),
+        "output_options": _output_options(case, cdir),
         "previews": {"vp": f"/img/{case.name}/vp.png?k={store.key}"} if store else {},
         "viewport_options": (_viewport_options(case)
                              if case.flow in ("patch", "patchimg") else []),
@@ -3496,6 +3537,8 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
         argv = vrstudio_argv("merge", "--case", name, "-q", *root)
         if body.get("allow_crop"):
             argv += ["--allow-crop"]
+        if body.get("output_mode") == "input" and case.flow == "fullRedrawImg":
+            argv += ["--follow-input"]
         return argv
     if op == "recompose":
         manifests = sorted(cdir.glob("*_pad.json"))
@@ -3508,10 +3551,13 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
                 "还没有裁回输入：先在「生成」里采用一轮结果，"
                 "或上传/选择一份 21:9 画布视频作为拼接输入")
         out = cdir / "out" / (case.adopt_round or "result")
-        return vrstudio_argv("recompose", "--in", str(input_path),
+        argv = vrstudio_argv("recompose", "--in", str(input_path),
                              "--manifest", str(manifests[0]),
                              "--out", str(out.with_suffix(".mp4")),
                              "--quiet")
+        if body.get("output_mode") == "input":
+            argv += ["--follow-input"]
+        return argv
     if op == "relight":
         # 槽位解析、产物命名与 [relight] current 的回写都在 CLI 一处（唯一权威点），
         # web 只负责把面板参数翻成 flag。

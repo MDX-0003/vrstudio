@@ -317,5 +317,44 @@ def restore_height(generated_size: tuple[int, int], canvas_width: int) -> int:
     return round_even(Fraction(gh * canvas_width, gw))
 
 
+#: Minimum band width for a followed-input plan. Below this the blend ramp and
+#: the endpoint lock span too few columns to close the seam reliably.
+_MIN_FOLLOW_L = 8
+
+
+def follow_input_plan(plan: PadPlan, input_width: int) -> PadPlan | None:
+    """Scale ``plan`` to the pixel density of an input ``input_width`` wide.
+
+    The output keeps the source's aspect and the canvas's target aspect, so the
+    scaled geometry is derived by ``plan_pad`` itself -- closure is asserted on
+    it instead of being re-argued field by field. The scale is relative to the
+    *canvas* width, which is what the tool was asked to return.
+
+    Returns ``None`` when following the input is pointless or unsafe: an input at
+    least as wide as the source gains no detail, and a band below
+    ``_MIN_FOLLOW_L`` columns cannot hold the blend and its endpoint lock.
+    """
+    if input_width <= 0 or input_width >= plan.W:
+        return None
+    s = Fraction(input_width, plan.Wc)
+    out_w = round_even(plan.W * s)
+    if plan.W == 2 * plan.H:
+        # Keep the ERP's exact 2:1: the half-width must be even too.
+        out_w -= out_w % 4
+        out_h = out_w // 2
+    else:
+        out_h = round_even(out_w * Fraction(plan.H, plan.W))
+    if out_w < 16 or out_h < 2:
+        return None
+    try:
+        scaled = plan_pad(PadSpec((out_w, out_h), plan.target_aspect),
+                          pre_roll="none")
+    except GeometryError:
+        return None
+    if scaled.P < 1 or scaled.L < _MIN_FOLLOW_L:
+        return None
+    return scaled
+
+
 def region_slices(plan: PadPlan) -> dict[str, slice]:
     return {name: slice(a, b) for name, (a, b) in plan.regions.items()}
