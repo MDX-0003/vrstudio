@@ -42,8 +42,10 @@ const props = defineProps<{
   sourceKind?: 'video' | 'image'
   /** slot 目的地的角色：relight_gt 收视频或图片；relight_atmo 由 slotAcceptsVideo 决定。 */
   slotRole?: 'relight_gt' | 'relight_atmo'
-  /** 氛围槽位在视频底版下也接受视频；缺省按角色（只有底版槽位收视频）。 */
+  /** 氛围槽位在视频版下也接受视频；缺省按角色（只有底版槽位收视频）。 */
   slotAcceptsVideo?: boolean
+  /** merge-input 目的地的文件种类：图片流程收画布图，视频流程收画布视频。 */
+  mergeInputKind?: 'image' | 'video'
 }>()
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
@@ -54,6 +56,8 @@ const emit = defineEmits<{
 const isSource = computed(() => props.destination === 'source')
 const isSlot = computed(() => props.destination === 'slot')
 const isMergeInput = computed(() => props.destination === 'merge-input')
+/** 拼接输入的种类：图片流程收 21:9 画布图，视频流程收 21:9 画布视频。 */
+const mergeKind = computed<'image' | 'video'>(() => props.mergeInputKind ?? 'image')
 /** 槽位、源文件与拼接输入都一次只收一个文件：都只有一个位置。 */
 const singleFile = computed(() => isSource.value || isSlot.value || isMergeInput.value)
 const acceptsVideo = computed(() => props.slotAcceptsVideo ?? props.slotRole === 'relight_gt')
@@ -66,18 +70,20 @@ const dialogTitle = computed(() => {
 })
 const sourceKind = computed<'video' | 'image'>(() => props.sourceKind ?? 'video')
 const sourceAccept = computed(() =>
-  sourceKind.value === 'image'
-    ? '.png,.jpg,.jpeg,.webp'
-    : '.mp4,.mov,.mkv,.avi',
+  sourceKind.value === 'image' ? '.png,.jpg,.jpeg,.webp' : '.mp4,.mov,.mkv,.avi',
 )
 const sourceTitle = computed(() => (sourceKind.value === 'image' ? '上传源图片' : '上传源视频'))
 const sourceButton = computed(() => (sourceKind.value === 'image' ? '用作源图片' : '用作源视频'))
 
 /** 对话框收哪些扩展名：槽位按角色收，源文件按流程收，素材库两种都收。 */
 const accept = computed(() => {
-  if (isMergeInput.value) return '.png,.jpg,.jpeg,.webp'
+  if (isMergeInput.value) {
+    return mergeKind.value === 'image' ? '.png,.jpg,.jpeg,.webp' : '.mp4,.mov,.mkv,.avi'
+  }
   if (isSlot.value) {
-    return acceptsVideo.value ? '.mp4,.mov,.mkv,.avi,.png,.jpg,.jpeg,.webp' : '.png,.jpg,.jpeg,.webp'
+    return acceptsVideo.value
+      ? '.mp4,.mov,.mkv,.avi,.png,.jpg,.jpeg,.webp'
+      : '.png,.jpg,.jpeg,.webp'
   }
   return isSource.value ? sourceAccept.value : '.mp4,.mov,.mkv,.avi,.png,.jpg,.jpeg,.webp'
 })
@@ -223,8 +229,12 @@ function addFiles(files: File[]): void {
       ElMessage.warning(`${file.name}：这个槽位只支持 png/jpg/webp`)
       continue
     }
-    if (isMergeInput.value && kind === 'video') {
-      ElMessage.warning(`${file.name}：拼接输入只支持 png/jpg/webp（21:9 画布图）`)
+    if (isMergeInput.value && kind !== mergeKind.value) {
+      ElMessage.warning(
+        mergeKind.value === 'image'
+          ? `${file.name}：拼接输入只支持 png/jpg/webp（21:9 画布图）`
+          : `${file.name}：拼接输入只支持 mp4/mov/mkv/avi（21:9 画布视频）`,
+      )
       continue
     }
     if (rows.value.some((row) => row.key === storageKey(file))) continue
@@ -393,7 +403,13 @@ onUnmounted(() => {
     >
       <el-icon :size="30"><UploadFilled /></el-icon>
       <p>
-        把{{ isMergeInput ? '图片（21:9 画布图）' : '视频或图片' }}拖到这里，或点击选择文件
+        把{{
+          isMergeInput
+            ? mergeKind === 'image'
+              ? '图片（21:9 画布图）'
+              : '视频（21:9 画布视频）'
+            : '视频或图片'
+        }}拖到这里，或点击选择文件
       </p>
       <p class="muted">单文件最大 10 GB；分片 8 MB，失败自动重试三次，刷新后可续传。</p>
       <input
@@ -431,12 +447,7 @@ onUnmounted(() => {
 
     <template #footer>
       <el-button @click="visible = false">取消</el-button>
-      <el-button
-        type="primary"
-        :loading="adding"
-        :disabled="!canAdd"
-        @click="confirmAdd"
-      >
+      <el-button type="primary" :loading="adding" :disabled="!canAdd" @click="confirmAdd">
         {{
           isSource
             ? `${sourceButton}（${completed.length}）`

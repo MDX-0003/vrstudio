@@ -26,13 +26,18 @@ const AlertStub = defineComponent({
 })
 
 const PickerStub = defineComponent({
-  props: { modelValue: Boolean, mode: String, title: String },
+  props: { modelValue: Boolean, mode: String, title: String, onlyKind: String },
   emits: ['confirm', 'updated'],
   template: '<div class="picker-stub" />',
 })
 
 const UploadStub = defineComponent({
-  props: { modelValue: Boolean, destination: String, caseName: String },
+  props: {
+    modelValue: Boolean,
+    destination: String,
+    caseName: String,
+    mergeInputKind: String,
+  },
   emits: ['added'],
   template: '<div class="upload-stub" />',
 })
@@ -87,28 +92,30 @@ function imageInfo(mergeInput: string | null = null, withAssets = true): CaseInf
     },
     outputs: [],
     merge_input: mergeInput,
-    assets: withAssets ? [
-      {
-        id: 'i1',
-        kind: 'image',
-        role: 'lighting_ref',
-        label: '光照参考',
-        path: 'assets/i1_edited.png',
-        source: 'asset',
-        role_fixed: false,
-        url: '',
-        name: 'i1_edited.png',
-        rel: 'cases/p1/assets/i1_edited.png',
-        exists: true,
-        mtime: null,
-        size: 1024,
-        width: 9558,
-        height: 4096,
-        duration: null,
-        fps: null,
-        open_url: '',
-      },
-    ] : [],
+    assets: withAssets
+      ? [
+          {
+            id: 'i1',
+            kind: 'image',
+            role: 'lighting_ref',
+            label: '光照参考',
+            path: 'assets/i1_edited.png',
+            source: 'asset',
+            role_fixed: false,
+            url: '',
+            name: 'i1_edited.png',
+            rel: 'cases/p1/assets/i1_edited.png',
+            exists: true,
+            mtime: null,
+            size: 1024,
+            width: 9558,
+            height: 4096,
+            duration: null,
+            fps: null,
+            open_url: '',
+          },
+        ]
+      : [],
     step_files: {
       extract: { inputs: [], outputs: [] },
       generate: { inputs: [], outputs: [] },
@@ -142,6 +149,7 @@ describe('MergeStep 拼接输入（fullRedrawImg）', () => {
     await button(wrapper, '上传并用作拼接输入').trigger('click')
     const dialog = wrapper.findComponent(UploadStub)
     expect(dialog.props('destination')).toBe('merge-input')
+    expect(dialog.props('mergeInputKind')).toBe('image')
     expect(dialog.props('modelValue')).toBe(true)
     wrapper.unmount()
   })
@@ -151,6 +159,7 @@ describe('MergeStep 拼接输入（fullRedrawImg）', () => {
     const wrapper = await mountImage()
     const picker = wrapper.findComponent(PickerStub)
     expect(picker.props('mode')).toBe('image')
+    expect(picker.props('onlyKind')).toBe('image')
     picker.vm.$emit('confirm', ['i1'])
     await flushPromises()
     expect(setMergeInput).toHaveBeenCalledWith('p1', 'i1')
@@ -160,6 +169,90 @@ describe('MergeStep 拼接输入（fullRedrawImg）', () => {
   it('clears the pointer back to the generated result', async () => {
     vi.mocked(setMergeInput).mockClear()
     const wrapper = await mountImage('i1')
+    await button(wrapper, '用回生成结果').trigger('click')
+    await flushPromises()
+    expect(setMergeInput).toHaveBeenCalledWith('p1', null)
+    wrapper.unmount()
+  })
+})
+
+describe('MergeStep 拼接输入（fullredraw 视频）', () => {
+  function videoInfo(mergeInput: string | null = null, withAssets = true): CaseInfo {
+    return {
+      flow: 'fullredraw',
+      gates: {
+        pad: { ok: true, ready: true },
+        generate: { ok: false, ready: true },
+        recompose: { ok: false, ready: true },
+        compare: { ok: false },
+      },
+      outputs: [],
+      merge_input: mergeInput,
+      assets: withAssets
+        ? [
+            {
+              id: 'v1',
+              kind: 'video',
+              role: 'merge_input',
+              label: '拼接输入',
+              path: 'assets/v1_edited.mp4',
+              source: 'asset',
+              role_fixed: false,
+              url: '',
+              name: 'v1_edited.mp4',
+              rel: 'cases/p1/assets/v1_edited.mp4',
+              exists: true,
+              mtime: null,
+              size: 1024,
+              width: 4668,
+              height: 2000,
+              duration: 10,
+              fps: 30,
+              open_url: '',
+            },
+          ]
+        : [],
+      step_files: {
+        pad: { inputs: [], outputs: [] },
+        recompose: { inputs: [], outputs: [] },
+      },
+    } as unknown as CaseInfo
+  }
+
+  async function mountVideo(mergeInput: string | null = null, withAssets = true) {
+    const wrapper = mount(MergeStep, {
+      props: { caseName: 'p1', info: videoInfo(mergeInput, withAssets) },
+      global: { stubs },
+    })
+    await flushPromises()
+    return wrapper
+  }
+
+  it('renders the same controls and points them at video files', async () => {
+    const wrapper = await mountVideo()
+    expect(button(wrapper, '上传并用作拼接输入').attributes('disabled')).toBeUndefined()
+    expect(wrapper.text()).toContain('21:9 画布视频')
+
+    const dialog = wrapper.findComponent(UploadStub)
+    expect(dialog.props('mergeInputKind')).toBe('video')
+    const picker = wrapper.findComponent(PickerStub)
+    expect(picker.props('mode')).toBe('video')
+    expect(picker.props('onlyKind')).toBe('video')
+    wrapper.unmount()
+  })
+
+  it('writes the picked video as [merge] input', async () => {
+    vi.mocked(setMergeInput).mockClear()
+    const wrapper = await mountVideo()
+    wrapper.findComponent(PickerStub).vm.$emit('confirm', ['v1'])
+    await flushPromises()
+    expect(setMergeInput).toHaveBeenCalledWith('p1', 'v1')
+    wrapper.unmount()
+  })
+
+  it('clears the pointer back to the adopted result', async () => {
+    vi.mocked(setMergeInput).mockClear()
+    const wrapper = await mountVideo('v1')
     await button(wrapper, '用回生成结果').trigger('click')
     await flushPromises()
     expect(setMergeInput).toHaveBeenCalledWith('p1', null)

@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Download, FolderOpened, Refresh, Upload, VideoPlay } from '@element-plus/icons-vue'
-import { fetchCase, runOperation, setMergeInput } from '@/api/case'
-import AssetPickerDialog from '@/components/assets/AssetPickerDialog.vue'
+import { Download, Refresh, VideoPlay } from '@element-plus/icons-vue'
+import { fetchCase, runOperation } from '@/api/case'
+import MergeInputControls from '@/components/assets/MergeInputControls.vue'
 import FileRow from '@/components/common/FileRow.vue'
-import AssetUploadDialog from '@/components/upload/AssetUploadDialog.vue'
 import { useCaseTasks } from '@/composables/useCaseTasks'
 import { gateBlocked } from '@/utils/gates'
 import { taskStatusMeta } from '@/constants/taskStatus'
@@ -29,15 +28,7 @@ const isImageFlow = computed(
 const isPatchImg = computed(() => props.info.flow === 'patchimg')
 const isFullRedrawImg = computed(() => props.info.flow === 'fullRedrawImg')
 const imageMergeLabel = computed(() => (isPatchImg.value ? '贴回' : '拼接'))
-const pickerOpen = ref(false)
-const uploadOpen = ref(false)
-const switchingInput = ref(false)
-const imageAssets = computed(
-  () => (props.info.assets ?? []).filter((asset) => asset.kind === 'image'),
-)
-const mergeInputAsset = computed(
-  () => imageAssets.value.find((asset) => asset.id === props.info.merge_input) ?? null,
-)
+const mergeInputKind = computed<'image' | 'video'>(() => (isImageFlow.value ? 'image' : 'video'))
 const mergeGate = computed(() => props.info.gates.merge)
 const padGate = computed(() => props.info.gates.pad)
 const recomposeGate = computed(() => props.info.gates.recompose)
@@ -75,36 +66,6 @@ async function runOp(op: 'merge' | 'pad' | 'recompose'): Promise<void> {
     running.value = ''
     ElMessage.error(err instanceof Error ? err.message : '启动任务失败')
   }
-}
-
-/** 写 ``[merge] input``：素材 id 换成库里的图，null 回退生成采用的结果。 */
-async function applyMergeInput(assetId: string | null, message: string): Promise<void> {
-  if (switchingInput.value) return
-  switchingInput.value = true
-  try {
-    const data = await setMergeInput(props.caseName, assetId)
-    emit('updated', data)
-    ElMessage.success(message)
-  } catch (err) {
-    ElMessage.error(err instanceof Error ? err.message : '切换拼接输入失败')
-  } finally {
-    switchingInput.value = false
-  }
-}
-
-function onMergeInputPicked(ids: string[]): void {
-  pickerOpen.value = false
-  const id = ids[0]
-  if (id) void applyMergeInput(id, '拼接输入已换成素材库里的这张')
-}
-
-function useAdoptedResult(): void {
-  void applyMergeInput(null, '已用回生成结果')
-}
-
-function onMergeInputUploaded(data: CaseInfo): void {
-  uploadOpen.value = false
-  emit('updated', data)
 }
 
 watch(latest, async (task) => {
@@ -158,37 +119,24 @@ watch(latest, async (task) => {
             >
               开始{{ imageMergeLabel }}
             </el-button>
-            <template v-if="isFullRedrawImg">
-              <el-button size="small" :icon="Upload" @click="uploadOpen = true">
-                上传并用作拼接输入
-              </el-button>
-              <el-button
-                size="small"
-                :icon="FolderOpened"
-                :loading="switchingInput"
-                :disabled="!imageAssets.length"
-                @click="pickerOpen = true"
-              >
-                从素材库选择
-              </el-button>
-              <el-button v-if="info.merge_input" size="small" link @click="useAdoptedResult">
-                用回生成结果
-              </el-button>
-            </template>
-            <span v-if="mergeGate?.ok" class="muted">
-              已有成片；再跑一次会覆盖同名文件
-            </span>
+            <span v-if="mergeGate?.ok" class="muted"> 已有成片；再跑一次会覆盖同名文件 </span>
           </div>
-          <p v-if="isFullRedrawImg" class="merge-input-hint muted">
-            拼接输入：{{ mergeInputAsset ? mergeInputAsset.name : '生成步采用的结果' }}。
-            外部改完的 21:9 画布图可以直接上传并选中，也可以从素材库挑一张；2:1 源图或成片会被拼接拒绝。
-          </p>
+          <MergeInputControls
+            v-if="isFullRedrawImg"
+            :case-name="caseName"
+            :info="info"
+            kind="image"
+            @updated="emit('updated', $event)"
+          />
 
           <div v-if="patchReport || fullReport" class="report-box">
             <h3>{{ imageMergeLabel }}报告</h3>
             <div v-if="patchReport" class="report-grid mono">
               <span>改动像素（选区外为 0）</span>
-              <span>{{ patchReport.local.changed_inside }} / {{ patchReport.local.support_pixels }}</span>
+              <span
+                >{{ patchReport.local.changed_inside }} /
+                {{ patchReport.local.support_pixels }}</span
+              >
               <span>选区外最大差异</span>
               <span>{{ patchReport.local.maxdiff_outside }}</span>
               <span>ERP 尺寸</span>
@@ -310,6 +258,12 @@ watch(latest, async (task) => {
             :title="recomposeGate.reason || '先采用一次生成结果'"
             class="gate-alert"
           />
+          <MergeInputControls
+            :case-name="caseName"
+            :info="info"
+            :kind="mergeInputKind"
+            @updated="emit('updated', $event)"
+          />
           <div class="file-groups">
             <div class="file-group">
               <h3>扩充画面输出</h3>
@@ -395,26 +349,6 @@ watch(latest, async (task) => {
         </template>
       </div>
     </section>
-
-    <AssetUploadDialog
-      v-if="isFullRedrawImg"
-      v-model="uploadOpen"
-      destination="merge-input"
-      :case-name="caseName"
-      @added="onMergeInputUploaded"
-    />
-    <AssetPickerDialog
-      v-if="isFullRedrawImg"
-      v-model="pickerOpen"
-      :case-name="caseName"
-      :info="info"
-      mode="image"
-      title="选择拼接输入"
-      hint="从本 case 素材库里选一张 21:9 画布图（外部改完导回的结果）；2:1 源图或成片不能拼接。"
-      confirm-text="用作拼接输入"
-      @confirm="onMergeInputPicked"
-      @updated="emit('updated', $event)"
-    />
   </div>
 </template>
 
@@ -541,12 +475,6 @@ watch(latest, async (task) => {
   color: var(--color-text-muted);
   font-size: var(--text-xs);
   word-break: break-all;
-}
-
-.merge-input-hint {
-  margin: var(--space-2) 0 0;
-  font-size: var(--text-xs);
-  line-height: 1.55;
 }
 
 @media (max-width: 1280px) {

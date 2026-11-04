@@ -15,6 +15,8 @@ const props = defineProps<{
   hint?: string
   /** 覆盖确认按钮文案。 */
   confirmText?: string
+  /** 只允许某一种素材：拼接输入按流程收图片或视频，不能混着列。 */
+  onlyKind?: 'image' | 'video'
 }>()
 
 const emit = defineEmits<{
@@ -39,6 +41,7 @@ const joinedIds = computed(() => {
 const rows = computed(() => {
   const query = search.value.trim().toLowerCase()
   return (props.info.assets ?? []).filter((asset) => {
+    if (props.onlyKind && asset.kind !== props.onlyKind) return false
     if (props.mode !== 'video' && asset.kind !== 'image') return false
     if (kind.value !== 'all' && asset.kind !== kind.value) return false
     if (hideJoined.value && joinedIds.value.has(asset.id)) return false
@@ -95,7 +98,7 @@ watch(
   (open) => {
     if (!open) return
     search.value = ''
-    kind.value = props.mode === 'video' ? 'all' : 'image'
+    kind.value = props.onlyKind ?? (props.mode === 'video' ? 'all' : 'image')
     hideJoined.value = false
     selected.value = []
   },
@@ -141,7 +144,7 @@ watch(
       <el-select
         v-model="kind"
         size="small"
-        :disabled="mode !== 'video'"
+        :disabled="mode !== 'video' || Boolean(onlyKind)"
         style="width: 110px"
       >
         <el-option label="全部类型" value="all" />

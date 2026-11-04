@@ -59,6 +59,27 @@ describe('AssetUploadDialog', () => {
     wrapper.unmount()
   })
 
+  it('merge-input destination accepts videos when the flow says video', async () => {
+    const wrapper = mount(AssetUploadDialog, {
+      props: {
+        modelValue: true,
+        caseName: 'p1',
+        destination: 'merge-input' as const,
+        mergeInputKind: 'video' as const,
+      },
+      global: { stubs },
+    })
+    expect(wrapper.find('input[type="file"]').attributes('accept')).toBe('.mp4,.mov,.mkv,.avi')
+
+    const input = wrapper.find('input[type="file"]')
+    const file = new File(['hello'], 'canvas.png', { type: 'image/png' })
+    Object.defineProperty(input.element, 'files', { value: [file] })
+    await input.trigger('change')
+    await flushPromises()
+    expect(createUpload).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('cancels the server upload when the dialog unmounts', async () => {
     const wrapper = mount(AssetUploadDialog, {
       props: { modelValue: true, caseName: 'p1' },
@@ -105,7 +126,10 @@ describe('AssetUploadDialog', () => {
     const uploads = await import('@/api/uploads')
     vi.mocked(uploads.putChunk).mockResolvedValue({ received: 5 } as never)
     vi.mocked(uploads.completeUpload).mockResolvedValue({
-      file_id: 'u1', name: 'src.mp4', size: 5, sha256: 'abc',
+      file_id: 'u1',
+      name: 'src.mp4',
+      size: 5,
+      sha256: 'abc',
     } as never)
     const { addAssetsByUploads } = await import('@/api/case')
 
@@ -120,9 +144,7 @@ describe('AssetUploadDialog', () => {
     await input.trigger('change')
     await flushPromises()
 
-    const confirm = wrapper
-      .findAll('button')
-      .find((b) => b.text().includes('用作源视频'))
+    const confirm = wrapper.findAll('button').find((b) => b.text().includes('用作源视频'))
     expect(confirm).toBeTruthy()
     await confirm!.trigger('click')
     await flushPromises()
