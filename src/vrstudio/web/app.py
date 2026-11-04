@@ -1239,6 +1239,8 @@ def _fullredraw_step_files(case: case_mod.Case, cdir: Path) -> dict:
                 mask = cdir / Path(man.mask.path).name
     source = Path(case.source_path)
     result = cdir / "result.mp4"
+    # 裁回输入按 ``[merge] input`` 解析：指针优先，缺省是 adopt 落点 result.mp4。
+    recompose_input = case.merge_input_file(_ctx["cases_root"]) or result
     outputs = []
     if case.adopt_round:
         out = cdir / "out" / f"{case.adopt_round}.mp4"
@@ -1252,7 +1254,7 @@ def _fullredraw_step_files(case: case_mod.Case, cdir: Path) -> dict:
             case, [file_entry(padded), file_entry(mask), file_entry(manifest)],
             result),
         "recompose": {
-            "inputs": [file_entry(result), file_entry(manifest)],
+            "inputs": [file_entry(recompose_input), file_entry(manifest)],
             "outputs": [file_entry(p) for p in outputs],
         },
     }
@@ -1546,6 +1548,9 @@ def _gates(case: case_mod.Case, extracts: list[dict],
     elif case.flow == "fullredraw":
         # evidence 只在 ok 时被页面读到，但仍须防御求值——全新 case 没有
         # manifest，无条件取 [0] 会让整个 /api/case 500（2026-10-16 验收发现）
+        # 裁回输入可以是采用结果，也可以是素材库里选定的一段 21:9 画布视频。
+        recompose_input = case.merge_input_file(_ctx["cases_root"])
+        recompose_ready = bool(recompose_input and recompose_input.is_file())
         steps = {
             "pad": {"ok": padded, "ready": bool(case.source_path),
                     "reason": "" if padded else "还没有扩充过画面；先扩充，生成步才可用",
@@ -1557,8 +1562,9 @@ def _gates(case: case_mod.Case, extracts: list[dict],
                          "evidence": (f"在 {cdir}\\result.mp4 检测到已选用的结果"
                                       f"（来自 Session {case.adopt_round}）；想换一个，回到上面点别的「选用」"
                                       if result_file else "")},
-            "recompose": {"ok": has_out, "ready": result_file,
-                          "reason": "" if has_out else "采用结果后才能裁回原尺寸",
+            "recompose": {"ok": has_out, "ready": recompose_ready,
+                          "reason": "" if has_out else
+                          "采用结果后才能裁回原尺寸；也可以在下方上传或选择一份 21:9 画布视频",
                           "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}；每次裁回都会覆盖同名文件"},
             "compare": {"ok": has_out,
                         "reason": "" if has_out else "裁回原尺寸出片后，在这里对比",
@@ -3496,10 +3502,13 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
         if not manifests:
             raise CaseError("还没有扩充两侧画面——先做第一步")
         result = cdir / "result.mp4"
-        if not result.is_file():
-            raise CaseError("还没有采用的结果——先在「生成」里采用一轮")
+        input_path = case.merge_input_file(_ctx["cases_root"]) or result
+        if not input_path.is_file():
+            raise CaseError(
+                "还没有裁回输入：先在「生成」里采用一轮结果，"
+                "或上传/选择一份 21:9 画布视频作为拼接输入")
         out = cdir / "out" / (case.adopt_round or "result")
-        return vrstudio_argv("recompose", "--in", str(result),
+        return vrstudio_argv("recompose", "--in", str(input_path),
                              "--manifest", str(manifests[0]),
                              "--out", str(out.with_suffix(".mp4")),
                              "--quiet")

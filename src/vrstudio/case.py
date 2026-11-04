@@ -44,11 +44,15 @@ _RELIGHT_KEYS = ("current", "gt", "atmo", "scene", "strength", "local_shading",
 #: ``[relight]`` 里指向素材的两把指针，以及各自要求的素材角色。
 _RELIGHT_SLOTS = {"gt": RELIGHT_GT, "atmo": RELIGHT_ATMO}
 
-#: ``[merge]`` 只属于 fullRedrawImg：``input`` 指向素材库里的拼接输入，
-#: 缺省时回退到 adopt 落点 ``extracts/<current>/result.png``（决策 66）。
+#: ``[merge]`` 属于 fullRedrawImg 与 fullredraw：``input`` 指向素材库里的拼接输入，
+#: 缺省时回退到 adopt 落点（图片是 ``extracts/<current>/result.png``，视频是
+#: ``result.mp4``）——决策 66/78。
 _MERGE_INPUT_KEYS = ("input",)
 
-#: 拼接输入专用的素材角色（决策 67）：只收图片，不进任何生成下拉与提交。
+#: 每条流程的拼接输入种类；不在表里的流程没有 ``[merge]`` 段。
+_MERGE_INPUT_KINDS = {"fullRedrawImg": "image", "fullredraw": "video"}
+
+#: 拼接输入专用的素材角色（决策 67/78）：种类由流程决定，不进任何生成下拉与提交。
 MERGE_INPUT = "merge_input"
 
 #: 与 vrgen 的 job 名同一套约束：case 名是 cases/ 下的目录名。
@@ -199,10 +203,23 @@ class Case:
         asset = self.merge_input_asset()
         if asset is not None:
             return asset.resolved(self, root)
-        if not self.extract_current:
+        kind = merge_input_kind(self)
+        if kind == "video":
+            fallback = self.dir(root) / "result.mp4"
+        elif kind == "image" and self.extract_current:
+            fallback = self.dir(root) / "extracts" / self.extract_current / "result.png"
+        else:
             return None
-        fallback = self.dir(root) / "extracts" / self.extract_current / "result.png"
         return fallback if fallback.is_file() else None
+
+
+def merge_input_kind(case: Case) -> str | None:
+    """这条流程的拼接输入该是什么种类；``None`` 表示没有 ``[merge]`` 段。
+
+    唯一判定点：case 模型的校验、web 的解析与角色规则都读它，避免两边各写一套
+    「图片流程收图、视频流程收视频」。
+    """
+    return _MERGE_INPUT_KINDS.get(case.flow)
 
 
 # ── 创建 ─────────────────────────────────────────────────────────────────
@@ -330,7 +347,8 @@ def load(name: str, root: str | Path | None = None) -> Case:
         submit_roles=roles,
         adopt_round=raw.get("adopt", {}).get("round"),
         adopt_index=raw.get("adopt", {}).get("index"),
-        merge_input=_parse_merge(raw.get("merge"), path) if flow == "fullRedrawImg" else None,
+        merge_input=(_parse_merge(raw.get("merge"), path)
+                     if flow in _MERGE_INPUT_KINDS else None),
     )
     allowed = (_PATCH_SECTIONS if flow == "patch"
                else _PATCHIMG_SECTIONS if flow == "patchimg"
@@ -342,9 +360,9 @@ def load(name: str, root: str | Path | None = None) -> Case:
         raise CaseError(f"{path}: [gen] 只属于 flow=gen")
     if flow != "relight" and raw.get("relight") is not None:
         raise CaseError(f"{path}: [relight] 只属于 flow=relight")
-    if flow != "fullRedrawImg" and raw.get("merge") is not None:
-        raise CaseError(f"{path}: [merge] 只属于 flow=fullRedrawImg")
-    if flow == "fullRedrawImg":
+    if flow not in _MERGE_INPUT_KINDS and raw.get("merge") is not None:
+        raise CaseError(f"{path}: [merge] 只属于 fullRedrawImg 与 fullredraw")
+    if flow in _MERGE_INPUT_KINDS:
         _check_merge_input(case, path)
     if flow != "gen" and flow != "relight" and not case.source_path:
         raise CaseError(f"{path}: [source] 缺 path")
@@ -390,7 +408,7 @@ def save(case: Case, root: str | Path | None = None) -> Case:
         lines += ["", "[adopt]", f"round = {_s(case.adopt_round)}"]
         if case.adopt_index is not None:
             lines.append(f"index = {int(case.adopt_index)}")
-    if case.flow == "fullRedrawImg" and case.merge_input:
+    if merge_input_kind(case) and case.merge_input:
         _check_merge_input(case, case_toml(case.name, root))
         lines += ["", "[merge]", f"input = {_s(case.merge_input)}"]
     if case.flow == "relight":
@@ -635,18 +653,23 @@ def _parse_merge(raw, path: Path) -> str | None:
     return value
 
 
+def _merge_kind_label(kind: str) -> str:
+    return "图片" if kind == "image" else "视频"
+
+
 def _check_merge_input(case: Case, path: Path) -> None:
-    """拼接输入指针必须指向本 case 的一张图片：拼接读取的是 21:9 画布图。"""
+    """拼接输入指针必须指向本流程对应种类的素材：图片流读 21:9 画布图，视频流读画布视频。"""
     if not case.merge_input:
         return
+    expected = merge_input_kind(case)
     asset = next((a for a in case.assets if a.id == case.merge_input), None)
     if asset is None:
         raise CaseError(
             f"{path}: [merge] input 指向不存在的素材 {case.merge_input}")
-    if asset.kind != "image":
+    if asset.kind != expected:
         raise CaseError(
             f"{path}: [merge] input 指向的 {asset.id} 是 {asset.kind}；"
-            f"拼接输入必须是图片")
+            f"拼接输入必须是{_merge_kind_label(expected)}")
 
 
 def _migrate_gen(case: Case, references: list[str] | None, path: Path,
@@ -1009,39 +1032,45 @@ def set_relight_pick(name: str, slot: str, asset_id: str,
 
 def set_merge_input(name: str, asset_id: str | None,
                     root: str | Path | None = None) -> Case:
-    """设置 fullRedrawImg 的拼接输入；``None`` 清空指针、回退 adopt 结果。"""
+    """设置拼接输入；``None`` 清空指针、回退 adopt 结果。种类由流程决定。"""
     case = load(name, root)
-    if case.flow != "fullRedrawImg":
+    expected = merge_input_kind(case)
+    if expected is None:
         raise CaseError(f"case {name} 是 {case.flow} 流，没有 [merge] 拼接输入")
     if asset_id:
         asset = case.asset(asset_id)
-        if asset.kind != "image":
+        if asset.kind != expected:
+            hint = ("21:9 画布图，不是 2:1 源图或成片" if expected == "image"
+                    else "21:9 画布视频，不是 2:1 源片或成片")
             raise CaseError(
-                f"素材 {asset_id} 是 {asset.kind}；拼接输入必须是图片"
-                "（21:9 画布图，不是 2:1 源图或成片）")
+                f"素材 {asset_id} 是 {asset.kind}；拼接输入必须是"
+                f"{_merge_kind_label(expected)}（{hint}）")
     case.merge_input = asset_id or None
     return save(case, root)
 
 
 def add_merge_input(name: str, path: str | Path,
                     root: str | Path | None = None) -> tuple[Case, str]:
-    """把一份文件以拼接输入角色加入素材库并选中它（决策 67）。
+    """把一份文件以拼接输入角色加入素材库并选中它（决策 67/78）。
 
-    同一 sha256 的图片已经在本 case 里时直接指向那一条，不重复拷贝；这样从素材库
-    再传一遍同一张编辑稿不会产生两份。返回 ``(case, 素材 id)``。
+    同一 sha256 的同类文件已经在本 case 里时直接指向那一条，不重复拷贝；这样从
+    素材库再传一遍同一份编辑稿不会产生两份。返回 ``(case, 素材 id)``。
     """
     case = load(name, root)
-    if case.flow != "fullRedrawImg":
+    expected = merge_input_kind(case)
+    if expected is None:
         raise CaseError(f"case {name} 是 {case.flow} 流，没有 [merge] 拼接输入")
     src = Path(path)
     if not src.is_file():
         raise CaseError(f"文件不存在：{src}")
-    if kind_of(src) != "image":
+    if kind_of(src) != expected:
+        hint = ("png/jpg/webp 的 21:9 画布图" if expected == "image"
+                else "mp4/mov/mkv/avi 的 21:9 画布视频")
         raise CaseError(
-            f"{src.name} 不是图片；拼接输入必须是 21:9 画布图（png/jpg/webp）")
+            f"{src.name} 不是{_merge_kind_label(expected)}；拼接输入必须是 {hint}")
     digest = file_sha256(src)
     same = next((a for a in case.assets
-                 if a.kind == "image" and a.sha256 == digest), None)
+                 if a.kind == expected and a.sha256 == digest), None)
     if same is None:
         case = _add_assets_to(case, [(src, MERGE_INPUT)], root)
         same = case.assets[-1]
