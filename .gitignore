@@ -40,5 +40,8 @@ ship01_old.json
 # 本地临时帧（数据不进 git）
 /.tmp_frames/
 
+# 前端排布原型（定稿即弃，不进 git）
+/.tmp_prototype/
+
 # 系统
 Thumbs.db

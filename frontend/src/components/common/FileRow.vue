@@ -30,6 +30,8 @@ const isVideo = computed(() => /\.(mp4|m4v|mov|webm|mkv|avi)$/i.test(props.entry
       <el-icon><VideoPlay v-if="isVideo" /><View v-else /></el-icon>
       {{ isVideo ? '播放' : '打开' }}
     </el-link>
+    <!-- 调用方追加的次要动作（如上传件的「下载」）；默认不渲染。 -->
+    <slot name="actions" />
   </div>
 </template>
 

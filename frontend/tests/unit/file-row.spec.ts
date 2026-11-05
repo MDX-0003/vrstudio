@@ -70,4 +70,15 @@ describe('FileRow', () => {
     expect(wrapper.find('a').exists()).toBe(false)
     wrapper.unmount()
   })
+
+  it('renders caller actions in the actions slot without changing the row contract', () => {
+    const wrapper = mount(FileRow, {
+      props: { entry: entry() },
+      slots: { actions: '<button class="extra">下载</button>' },
+      global: { stubs },
+    })
+    expect(wrapper.find('.extra').exists()).toBe(true)
+    expect(wrapper.find('a').attributes('href')).toBe(entry().open_url)
+    wrapper.unmount()
+  })
 })

@@ -57,7 +57,15 @@ export function saveParams(name: string, payload: SaveParamsPayload): Promise<Ca
 }
 
 export type RunOperation =
-  'dry_run' | 'submit' | 'adopt' | 'extract' | 'merge' | 'pad' | 'recompose' | 'relight'
+  | 'dry_run'
+  | 'submit'
+  | 'adopt'
+  | 'extract'
+  | 'merge'
+  | 'pad'
+  | 'recompose'
+  | 'relight'
+  | 'export_upload'
 
 export interface RunPayload {
   mode?: string

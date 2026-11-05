@@ -383,6 +383,7 @@ watch(caseName, (_next, previous) => {
         :key="caseName"
         :case-name="caseName"
         :info="caseInfo"
+        :step="activeStep"
         @updated="onStepUpdated"
       />
       <CompareStep

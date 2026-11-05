@@ -780,6 +780,51 @@ def submit(
 
 
 @app.command()
+def export_upload(
+    case_name: str = typer.Option(..., "--case"),
+    cases_dir: Path = typer.Option(None, "--cases-dir"),
+    scale: str = typer.Option(None, "--scale",
+                              help="auto|full|half；缺省取 generation.toml 的 mglc.scale。"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只打印 argv，不调 vrgen。"),
+    overrides: list[str] = typer.Option(None, "--set", help="config 覆盖。"),
+) -> None:
+    """把扩充件按平台限额缩放并写进 ``derived/``，供外部工具直接使用（决策 87）。
+
+    尺寸规则全部来自 vrgen 的 ``prep``：这里只负责从 manifest 取画布与源尺寸、
+    取 pad 与 mask 的路径，不重复任何缩放或限额判断。
+    """
+    conf = load_config(overrides=overrides or [])
+    case = _load_case(case_name, cases_dir)
+    if case.flow != "fullredraw":
+        _fail(GenError(f"{case.flow} 没有扩充件；上传件导出只用于视频全幅重绘"))
+    try:
+        man = _manifest(case, cases_dir)
+        plan = man.to_pad_plan()
+    except (ValueError, OSError) as exc:
+        _fail(GenError(f"读 manifest 失败：{exc}"))
+    pad = _flow_candidate(case, cases_dir)
+    if pad is None:
+        _fail(GenError("case 里没有可用的扩充件——先跑 `vrstudio pad`"))
+    mask = _flow_mask(case, cases_dir)
+    out = case.dir(cases_dir) / "derived"
+    argv = [_vrgen_exe(conf), "prep", "--video", str(pad.path),
+            "--canvas", f"{plan.canvas_size[0]}x{plan.canvas_size[1]}",
+            "--source", f"{plan.source_size[0]}x{plan.source_size[1]}",
+            "--out", str(out), "--job", case.name,
+            "--workdir", str(_workdir(conf))]
+    if mask is not None:
+        argv += ["--mask", str(mask)]
+    if scale is not None:
+        argv += ["--scale", scale]
+    if dry_run:
+        typer.echo("dry-run：将发出")
+        for item in argv:
+            typer.echo(f"  {item}")
+        return
+    raise typer.Exit(_stream(argv))
+
+
+@app.command()
 def register(
     case_name: str = typer.Option(..., "--case"),
     file: Path = typer.Option(..., "--file", exists=True, dir_okay=False,

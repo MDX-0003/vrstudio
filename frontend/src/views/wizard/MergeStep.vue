@@ -8,6 +8,7 @@ import OutputModeSelect from '@/components/assets/OutputModeSelect.vue'
 import FileRow from '@/components/common/FileRow.vue'
 import { useCaseTasks } from '@/composables/useCaseTasks'
 import { gateBlocked } from '@/utils/gates'
+import { downloadHref } from '@/utils/download'
 import { taskStatusMeta } from '@/constants/taskStatus'
 import type {
   FullRedrawImageReport,
@@ -16,12 +17,12 @@ import type {
   PatchImageReport,
 } from '@/types/case-info'
 
-const props = defineProps<{ caseName: string; info: CaseInfo }>()
+const props = defineProps<{ caseName: string; info: CaseInfo; step: string }>()
 const emit = defineEmits<{ updated: [data: CaseInfo] }>()
 
 const { latest, start } = useCaseTasks(
   computed(() => props.caseName),
-  ['merge', 'assemble', 'pad', 'recompose'],
+  ['merge', 'assemble', 'pad', 'recompose', 'export_upload'],
 )
 const running = ref('')
 const allowCrop = ref(false)
@@ -47,6 +48,34 @@ const recomposeGate = computed(() => props.info.gates.recompose)
 const patchFiles = computed(() => props.info.step_files.merge)
 const padFiles = computed(() => props.info.step_files.pad)
 const recomposeFiles = computed(() => props.info.step_files.recompose)
+// 视频全幅重绘按步骤只渲染本步内容（决策 87）：扩充与裁回不再共用一个面板。
+const isFullRedrawVideo = computed(() => !isPatch.value && !isImageFlow.value)
+const isRecomposeStep = computed(() => props.step === 'recompose')
+const padReady = computed(() => Boolean(padGate.value?.ok))
+const uploadFiles = computed(() => padFiles.value?.uploads ?? [])
+const uploadSummary = computed(() => props.info.pad_upload ?? null)
+const uploadHint = computed(() => {
+  const up = uploadSummary.value
+  if (!up || !up.upload) return '按当前模型的输入限额缩放；给外部工具直接使用'
+  const limit = up.limit?.max_pixel ? `，上限 ${up.limit.max_pixel.toLocaleString()} 像素` : ''
+  const model = up.video_model_id ? `model ${up.video_model_id}` : ''
+  return `按 ${[model, up.mode, `scale ${up.scale}`].filter(Boolean).join(' · ')} 缩放${limit}`
+})
+// 生成参数变过之后，已有的上传件不再对应本次提交；页面给出重新生成的入口。
+const uploadStale = computed(() => {
+  const up = uploadSummary.value
+  const params = props.info.generation_params
+  if (!up || !params) return false
+  if (up.scale && params.current?.scale && up.scale !== params.current.scale) return true
+  if (up.mode && params.current?.mode && up.mode !== params.current.mode) return true
+  if (
+    up.video_model_id &&
+    params.fixed?.video_model_id &&
+    up.video_model_id !== params.fixed.video_model_id
+  )
+    return true
+  return false
+})
 // 后端 ``_outputs`` 按 mtime 升序（对比页取最后一项作默认）；成片面板反过来
 // 展示，最新一份排在最上面。
 const outputs = computed(() => [...props.info.outputs].reverse())
@@ -68,7 +97,7 @@ function verdictType(value: string | undefined): 'success' | 'warning' | 'danger
 
 onMounted(() => start())
 
-async function runOp(op: 'merge' | 'pad' | 'recompose'): Promise<void> {
+async function runOp(op: 'merge' | 'pad' | 'recompose' | 'export_upload'): Promise<void> {
   if (running.value) return
   running.value = op
   startedAt = Date.now()
@@ -106,7 +135,15 @@ watch(latest, async (task) => {
     <section class="panel">
       <div class="panel-head">
         <h2 class="panel-title">
-          {{ isImageFlow ? `${imageMergeLabel}成片` : isPatch ? '合并与时间拼接' : '扩充与裁回' }}
+          {{
+            isImageFlow
+              ? `${imageMergeLabel}成片`
+              : isPatch
+                ? '合并与时间拼接'
+                : isRecomposeStep
+                  ? '裁回原尺寸'
+                  : '扩充画面'
+          }}
         </h2>
         <el-button link type="primary" :icon="Refresh" @click="start()">刷新任务</el-button>
       </div>
@@ -238,73 +275,141 @@ watch(latest, async (task) => {
 
         <template v-else>
           <div class="flow-line">
-            <span class="node">扩充画面</span>
+            <span class="node" :class="{ current: !isRecomposeStep }">扩充画面</span>
             <span class="muted">→</span>
             <span class="node">生成</span>
             <span class="muted">→</span>
-            <span class="node">裁回原尺寸</span>
+            <span class="node" :class="{ current: isRecomposeStep }">裁回原尺寸</span>
           </div>
-          <div class="action-row">
-            <el-button
-              size="small"
-              :loading="running === 'pad'"
-              :disabled="gateBlocked(padGate)"
-              @click="runOp('pad')"
-            >
-              扩充画面
-            </el-button>
-            <el-button
-              type="primary"
-              size="small"
-              :loading="running === 'recompose'"
-              :disabled="gateBlocked(recomposeGate)"
-              @click="runOp('recompose')"
-            >
-              裁回原尺寸
-            </el-button>
-            <OutputModeSelect v-if="showOutputMode" v-model="outputMode" :options="outputOptions" />
-          </div>
-          <el-alert
-            v-if="padGate && !padGate.ok"
-            type="info"
-            :closable="false"
-            :title="padGate.reason || '还没有扩充过画面'"
-            class="gate-alert"
-          />
-          <el-alert
-            v-if="recomposeGate && !recomposeGate.ready"
-            type="warning"
-            :closable="false"
-            :title="recomposeGate.reason || '先采用一次生成结果'"
-            class="gate-alert"
-          />
-          <MergeInputControls
-            :case-name="caseName"
-            :info="info"
-            :kind="mergeInputKind"
-            @updated="emit('updated', $event)"
-          />
-          <div class="file-groups">
-            <div class="file-group">
-              <h3>扩充画面输出</h3>
-              <FileRow v-for="file in padFiles?.outputs ?? []" :key="file.path" :entry="file" />
-              <span v-if="!(padFiles?.outputs ?? []).length" class="muted">还没有输出</span>
+
+          <template v-if="isRecomposeStep">
+            <MergeInputControls
+              :case-name="caseName"
+              :info="info"
+              :kind="mergeInputKind"
+              @updated="emit('updated', $event)"
+            />
+            <div class="action-row step-action">
+              <OutputModeSelect
+                v-if="showOutputMode"
+                v-model="outputMode"
+                :options="outputOptions"
+              />
+              <el-button
+                type="primary"
+                size="small"
+                :icon="VideoPlay"
+                :loading="running === 'recompose'"
+                :disabled="gateBlocked(recomposeGate)"
+                @click="runOp('recompose')"
+              >
+                裁回原尺寸
+              </el-button>
             </div>
+            <el-alert
+              v-if="recomposeGate && !recomposeGate.ready"
+              type="warning"
+              :closable="false"
+              :title="recomposeGate.reason || '先采用一次生成结果'"
+              class="gate-alert"
+            />
             <div class="file-group">
-              <h3>裁回原尺寸输出</h3>
+              <h3>裁回产物</h3>
               <FileRow
                 v-for="file in recomposeFiles?.outputs ?? []"
                 :key="file.path"
                 :entry="file"
               />
-              <span v-if="!(recomposeFiles?.outputs ?? []).length" class="muted">还没有输出</span>
+              <span v-if="!(recomposeFiles?.outputs ?? []).length" class="muted"> 还没有输出 </span>
             </div>
-          </div>
+          </template>
+
+          <template v-else>
+            <div class="action-row step-action">
+              <el-button
+                type="primary"
+                size="small"
+                :icon="VideoPlay"
+                :loading="running === 'pad'"
+                :disabled="gateBlocked(padGate)"
+                @click="runOp('pad')"
+              >
+                {{ padReady ? '重新扩充' : '扩充画面' }}
+              </el-button>
+              <span v-if="padReady" class="muted">再跑一次会覆盖同名文件</span>
+            </div>
+            <el-alert
+              v-if="padGate && !padGate.ok"
+              type="info"
+              :closable="false"
+              :title="padGate.reason || '还没有扩充过画面'"
+              class="gate-alert"
+            />
+
+            <div class="file-group">
+              <div class="file-group-head">
+                <h3>扩充产物</h3>
+                <span class="muted group-hint">全尺寸，给本平台的生成路线用</span>
+              </div>
+              <FileRow v-for="file in padFiles?.outputs ?? []" :key="file.path" :entry="file" />
+              <span v-if="!(padFiles?.outputs ?? []).length" class="muted">还没有输出</span>
+            </div>
+
+            <div class="file-group upload-group">
+              <div class="file-group-head">
+                <h3>
+                  上传件
+                  <el-tag size="small" effect="light" type="primary">外部生成用这组</el-tag>
+                </h3>
+                <span class="muted group-hint">{{ uploadHint }}</span>
+              </div>
+              <template v-if="uploadFiles.length">
+                <FileRow v-for="file in uploadFiles" :key="file.path" :entry="file">
+                  <template v-if="file.exists && file.open_url" #actions>
+                    <el-link :href="downloadHref(file.open_url)" type="primary" underline="never">
+                      下载
+                    </el-link>
+                  </template>
+                </FileRow>
+                <el-alert
+                  v-if="uploadStale"
+                  type="warning"
+                  :closable="false"
+                  class="gate-alert"
+                  title="当前生成参数已变，这份上传件不再对应当前设置"
+                >
+                  <el-button
+                    link
+                    type="primary"
+                    :loading="running === 'export_upload'"
+                    @click="runOp('export_upload')"
+                  >
+                    按当前参数重新生成
+                  </el-button>
+                </el-alert>
+                <p class="upload-note muted">
+                  外部工具请直接使用这一组：尺寸已按平台上限缩放，mask 与视频同一尺寸， JSON
+                  记录了画布、缩放比例与冗余带位置。
+                </p>
+              </template>
+              <div v-else class="upload-empty">
+                <span class="muted">还没有上传件；扩充完成后会自动生成，也可以现在补一份</span>
+                <el-button
+                  size="small"
+                  :loading="running === 'export_upload'"
+                  :disabled="gateBlocked(padGate)"
+                  @click="runOp('export_upload')"
+                >
+                  生成上传件
+                </el-button>
+              </div>
+            </div>
+          </template>
         </template>
       </div>
     </section>
 
-    <section class="panel">
+    <section v-if="!isFullRedrawVideo || isRecomposeStep" class="panel">
       <div class="panel-head">
         <h2 class="panel-title">成片</h2>
         <span class="muted">{{ outputs.length }} 个</span>
@@ -394,6 +499,14 @@ watch(latest, async (task) => {
   border-radius: 999px;
   background: var(--color-surface-muted);
   font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.node.current {
+  border-color: var(--color-primary);
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+  font-weight: 600;
 }
 
 .gate-alert {
@@ -425,9 +538,57 @@ watch(latest, async (task) => {
   gap: var(--space-2);
 }
 
+.panel-body > .file-group {
+  margin-top: var(--space-4);
+}
+
 .file-group h3 {
   margin: 0;
   font-size: var(--text-sm);
+}
+
+.file-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.file-group-head h3 {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.group-hint {
+  font-size: var(--text-xs);
+}
+
+.step-action {
+  margin-bottom: var(--space-2);
+}
+
+.upload-group {
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+}
+
+.upload-empty {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-md);
+}
+
+.upload-note {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: 1.55;
 }
 
 .output-list {

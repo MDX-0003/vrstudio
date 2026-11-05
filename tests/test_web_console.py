@@ -1257,6 +1257,107 @@ def test_step_files_mtime_changes_when_the_step_reruns(client, fullredraw_case, 
     assert first == 1_000 and second == 2_000
 
 
+def _write_pad_upload(tmp_path, size: str, *, mtime: float | None = None,
+                      sidecar: bool = True) -> Path:
+    d = tmp_path / "f1" / "derived"
+    d.mkdir(parents=True, exist_ok=True)
+    video = d / f"upload_pad_{size}.mp4"
+    video.write_bytes(b"upload")
+    (d / f"upload_pad_mask_{size}.png").write_bytes(b"upload-mask")
+    if sidecar:
+        width, height = (int(part) for part in size.split("x"))
+        (d / f"upload_pad_{size}.json").write_text(json.dumps({
+            "canvas": [4480, 1920], "source": [3840, 1920],
+            "upload": {"path": str(video), "width": width, "height": height,
+                       "pixels": width * height},
+            "mask": {"path": str(d / f"upload_pad_mask_{size}.png"),
+                     "width": width, "height": height},
+            "scaled": True, "scale": "auto", "scale_percent": 98.2,
+            "limit": {"max_pixel": 8_295_044, "max_bytes": 209_715_200},
+            "video_model_id": 37, "mode": "videoEdit",
+            "created_utc": "2026-11-05T06:00:00Z",
+        }, ensure_ascii=False), encoding="utf-8")
+    if mtime is not None:
+        for p in d.glob(f"upload_pad*{size}*"):
+            os.utime(p, (mtime, mtime))
+    return video
+
+
+def test_pad_upload_is_listed_as_a_second_file_group(client, fullredraw_case, tmp_path):
+    _write_pad_upload(tmp_path, "4398x1884")
+    info = client.get("/api/case/f1").json()
+    uploads = info["step_files"]["pad"]["uploads"]
+    assert [f["name"] for f in uploads] == [
+        "upload_pad_4398x1884.mp4",
+        "upload_pad_mask_4398x1884.png",
+        "upload_pad_4398x1884.json"]
+    assert all(f["exists"] and f["open_url"] for f in uploads)
+    summary = info["pad_upload"]
+    assert summary["upload"]["width"] == 4398
+    assert summary["upload"]["pixels"] == 4398 * 1884
+    assert summary["limit"]["max_pixel"] == 8_295_044
+    assert summary["video_model_id"] == 37
+    assert summary["mode"] == "videoEdit"
+    assert summary["scale"] == "auto"
+
+
+def test_pad_upload_shows_only_the_newest_set(client, fullredraw_case, tmp_path):
+    _write_pad_upload(tmp_path, "4398x1884", mtime=1_000)
+    _write_pad_upload(tmp_path, "4400x1884", mtime=2_000)
+    uploads = client.get("/api/case/f1").json()["step_files"]["pad"]["uploads"]
+    assert [f["name"] for f in uploads] == [
+        "upload_pad_4400x1884.mp4",
+        "upload_pad_mask_4400x1884.png",
+        "upload_pad_4400x1884.json"]
+
+
+def test_pad_upload_without_sidecar_still_lists_the_files(client, fullredraw_case, tmp_path):
+    _write_pad_upload(tmp_path, "4398x1884", sidecar=False)
+    info = client.get("/api/case/f1").json()
+    assert info["pad_upload"] is None
+    names = [f["name"] for f in info["step_files"]["pad"]["uploads"]]
+    assert names == ["upload_pad_4398x1884.mp4",
+                     "upload_pad_mask_4398x1884.png",
+                     "upload_pad_4398x1884.json"]
+    assert info["step_files"]["pad"]["uploads"][2]["exists"] is False
+
+
+def test_pad_op_queues_the_upload_export(client, fullredraw_case, monkeypatch):
+    submitted = []
+    monkeypatch.setattr(web_app.QUEUE, "submit",
+                        lambda kind, case, argv, **kwargs:
+                        submitted.append((kind, case, argv, kwargs.get("follow_up"))))
+    r = client.post("/api/case/f1/run", json={"op": "pad"})
+    assert r.status_code == 200
+    kind, case, _argv, follow = submitted[0]
+    assert kind == "pad" and case == "f1"
+    assert follow and follow[0][0] == "export_upload"
+    assert follow[0][1] == "f1"
+    assert "export-upload" in follow[0][2]
+
+
+def test_pad_op_has_no_upload_follow_up_for_patch(client, patch_case, monkeypatch):
+    submitted = []
+    monkeypatch.setattr(web_app.QUEUE, "submit",
+                        lambda kind, case, argv, **kwargs:
+                        submitted.append((kind, case, argv, kwargs.get("follow_up"))))
+    r = client.post("/api/case/p1/run", json={"op": "pad"})
+    assert r.status_code == 200
+    assert submitted[0][3] is None
+
+
+def test_run_export_upload_queues_the_case_cli(client, fullredraw_case, monkeypatch):
+    submitted = []
+    monkeypatch.setattr(web_app.QUEUE, "submit",
+                        lambda kind, case, argv, **kwargs:
+                        submitted.append((kind, case, argv)))
+    r = client.post("/api/case/f1/run", json={"op": "export_upload"})
+    assert r.status_code == 200 and r.json()["submitted"] == "export_upload"
+    kind, case, argv = submitted[0]
+    assert kind == "export_upload" and case == "f1"
+    assert "export-upload" in argv and "--case" in argv and "f1" in argv
+
+
 def test_step_files_marks_a_missing_file(client, fullredraw_case, tmp_path):
     (case_mod.case_dir("f1", tmp_path) / "seedance_input_mask.png").unlink()
     mask = client.get("/api/case/f1").json()["step_files"]["pad"]["outputs"][1]

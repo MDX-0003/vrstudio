@@ -49,6 +49,11 @@ const SelectStub = defineComponent({
   template: '<select><slot /></select>',
 })
 
+const LinkStub = defineComponent({
+  props: { href: String, type: String, underline: String, target: String },
+  template: '<a :href="href"><slot /></a>',
+})
+
 const OptionStub = defineComponent({
   props: { value: String, label: String },
   template: '<option :value="value">{{ label }}</option>',
@@ -58,7 +63,7 @@ const stubs = {
   'el-button': ButtonStub,
   'el-alert': AlertStub,
   'el-tag': true,
-  'el-link': true,
+  'el-link': LinkStub,
   'el-icon': true,
   'el-empty': true,
   'el-checkbox': true,
@@ -80,9 +85,13 @@ function info(pad: CaseInfo['gates']['pad'], recompose: CaseInfo['gates']['recom
   } as unknown as CaseInfo
 }
 
-async function mountWith(pad: CaseInfo['gates']['pad'], recompose: CaseInfo['gates']['recompose']) {
+async function mountWith(
+  pad: CaseInfo['gates']['pad'],
+  recompose: CaseInfo['gates']['recompose'],
+  step = 'pad',
+) {
   const wrapper = mount(MergeStep, {
-    props: { caseName: 'p1', info: info(pad, recompose) },
+    props: { caseName: 'p1', info: info(pad, recompose), step },
     global: { stubs },
   })
   await flushPromises()
@@ -276,9 +285,13 @@ describe('MergeStep 拼接输入（fullredraw 视频）', () => {
     } as unknown as CaseInfo
   }
 
-  async function mountVideo(mergeInput: string | null = null, withAssets = true) {
+  async function mountVideo(
+    mergeInput: string | null = null,
+    withAssets = true,
+    step = 'recompose',
+  ) {
     const wrapper = mount(MergeStep, {
-      props: { caseName: 'p1', info: videoInfo(mergeInput, withAssets) },
+      props: { caseName: 'p1', info: videoInfo(mergeInput, withAssets), step },
       global: { stubs },
     })
     await flushPromises()
@@ -342,23 +355,34 @@ describe('MergeStep gate buttons', () => {
     const wrapper = await mountWith(
       { ok: false, ready: true, reason: '还没有扩充过画面' },
       { ok: false, ready: false },
+      'pad',
     )
     expect(button(wrapper, '扩充画面').attributes('disabled')).toBeUndefined()
-    // F6：pad 自己的原因要显示出来，不再只有裁回尺寸的原因。
+    // F6：pad 自己的原因要显示出来。
     expect(wrapper.text()).toContain('还没有扩充过画面')
+    wrapper.unmount()
+  })
+
+  it('shows the recompose gate reason on the recompose step only', async () => {
+    const wrapper = await mountWith(
+      { ok: true, ready: true },
+      { ok: false, ready: false, reason: '先采用一次生成结果' },
+      'recompose',
+    )
     expect(wrapper.text()).toContain('先采用一次生成结果')
+    expect(wrapper.text()).not.toContain('还没有扩充过画面')
     wrapper.unmount()
   })
 
   it('disables 扩充画面 only when the pad gate is not ready', async () => {
     const wrapper = await mountWith({ ok: true, ready: false }, { ok: false, ready: false })
-    expect(button(wrapper, '扩充画面').attributes('disabled')).toBeDefined()
+    expect(button(wrapper, '重新扩充').attributes('disabled')).toBeDefined()
     wrapper.unmount()
   })
 
   it('keeps 扩充画面 enabled after pad has run (ok=true)', async () => {
     const wrapper = await mountWith({ ok: true, ready: true }, { ok: false, ready: false })
-    expect(button(wrapper, '扩充画面').attributes('disabled')).toBeUndefined()
+    expect(button(wrapper, '重新扩充').attributes('disabled')).toBeUndefined()
     wrapper.unmount()
   })
 
@@ -366,8 +390,163 @@ describe('MergeStep gate buttons', () => {
     const wrapper = await mountWith(
       { ok: true, ready: true },
       { ok: false, ready: false, reason: '先采用' },
+      'recompose',
     )
     expect(button(wrapper, '裁回原尺寸').attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+})
+
+describe('MergeStep 按步骤拆分的扩充页（fullredraw 视频）', () => {
+  const uploadFiles = [
+    {
+      name: 'upload_pad_4398x1884.mp4',
+      path: '/c/derived/upload_pad_4398x1884.mp4',
+      rel: 'derived/upload_pad_4398x1884.mp4',
+      exists: true,
+      mtime: 1,
+      size: 9_100_000,
+      open_url: '/file?root=cases&p=derived%2Fupload_pad_4398x1884.mp4',
+    },
+    {
+      name: 'upload_pad_mask_4398x1884.png',
+      path: '/c/derived/upload_pad_mask_4398x1884.png',
+      rel: 'derived/upload_pad_mask_4398x1884.png',
+      exists: true,
+      mtime: 1,
+      size: 8_400_000,
+      open_url: '/file?root=cases&p=derived%2Fupload_pad_mask_4398x1884.png',
+    },
+    {
+      name: 'upload_pad_4398x1884.json',
+      path: '/c/derived/upload_pad_4398x1884.json',
+      rel: 'derived/upload_pad_4398x1884.json',
+      exists: true,
+      mtime: 1,
+      size: 1_024,
+      open_url: '/file?root=cases&p=derived%2Fupload_pad_4398x1884.json',
+    },
+  ]
+
+  function padInfo(
+    options: {
+      uploads?: typeof uploadFiles
+      padUpload?: Record<string, unknown> | null
+      scale?: string
+    } = {},
+  ): CaseInfo {
+    return {
+      flow: 'fullredraw',
+      gates: {
+        pad: { ok: true, ready: true },
+        generate: { ok: false, ready: true },
+        recompose: { ok: false, ready: true },
+        compare: { ok: false },
+      },
+      outputs: [],
+      output_options: [],
+      assets: [],
+      generation_params: {
+        current: { scale: options.scale ?? 'auto', mode: 'videoEdit' },
+        fixed: { video_model_id: 37 },
+      },
+      pad_upload: options.padUpload ?? null,
+      step_files: {
+        pad: {
+          inputs: [],
+          outputs: [
+            {
+              name: 'seedance_input.mp4',
+              path: '/c/seedance_input.mp4',
+              rel: 'seedance_input.mp4',
+              exists: true,
+              mtime: 1,
+              size: 12_900_000,
+              open_url: '/file?root=cases&p=seedance_input.mp4',
+            },
+          ],
+          uploads: options.uploads ?? [],
+        },
+        recompose: { inputs: [], outputs: [] },
+      },
+    } as unknown as CaseInfo
+  }
+
+  async function mountPad(options: Parameters<typeof padInfo>[0] = {}) {
+    const wrapper = mount(MergeStep, {
+      props: { caseName: 'p1', info: padInfo(options), step: 'pad' },
+      global: { stubs },
+    })
+    await flushPromises()
+    return wrapper
+  }
+
+  it('shows only the pad controls and both file groups', async () => {
+    const wrapper = await mountPad({ uploads: uploadFiles })
+    expect(wrapper.text()).toContain('扩充产物')
+    expect(wrapper.text()).toContain('上传件')
+    expect(wrapper.text()).toContain('seedance_input.mp4')
+    expect(wrapper.text()).toContain('upload_pad_4398x1884.mp4')
+    // 裁回控件只在裁回步出现。
+    expect(wrapper.findAll('button').some((b) => b.text().includes('上传并用作拼接输入'))).toBe(
+      false,
+    )
+    expect(wrapper.findAll('button').some((b) => b.text().includes('裁回原尺寸'))).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('links every upload file to a download URL', async () => {
+    const wrapper = await mountPad({ uploads: uploadFiles })
+    const hrefs = wrapper.findAll('a').map((a) => a.attributes('href') ?? '')
+    const downloads = hrefs.filter((href) => href.includes('download=1'))
+    expect(downloads).toHaveLength(3)
+    expect(downloads[0]).toContain('upload_pad_4398x1884.mp4')
+    wrapper.unmount()
+  })
+
+  it('offers 生成上传件 when nothing has been exported yet', async () => {
+    vi.mocked(runOperation).mockClear()
+    const wrapper = await mountPad()
+    expect(wrapper.text()).toContain('还没有上传件')
+    await button(wrapper, '生成上传件').trigger('click')
+    await flushPromises()
+    expect(runOperation).toHaveBeenCalledWith('p1', 'export_upload', {})
+    wrapper.unmount()
+  })
+
+  it('warns when the saved generation params no longer match the upload copy', async () => {
+    const wrapper = await mountPad({
+      uploads: uploadFiles,
+      scale: 'half',
+      padUpload: {
+        file: uploadFiles[0],
+        upload: { width: 4398, height: 1884, pixels: 8_285_832 },
+        limit: { max_pixel: 8_295_044 },
+        scale: 'auto',
+        mode: 'videoEdit',
+        video_model_id: 37,
+      },
+    })
+    expect(wrapper.text()).toContain('当前生成参数已变')
+    expect(wrapper.text()).toContain('8,295,044')
+    wrapper.unmount()
+  })
+
+  it('describes the upload copy from its sidecar', async () => {
+    const wrapper = await mountPad({
+      uploads: uploadFiles,
+      padUpload: {
+        file: uploadFiles[0],
+        upload: { width: 4398, height: 1884, pixels: 8_285_832 },
+        limit: { max_pixel: 8_295_044 },
+        scale: 'auto',
+        mode: 'videoEdit',
+        video_model_id: 37,
+      },
+    })
+    expect(wrapper.text()).toContain('model 37 · videoEdit · scale auto')
+    expect(wrapper.text()).toContain('上限 8,295,044 像素')
+    expect(wrapper.text()).not.toContain('当前生成参数已变')
     wrapper.unmount()
   })
 })

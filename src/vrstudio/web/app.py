@@ -1237,6 +1237,49 @@ def _step_outputs(cdir: Path, base: str, suffix: str,
     return sorted(files, key=_output_sort_key)
 
 
+def _pad_upload(cdir: Path) -> tuple[list[dict], dict | None]:
+    """``derived/`` 里最新一组上传件：视频、mask、参数 JSON，以及参数摘要。
+
+    上传件按 ``<W>x<H>`` 命名，改模型或缩放档会多出一组；页面只展示最新一组，
+    旧文件留在磁盘上不删。JSON 由 vrgen ``prep`` 写（尺寸与限额的唯一权威），
+    读不到时仍返回文件条目，只是没有摘要。
+    """
+    d = cdir / "derived"
+    if not d.is_dir():
+        return [], None
+    videos = sorted(d.glob("upload_pad_*.mp4"),
+                    key=lambda p: p.stat().st_mtime if p.exists() else 0.0)
+    if not videos:
+        return [], None
+    video = videos[-1]
+    stem = video.stem                       # upload_pad_4398x1884
+    prefix, _, size = stem.rpartition("_")  # ("upload_pad", "_", "4398x1884")
+    files = [file_entry(video),
+             file_entry(d / f"{prefix}_mask_{size}.png"),
+             file_entry(d / f"{stem}.json")]
+    info = None
+    try:
+        blob = json.loads((d / f"{stem}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        blob = None
+    if isinstance(blob, dict):
+        info = {
+            "file": files[0],
+            "canvas": blob.get("canvas"),
+            "source": blob.get("source"),
+            "upload": blob.get("upload"),
+            "mask": blob.get("mask"),
+            "scaled": blob.get("scaled"),
+            "scale": blob.get("scale"),
+            "scale_percent": blob.get("scale_percent"),
+            "limit": blob.get("limit"),
+            "video_model_id": blob.get("video_model_id"),
+            "mode": blob.get("mode"),
+            "created_utc": blob.get("created_utc"),
+        }
+    return files, info
+
+
 def _fullredraw_step_files(case: case_mod.Case, cdir: Path) -> dict:
     """fullredraw：源 → 扩宽件 → 采用结果 → 还原成片。
 
@@ -1273,10 +1316,12 @@ def _fullredraw_step_files(case: case_mod.Case, cdir: Path) -> dict:
             outputs.append(file_entry(path))
             outputs.append(file_entry(
                 path.with_name(path.stem + "_recompose.json")))
+    uploads, _ = _pad_upload(cdir)
     return {
         "pad": {
             "inputs": [file_entry(source)],
             "outputs": [file_entry(padded), file_entry(mask), file_entry(manifest)],
+            "uploads": uploads,
         },
         "generate": _generation_groups(
             case, [file_entry(padded), file_entry(mask), file_entry(manifest)],
@@ -1908,6 +1953,8 @@ def _case_info(name: str) -> dict | None:
         "extracts": extracts,
         "outputs": _outputs(case),
         "step_files": _step_files(case),
+        "pad_upload": (_pad_upload(cdir)[1]
+                       if case.flow == "fullredraw" else None),
         "gates": _gates(case, extracts, assets),
         "output_options": _output_options(case, cdir),
         "previews": {"vp": f"/img/{case.name}/vp.png?k={store.key}"} if store else {},
@@ -3529,6 +3576,12 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
             raise CaseError(f"不是文件：{f}")
         return vrstudio_argv("generate", "register", "--case", name,
                              "--file", f, *root)
+    if op == "export_upload":
+        # 扩充件按平台限额缩放并落进 case 的 derived/（决策 87）。
+        argv = vrstudio_argv("generate", "export-upload", "--case", name, *root)
+        if body.get("scale"):
+            argv += ["--scale", str(body["scale"])]
+        return argv
     if op in ("submit", "dry_run"):
         argv = vrstudio_argv("generate", "submit", "--case", name, *root)
         if op == "dry_run":
@@ -3633,6 +3686,25 @@ def _assemble_followup(name: str) -> list[tuple[str, str, list[str]]]:
     return [("assemble", name, argv)]
 
 
+def _pad_followup(name: str) -> list[tuple[str, str, list[str]]]:
+    """fullredraw 扩充成功后的上传件导出（决策 87）；其它 flow 不排。
+
+    上传件只是送给外部工具的副本，失败不影响 pad 本身：任务日志里能看到原因，
+    页面上的「生成上传件」按钮可以单独重试。
+    """
+    try:
+        case = case_mod.load(name, _ctx["cases_root"])
+    except CaseError:
+        return []
+    if case.flow != "fullredraw":
+        return []
+    if not sorted(case.dir(_ctx["cases_root"]).glob("*_pad.json")):
+        return []
+    argv = vrstudio_argv("generate", "export-upload", "--case", name,
+                         "--cases-dir", str(_root()))
+    return [("export_upload", name, argv)]
+
+
 async def api_run(request):
     name = request.path_params["name"]
     body = await request.json()
@@ -3641,7 +3713,12 @@ async def api_run(request):
         argv = await asyncio.to_thread(_op_argv, name, op, body)
     except CaseError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    follow = await asyncio.to_thread(_assemble_followup, name) if op == "merge" else None
+    if op == "merge":
+        follow = await asyncio.to_thread(_assemble_followup, name)
+    elif op == "pad":
+        follow = await asyncio.to_thread(_pad_followup, name)
+    else:
+        follow = None
     owner = current_user(request)
     request_id = getattr(request.state, "rid", None)
     billing = await asyncio.to_thread(_billing, name) if op in ("submit", "dry_run") else None

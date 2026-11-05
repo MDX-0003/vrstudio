@@ -85,7 +85,8 @@ class Task:
                  owner=None, request_id: str | None = None,
                  billing: dict | None = None):
         self.kind = kind          # extract | pad | register | submit | adopt
-                                  # | merge | assemble | recompose
+                                  # | merge | assemble | recompose | relight
+                                  # | export_upload
         self.case = case
         self.argv = argv
         #: 成功后自动排到队首的后续任务（如 merge → assemble）：各自独立日志与重试。

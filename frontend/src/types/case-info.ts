@@ -269,6 +269,24 @@ export interface RelightPayload {
 export interface StepFiles {
   inputs: FileInfo[]
   outputs: FileInfo[]
+  /** fullredraw 扩充步的第二组文件：按平台限额缩放后的上传件（决策 87）。 */
+  uploads?: FileInfo[]
+}
+
+/** 上传件的参数摘要，来自 `derived/upload_pad_<W>x<H>.json`（vrgen prep 写）。 */
+export interface PadUploadInfo {
+  file: FileInfo
+  canvas: [number, number] | null
+  source: [number, number] | null
+  upload: { path: string; width: number; height: number; pixels: number } | null
+  mask: { path: string; width: number; height: number } | null
+  scaled: boolean | null
+  scale: string | null
+  scale_percent: number | null
+  limit: { max_pixel: number; max_bytes: number } | null
+  video_model_id: number | null
+  mode: string | null
+  created_utc: string | null
 }
 
 export interface KeyframePick {
@@ -386,6 +404,8 @@ export interface CaseInfo {
   extracts: ExtractVersion[]
   outputs: OutputFile[]
   step_files: Record<string, StepFiles>
+  /** fullredraw 最新一组上传件的摘要；还没导出时为 null。 */
+  pad_upload?: PadUploadInfo | null
   gates: Gates
   previews: { vp?: string }
   viewport_options: ViewportOption[]
