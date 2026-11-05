@@ -5,6 +5,7 @@ import { fetchCase } from '@/api/case'
 import { ensureProxy, fetchProxy } from '@/api/workflow'
 import { Erp360Compare } from '@/legacy/Erp360Compare'
 import { useCaseTasks } from '@/composables/useCaseTasks'
+import { downloadHref } from '@/utils/download'
 import type { CaseInfo, FullRedrawImageReport, OutputFile } from '@/types/case-info'
 
 const props = defineProps<{ caseName: string; info: CaseInfo }>()
@@ -76,11 +77,9 @@ function defaultSelection(rows: OutputFile[]): string {
   return rows[rows.length - 1].file
 }
 const outputImageUrl = computed(() => selected.value?.open_url ?? '')
-/** 「打开原图」新标签直开，「下载」带 download=1 走 attachment。 */
+/** 「打开原图」新标签直开；「下载」带 download=1 走 attachment，始终下原片而非代理。 */
 const imageOpenUrl = computed(() => outputImageUrl.value)
-const imageDownloadUrl = computed(() =>
-  outputImageUrl.value ? `${outputImageUrl.value}&download=1` : '',
-)
+const selectedDownloadUrl = computed(() => downloadHref(selected.value?.open_url))
 /** 左路标签：relight 播/比的是底版，不是「源片」。 */
 const leftLabel = computed(() => (isRelight.value ? '底版' : '源片'))
 const fullReport = computed<FullRedrawImageReport | null>(() =>
@@ -474,6 +473,9 @@ function onKeydown(event: KeyboardEvent): void {
           </label>
           <span class="muted">左路：{{ sourceLabel }}</span>
           <span class="muted">右路：{{ outputLabel }}</span>
+          <a v-if="selectedDownloadUrl" class="file-action" :href="selectedDownloadUrl" download>
+            下载成片
+          </a>
           <el-button
             size="small"
             :icon="Refresh"
@@ -500,7 +502,7 @@ function onKeydown(event: KeyboardEvent): void {
           >
             打开原图
           </a>
-          <a v-if="imageDownloadUrl" class="file-action" :href="imageDownloadUrl" download>
+          <a v-if="selectedDownloadUrl" class="file-action" :href="selectedDownloadUrl" download>
             下载
           </a>
         </template>

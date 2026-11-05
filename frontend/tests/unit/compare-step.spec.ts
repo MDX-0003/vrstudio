@@ -221,6 +221,23 @@ describe('CompareStep 视频流程', () => {
     expect(wrapper.findAll('video')[1].attributes('src')).toContain('older.mp4')
     wrapper.unmount()
   })
+
+  it('downloads whichever output is selected on the right', async () => {
+    const wrapper = await mountCompare(fullredrawCase(), 'f1')
+    const download = wrapper.find('a.file-action[download]')
+    expect(download.exists()).toBe(true)
+    expect(download.text()).toContain('下载')
+    expect(download.attributes('href')).toContain('newer.mp4')
+    expect(download.attributes('href')).toContain('download=1')
+
+    const outputLabel = wrapper
+      .findAll('label.ctl')
+      .find((node) => node.text().includes('右路成片'))
+    await outputLabel!.find('select').setValue('older.mp4')
+    await flushPromises()
+    expect(wrapper.find('a.file-action[download]').attributes('href')).toContain('older.mp4')
+    wrapper.unmount()
+  })
 })
 
 function relightOut(file: string): OutputFile {
