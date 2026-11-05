@@ -10,6 +10,7 @@ import {
   project,
   projectPolygon,
   unproject,
+  unwrapLongitudes,
 } from '@/utils/erpMath'
 import type { LonLat, Pose, Vec2 } from '@/utils/erpMath'
 import type { RelightRegion } from '@/types/case-info'
@@ -42,6 +43,7 @@ const emit = defineEmits<{
 const host = ref<HTMLDivElement | null>(null)
 const glCanvas = ref<HTMLCanvasElement | null>(null)
 const overlay = ref<HTMLCanvasElement | null>(null)
+const thumbnail = ref<HTMLCanvasElement | null>(null)
 const video = ref<HTMLVideoElement | null>(null)
 const image = ref<HTMLImageElement | null>(null)
 const playing = ref(false)
@@ -55,6 +57,13 @@ let dirty = true
 let gl: WebGLRenderingContext | null = null
 let program: WebGLProgram | null = null
 let texture: WebGLTexture | null = null
+let maskTexture: WebGLTexture | null = null
+let maskDirty = true
+const MASK_WIDTH = 2048
+const MASK_HEIGHT = 1024
+const maskCanvas = document.createElement('canvas')
+maskCanvas.width = MASK_WIDTH
+maskCanvas.height = MASK_HEIGHT
 let uniforms: Record<string, WebGLUniformLocation | null> = {}
 let ready = false
 let lastFrameKey = ''
@@ -125,7 +134,7 @@ function initGL(): void {
   gl.attachShader(program, fragment)
   gl.linkProgram(program)
   gl.useProgram(program)
-  for (const name of ['uTex', 'uYaw', 'uPitch', 'uTanHalf', 'uAspect']) {
+  for (const name of ['uTex', 'uMask', 'uYaw', 'uPitch', 'uTanHalf', 'uAspect']) {
     uniforms[name] = gl.getUniformLocation(program, name)
   }
   const position = gl.getAttribLocation(program, 'aPos')
@@ -134,12 +143,23 @@ function initGL(): void {
   gl.enableVertexAttribArray(position)
   gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0)
   gl.uniform1i(uniforms.uTex, 0)
+  gl.uniform1i(uniforms.uMask, 1)
   texture = gl.createTexture()
   gl.bindTexture(gl.TEXTURE_2D, texture)
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+  // 区域掩码：S 方向必须 REPEAT，否则经度接缝上会出现一条没有填充的竖线。
+  maskTexture = gl.createTexture()
+  gl.activeTexture(gl.TEXTURE1)
+  gl.bindTexture(gl.TEXTURE_2D, maskTexture)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, maskCanvas)
+  gl.activeTexture(gl.TEXTURE0)
 }
 
 function uploadFrame(): void {
@@ -194,7 +214,89 @@ function drawGL(): void {
   if (!ready) return
   gl.activeTexture(gl.TEXTURE0)
   gl.bindTexture(gl.TEXTURE_2D, texture)
+  gl.activeTexture(gl.TEXTURE1)
+  gl.bindTexture(gl.TEXTURE_2D, maskTexture)
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+}
+
+/** 在 ERP 画布上画一个多边形，跨接缝时按 ±width 补画。 */
+function paintEquirect(
+  context: CanvasRenderingContext2D,
+  verts: LonLat[],
+  width: number,
+  height: number,
+  fill: boolean,
+  stroke: boolean,
+): void {
+  const polygon = unwrapLongitudes(verts)
+  for (const shift of [-width, 0, width]) {
+    context.beginPath()
+    polygon.forEach(([lon, lat], index) => {
+      const x = ((lon + shift + 180) / 360) * width
+      const y = ((90 - lat) / 180) * height
+      if (index === 0) context.moveTo(x, y)
+      else context.lineTo(x, y)
+    })
+    context.closePath()
+    if (fill) context.fill()
+    if (stroke) context.stroke()
+  }
+}
+
+/**
+ * 把区域填充画进等距柱状掩码，由片元着色器按经纬度采样。
+ *
+ * 之前用屏幕空间 Path2D 填充，要求所有顶点都在相机前方，环绕型区域永远不满足，
+ * 高亮就看不见；掩码与相机无关，跨接缝、部分在背后都能正确显示。
+ */
+function renderMask(): void {
+  const context = maskCanvas.getContext('2d')
+  if (!context) return
+  context.clearRect(0, 0, MASK_WIDTH, MASK_HEIGHT)
+  if (props.highlight) {
+    for (const region of props.regions) {
+      if (!region.enabled) continue
+      context.fillStyle = rgba(
+        region.color,
+        region.id === props.selectedId ? 0.26 : 0.14,
+      )
+      paintEquirect(context, region.verts, MASK_WIDTH, MASK_HEIGHT, true, false)
+    }
+  }
+  maskDirty = false
+}
+
+function uploadMask(): void {
+  if (!gl || !maskTexture) return
+  gl.activeTexture(gl.TEXTURE1)
+  gl.bindTexture(gl.TEXTURE_2D, maskTexture)
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, maskCanvas)
+  gl.activeTexture(gl.TEXTURE0)
+}
+
+/** 右下角的全周缩略图：只在选中区域时出现，且只画当前选中的那一个。 */
+function drawThumbnail(): void {
+  const canvas = thumbnail.value
+  if (!canvas || !props.selectedId) return
+  const context = canvas.getContext('2d')
+  if (!context) return
+  const width = canvas.width
+  const height = canvas.height
+  context.clearRect(0, 0, width, height)
+  const source = props.media === 'video' ? video.value : image.value
+  if (source instanceof HTMLVideoElement) {
+    if (source.readyState >= 2 && !source.seeking) {
+      context.drawImage(source, 0, 0, width, height)
+    }
+  } else if (source && source.complete && source.naturalWidth) {
+    context.drawImage(source, 0, 0, width, height)
+  }
+  const region = props.regions.find((item) => item.id === props.selectedId)
+  if (!region) return
+  context.fillStyle = rgba(region.color, props.highlight ? 0.35 : 0.18)
+  context.strokeStyle = region.color
+  context.lineWidth = 2
+  paintEquirect(context, region.verts, width, height, true, true)
 }
 
 function rgba(hex: string, alpha: number): string {
@@ -239,7 +341,6 @@ function drawOverlay(): void {
       path.moveTo(points[0][0], points[0][1])
       for (let i = 1; i < points.length; i += 1) path.lineTo(points[i][0], points[i][1])
       path.closePath()
-      if (!dim) context.fill(path)
       context.stroke(path)
     } else {
       for (const run of visibleRuns(projected.points)) {
@@ -318,10 +419,16 @@ function drawOverlay(): void {
 }
 
 function frame(): void {
+  if (maskDirty) {
+    renderMask()
+    uploadMask()
+    dirty = true
+  }
   if (dirty) {
     uploadFrame()
     drawGL()
     drawOverlay()
+    drawThumbnail()
     dirty = false
   }
   raf = requestAnimationFrame(frame)
@@ -543,6 +650,7 @@ watch(() => props.sourceUrl, (url) => applySource(url), {
 watch(
   () => [props.regions, props.selectedId, props.draft, props.mode, props.highlight],
   () => {
+    maskDirty = true
     dirty = true
   },
   { deep: true },
@@ -626,6 +734,13 @@ defineExpose({ resetView, togglePlay, seek })
             : '拖动转向 · 滚轮缩放 · 点击区域选中'
         }}
       </div>
+      <canvas
+        v-show="props.selectedId"
+        ref="thumbnail"
+        class="thumb"
+        width="440"
+        height="220"
+      ></canvas>
     </div>
     <div v-if="props.media === 'video'" class="scrub">
       <button class="play" type="button" @click="togglePlay">{{ playing ? '❚❚' : '▶' }}</button>
@@ -658,7 +773,8 @@ defineExpose({ resetView, togglePlay, seek })
   border-radius: var(--radius-lg);
 }
 
-.viewer canvas {
+.viewer canvas.gl,
+.viewer canvas.ov {
   position: absolute;
   inset: 0;
   display: block;
@@ -707,6 +823,18 @@ defineExpose({ resetView, togglePlay, seek })
   background: rgba(15, 23, 42, 0.55);
   color: rgba(226, 232, 240, 0.72);
   font-size: 11px;
+  pointer-events: none;
+}
+
+.thumb {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: 220px;
+  height: 110px;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  border-radius: var(--radius-sm);
+  background: rgba(15, 23, 42, 0.5);
   pointer-events: none;
 }
 

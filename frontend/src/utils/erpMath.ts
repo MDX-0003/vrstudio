@@ -37,6 +37,7 @@ export const ERP_FRAG_SRC = `
 precision highp float;
 varying vec2 vNdc;
 uniform sampler2D uTex;
+uniform sampler2D uMask;
 uniform float uYaw;
 uniform float uPitch;
 uniform float uTanHalf;
@@ -51,7 +52,9 @@ void main() {
   float z2 = -dir.x * sy + z1 * cy;
   float u = 0.5 + atan(x2, -z2) / 6.283185307179586;
   float v = 0.5 - asin(clamp(y1, -1.0, 1.0)) / 3.141592653589793;
-  gl_FragColor = texture2D(uTex, vec2(u, v));
+  vec4 base = texture2D(uTex, vec2(u, v));
+  vec4 mask = texture2D(uMask, vec2(u, v));
+  gl_FragColor = vec4(mix(base.rgb, mask.rgb, mask.a), 1.0);
 }`
 
 export function clampFov(value: number): number {
@@ -201,4 +204,57 @@ export function pointInPolygon(lon: number, lat: number, verts: LonLat[]): boole
     if (crosses && x < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) inside = !inside
   }
   return inside
+}
+
+/** unwrap 后的经度跨度；超过 360° 就不是球面上的简单闭合多边形了。 */
+export function longitudeSpan(verts: LonLat[]): number {
+  const unwrapped = unwrapLongitudes(verts)
+  if (!unwrapped.length) return 0
+  const lons = unwrapped.map(([lon]) => lon)
+  return Math.max(...lons) - Math.min(...lons)
+}
+
+function orientation(p: LonLat, q: LonLat, r: LonLat): number {
+  const value = (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+  if (Math.abs(value) < 1e-9) return 0
+  return value > 0 ? 1 : -1
+}
+
+function onSegment(p: LonLat, q: LonLat, r: LonLat): boolean {
+  return (
+    Math.min(p[0], r[0]) <= q[0] && q[0] <= Math.max(p[0], r[0])
+    && Math.min(p[1], r[1]) <= q[1] && q[1] <= Math.max(p[1], r[1])
+  )
+}
+
+function segmentsIntersect(a: LonLat, b: LonLat, c: LonLat, d: LonLat): boolean {
+  const o1 = orientation(a, b, c)
+  const o2 = orientation(a, b, d)
+  const o3 = orientation(c, d, a)
+  const o4 = orientation(c, d, b)
+  if (o1 !== o2 && o3 !== o4) return true
+  if (o1 === 0 && onSegment(a, c, b)) return true
+  if (o2 === 0 && onSegment(a, d, b)) return true
+  if (o3 === 0 && onSegment(c, a, d)) return true
+  if (o4 === 0 && onSegment(c, b, d)) return true
+  return false
+}
+
+/** 边与边是否交叉（相邻边不算）；用于闭合前拒绝自交多边形。 */
+export function polygonSelfIntersects(verts: LonLat[]): boolean {
+  const polygon = unwrapLongitudes(verts)
+  const count = polygon.length
+  if (count < 4) return false
+  for (let i = 0; i < count; i += 1) {
+    for (let j = i + 1; j < count; j += 1) {
+      if (i === j) continue
+      const adjacent = (i + 1) % count === j || (j + 1) % count === i
+      if (adjacent) continue
+      if (segmentsIntersect(
+        polygon[i], polygon[(i + 1) % count],
+        polygon[j], polygon[(j + 1) % count],
+      )) return true
+    }
+  }
+  return false
 }

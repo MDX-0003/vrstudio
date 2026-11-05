@@ -9,6 +9,7 @@ import { saveRelightRegions } from '@/api/relight'
 import { saveRelightDraft } from '@/api/case'
 import type { RelightPayload, RelightRegion } from '@/types/case-info'
 import type { LonLat } from '@/utils/erpMath'
+import { longitudeSpan, polygonSelfIntersects } from '@/utils/erpMath'
 
 /**
  * 区域工作台（决策 88，方案 A）：视图占主位，右侧是区域列表与选中区域的参数组，
@@ -143,6 +144,11 @@ function select(id: string): void {
   selectedId.value = id
 }
 
+/** 已存在的区域也可能不合法（旧数据或手改）：列表里标出来，避免静默画错。 */
+function regionInvalid(region: RelightRegion): boolean {
+  return longitudeSpan(region.verts) > 360 || polygonSelfIntersects(region.verts)
+}
+
 function startDraw(): void {
   if (regions.value.length >= MAX_REGIONS) {
     ElMessage.warning(`区域最多 ${MAX_REGIONS} 个`)
@@ -171,6 +177,19 @@ function closeDraft(): void {
   if (points.length < 3) {
     draft.value = null
     mode.value = 'orbit'
+    return
+  }
+  // 球面上的简单闭合多边形不能绕超过一整圈；超过后引擎画出来会自重叠。
+  const span = longitudeSpan(points)
+  if (span > 360) {
+    ElMessage.error(
+      `这个区域绕经度 ${Math.round(span)}°，超过一整圈，无法用一个闭合多边形表示；`
+      + '请拆成两块，或让上边界经过极点。',
+    )
+    return
+  }
+  if (polygonSelfIntersects(points)) {
+    ElMessage.error('多边形的边与边交叉，请调整顶点后再闭合。')
     return
   }
   const index = regions.value.length + 1
@@ -369,6 +388,7 @@ onBeforeUnmount(() => {
               @blur="finishRename(region.id, $event)"
             />
             <span v-else class="name" @dblclick.stop="startRename(region.id)">{{ region.name }}</span>
+            <span v-if="regionInvalid(region)" class="chip warn" title="这个区域绕经度超过一圈或边自交，引擎画出的形状会不符合预期">⚠</span>
             <span class="chip small">整段</span>
             <button class="icon" type="button" :title="region.enabled ? '停用（不参与合成）' : '启用'" @click.stop="toggleEnabled(region.id)">
               {{ region.enabled ? '◉' : '○' }}
@@ -599,6 +619,12 @@ onBeforeUnmount(() => {
 .chip.plan {
   border-style: dashed;
   color: var(--color-text-faint);
+}
+
+.chip.warn {
+  border-color: #fde68a;
+  background: var(--color-warning-soft);
+  color: #92400e;
 }
 
 .chip.small {

@@ -3,7 +3,9 @@ import {
   densify,
   lonLatFromDirection,
   directionFromLonLat,
+  longitudeSpan,
   pointInPolygon,
+  polygonSelfIntersects,
   project,
   unproject,
   unwrapLongitudes,
@@ -64,5 +66,22 @@ describe('erpMath', () => {
 
   it('少于三个顶点不构成区域', () => {
     expect(pointInPolygon(0, 0, [[0, 0], [10, 0]])).toBe(false)
+  })
+
+  it('识别绕经度超过一圈的区域', () => {
+    // RL_video_02 的「区域 3」：绕顶部点了一圈还多，unwrap 后跨度 383°。
+    const verts: Array<[number, number]> = [
+      [3.7, 8.9], [-69.7, 18.2], [-138.1, 38.8], [-146.4, 50.2],
+      [120.4, 31.1], [108.8, 19.5], [53.8, 16.6], [-19.8, 20.4],
+    ]
+    expect(longitudeSpan(verts)).toBeGreaterThan(360)
+    expect(longitudeSpan([[0, 0], [90, 10], [180, 0], [-90, -10]])).toBeLessThan(360)
+  })
+
+  it('识别自交的边', () => {
+    const bowtie: Array<[number, number]> = [[0, 0], [10, 10], [10, 0], [0, 10]]
+    expect(polygonSelfIntersects(bowtie)).toBe(true)
+    const rectangle: Array<[number, number]> = [[0, 0], [10, 0], [10, 10], [0, 10]]
+    expect(polygonSelfIntersects(rectangle)).toBe(false)
   })
 })
