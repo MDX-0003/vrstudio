@@ -225,18 +225,19 @@ function drawOverlay(): void {
     if (!region.enabled) continue
     const projected = projectPolygon(region.verts, pose, size)
     const selected = region.id === props.selectedId
-    const fillAlpha = (selected ? 0.26 : 0.14) * (dim ? 0.35 : 1)
+    const fillAlpha = selected ? 0.26 : 0.14
     context.fillStyle = rgba(region.color, fillAlpha)
-    context.strokeStyle = dim ? rgba(region.color, 0.55) : region.color
+    context.strokeStyle = dim ? rgba(region.color, 0.75) : region.color
     context.lineWidth = (selected ? 3 : 1.6) * (dim ? 0.5 : 1) * scale
-    context.setLineDash(selected ? [] : [6 * scale, 4 * scale])
+    // 不高亮时边一律是虚线，且不铺中间的颜色。
+    context.setLineDash(dim ? [5 * scale, 4 * scale] : (selected ? [] : [6 * scale, 4 * scale]))
     if (projected.allFront) {
       const path = new Path2D()
       const points = projected.points as Vec2[]
       path.moveTo(points[0][0], points[0][1])
       for (let i = 1; i < points.length; i += 1) path.lineTo(points[i][0], points[i][1])
       path.closePath()
-      context.fill(path)
+      if (!dim) context.fill(path)
       context.stroke(path)
     } else {
       for (const run of visibleRuns(projected.points)) {
@@ -253,8 +254,8 @@ function drawOverlay(): void {
       for (const [lon, lat] of region.verts) {
         const point = project(lon, lat, pose, size)
         if (!point) continue
-        context.fillStyle = dim ? 'rgba(255,255,255,0.45)' : '#fff'
-        context.strokeStyle = dim ? rgba(region.color, 0.55) : region.color
+        context.fillStyle = dim ? region.color : '#fff'
+        context.strokeStyle = dim ? rgba(region.color, 0.9) : region.color
         context.lineWidth = (dim ? 1.2 : 2) * scale
         context.beginPath()
         context.rect(point[0] - half, point[1] - half, half * 2, half * 2)
@@ -262,7 +263,8 @@ function drawOverlay(): void {
         context.stroke()
       }
     }
-    if (projected.allFront) {
+    if (projected.allFront && !dim) {
+      // 不高亮时只留边与顶点，名称标签也收起来，避免中央再出现一块底色。
       const points = projected.points as Vec2[]
       const cx = points.reduce((sum, point) => sum + point[0], 0) / points.length
       const cy = points.reduce((sum, point) => sum + point[1], 0) / points.length
