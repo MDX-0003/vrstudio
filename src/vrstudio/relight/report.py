@@ -56,7 +56,8 @@ def light_report(fields: LightFields) -> dict:
 
 def build_report(*, gt: str, atmo: str, size: tuple[int, int], params: dict,
                  align: dict | None, clip: dict | None, light: dict | None,
-                 chroma: dict | None, seconds: float) -> dict:
+                 chroma: dict | None, seconds: float,
+                 regions: dict | None = None) -> dict:
     return {
         "gt": gt,
         "atmo": atmo,
@@ -66,6 +67,7 @@ def build_report(*, gt: str, atmo: str, size: tuple[int, int], params: dict,
         "clip": clip,
         "light": light,
         "chroma": chroma,
+        "regions": regions,
         "seconds": round(seconds, 1),
     }
 

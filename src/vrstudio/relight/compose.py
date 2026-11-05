@@ -43,11 +43,15 @@ class LightCompose:
     ``relight`` 每调一次都要用 LUT 把 2K 光场放大到原尺寸一次，再逐通道求幂；一段
     视频几帧到几百帧，同一份光场放大同样的次数没有意义。这里把三个场预先放大、
     把强度与局部明暗折进指数与矩阵，则 ``apply`` 与 ``relight`` 逐位一致。
+
+    ``strength_map`` 是区域覆盖（决策 88）的逐像素施加量，已放大到原尺寸；为 ``None``
+    时走标量白平衡矩阵，与引入区域之前逐位一致。
     """
 
     gain: np.ndarray          # gY^(strength × w)，(H, W) float32
     visibility: np.ndarray    # V^(local_shading × strength × w)，(H, W) float32
     white_balance: np.ndarray # (1 - strength) I + strength W，3×3 float32
+    strength_map: np.ndarray | None = None  # (H, W) float32；有区域时逐像素混合 I 与 W
 
     def apply(self, gt8: np.ndarray, *, pool=None, workers: int = 1) -> np.ndarray:
         """把光场乘到一帧上，返回同尺寸 8-bit BGR。
@@ -60,7 +64,13 @@ class LightCompose:
 
         def band(y0: int, y1: int) -> None:
             gt_linear = srgb_to_linear(gt8[y0:y1])
-            out_linear = np.einsum("...k,ck->...c", gt_linear, self.white_balance)
+            if self.strength_map is None:
+                out_linear = np.einsum("...k,ck->...c", gt_linear, self.white_balance)
+            else:
+                # 逐像素白平衡：out = GT + s × (GT × W − GT)，等价于 (1−s)I + sW。
+                wb = np.einsum("...k,ck->...c", gt_linear, self.white_balance)
+                strength = self.strength_map[y0:y1, :, None]
+                out_linear = gt_linear + strength * (wb - gt_linear)
             np.multiply(out_linear, self.gain[y0:y1, :, None], out=out_linear)
             np.multiply(out_linear, self.visibility[y0:y1, :, None], out=out_linear)
             out[y0:y1] = linear_to_srgb8_inplace(out_linear)
@@ -85,29 +95,68 @@ def _power_bands(field: np.ndarray, exponent, pool, workers: int) -> None:
 
 
 def light_compose(fields: LightFields, size: tuple[int, int],
-                  strength: float, local_shading: float, *,
+                  strength: float | np.ndarray,
+                  local_shading: float | np.ndarray, *,
                   pool=None, workers: int = 1) -> LightCompose:
     """把 2K 光场折进强度参数并放大到 ``size``，得到逐帧可复用的 ``LightCompose``。
 
     指数带暗部置信权重 ``w``（决策 84），所以先在 2K 上求幂、再放大；放大后的场与
     原实现的顺序不同，但仍然是同一份光场。
+
+    ``strength`` / ``local_shading`` 可以是标量，也可以是 2K 工作尺度上的逐像素场
+    （决策 88 的区域覆盖）。标量路径的表达式与运算顺序保持不变，逐位一致；场路径
+    只在有区域时出现，白平衡改成逐像素混合 ``I`` 与 ``W``。
     """
     weight = shadow_weight(fields.gt_light)
     gain = fields.gain.copy()
     visibility = fields.visibility.copy()
-    _power_bands(gain, np.float32(strength) * weight, pool, workers)
-    _power_bands(visibility, np.float32(local_shading * strength) * weight,
-                 pool, workers)
     width, height = size
+
+    strength_array = None if np.ndim(strength) == 0 else np.asarray(strength, np.float32)
+    shading_array = None if np.ndim(local_shading) == 0 else np.asarray(
+        local_shading, np.float32)
+    if strength_array is not None and strength_array.shape != weight.shape:
+        raise ValueError(
+            f"strength 场 {strength_array.shape} 与光场 {weight.shape} 不一致")
+    if shading_array is not None and shading_array.shape != weight.shape:
+        raise ValueError(
+            f"local_shading 场 {shading_array.shape} 与光场 {weight.shape} 不一致")
+
+    if strength_array is None and shading_array is None:
+        # 标量路径：逐位保持引入区域之前的写法。
+        _power_bands(gain, np.float32(strength) * weight, pool, workers)
+        _power_bands(visibility, np.float32(local_shading * strength) * weight,
+                     pool, workers)
+    else:
+        s_exp = strength_array if strength_array is not None else np.float32(strength)
+        l_exp = shading_array if shading_array is not None else np.float32(local_shading)
+        _power_bands(gain, s_exp * weight, pool, workers)
+        _power_bands(visibility, (l_exp * s_exp) * weight, pool, workers)
+
     gain = cv2.resize(gain, (width, height), interpolation=cv2.INTER_LINEAR)
     visibility = cv2.resize(visibility, (width, height),
                             interpolation=cv2.INTER_LINEAR)
-    white_balance = ((1.0 - strength) * np.eye(3, dtype=np.float32)
-                     + strength * fields.white_balance)
+
+    if strength_array is None:
+        white_balance = ((1.0 - strength) * np.eye(3, dtype=np.float32)
+                         + strength * fields.white_balance)
+        strength_map = None
+    elif strength_array.min() == strength_array.max():
+        # 常数场（例如整幅一个值）退回标量路径，省掉每帧一次 3×3 乘。
+        value = float(strength_array.min())
+        white_balance = ((1.0 - value) * np.eye(3, dtype=np.float32)
+                         + value * fields.white_balance)
+        strength_map = None
+    else:
+        white_balance = fields.white_balance
+        strength_map = cv2.resize(strength_array, (width, height),
+                                  interpolation=cv2.INTER_LINEAR)
+
     return LightCompose(
         gain=gain,
         visibility=visibility,
-        white_balance=white_balance.astype(np.float32),
+        white_balance=np.asarray(white_balance, dtype=np.float32),
+        strength_map=strength_map,
     )
 
 
@@ -118,17 +167,22 @@ def relight(gt8: np.ndarray, fields: LightFields,
     return light_compose(fields, (width, height), strength, local_shading).apply(gt8)
 
 
-def soft_clip(bgr8: np.ndarray, knee: float = 0.72, max_out: float = 0.98, *,
+def soft_clip(bgr8: np.ndarray, knee=0.72, max_out=0.98, *,
               pool=None, workers: int = 1) -> np.ndarray:
     """高光软裁切：亮度过 ``knee`` 后按指数压向 ``max_out``，色相保持不变。
 
-    只有过曝像素需要浮点运算；其余像素在旧实现里经过 ``/255 * 1 * 255`` 的
-    往返，对 0–255 每个值都精确回到原值，所以这里直接复制。亮度按通道计算，
-    不物化整张 float32 BGR，省掉 8K 上约 400 MB 的临时数组。
+    ``knee`` / ``max_out`` 可以是标量，也可以是与 ``bgr8`` 同尺寸的逐像素场（决策 88
+    的区域裁切）；场里取 1.0 的像素永远不会过线，即不裁切。标量路径的表达式与运算
+    顺序保持不变，逐位一致。
+
+    只有过曝像素需要浮点运算；其余像素在旧实现里经过 ``/255 * 1 * 255`` 的往返，对
+    0–255 每个值都精确回到原值，所以这里直接复制。亮度按通道计算，不物化整张
+    float32 BGR，省掉 8K 上约 400 MB 的临时数组。
 
     分带执行时每个行带只看自己的像素，输出写进预分配的数组；结果与整帧相同。
     """
     out = np.empty(bgr8.shape, dtype=bgr8.dtype)
+    scalar = np.ndim(knee) == 0 and np.ndim(max_out) == 0
 
     def band(y0: int, y1: int) -> None:
         sub = bgr8[y0:y1]
@@ -136,12 +190,26 @@ def soft_clip(bgr8: np.ndarray, knee: float = 0.72, max_out: float = 0.98, *,
              + 0.7152 * (sub[..., 1].astype(np.float32) / 255.0)
              + 0.2126 * (sub[..., 2].astype(np.float32) / 255.0))
         out[y0:y1] = sub
-        over = y > knee
-        if not over.any():
-            return
-        span = max(max_out - knee, 1e-3)
-        y_over = y[over]
-        ratio = (max_out - span * np.exp(-(y_over - knee) / span)) / np.maximum(y_over, 1e-6)
+        if scalar:
+            over = y > knee
+            if not over.any():
+                return
+            span = max(max_out - knee, 1e-3)
+            y_over = y[over]
+            ratio = (max_out - span * np.exp(-(y_over - knee) / span)) / np.maximum(y_over, 1e-6)
+        else:
+            k = knee[y0:y1] if np.ndim(knee) else knee
+            m = max_out[y0:y1] if np.ndim(max_out) else max_out
+            over = y > k
+            if not over.any():
+                return
+            span = np.maximum(m - k, 1e-3)
+            y_over = y[over]
+            k_over = np.broadcast_to(k, y.shape)[over]
+            max_over = np.broadcast_to(m, y.shape)[over]
+            span_over = span[over] if np.ndim(span) else np.float32(span)
+            ratio = ((max_over - span_over * np.exp(-(y_over - k_over) / span_over))
+                     / np.maximum(y_over, 1e-6))
         target = out[y0:y1]
         target[over] = np.clip(
             (sub[over].astype(np.float32) / 255.0) * ratio[:, None] * 255.0,

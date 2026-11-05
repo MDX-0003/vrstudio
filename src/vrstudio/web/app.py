@@ -58,6 +58,7 @@ from ..media.videoio import VideoIOError
 from ..patch import sidecar as sidecar_mod
 from ..patch.projection import viewport_erp_rects, viewport_erp_size
 from ..procenv import decode_text, utf8_env
+from ..relight import regions as regions_mod
 from ..redraw.geometry import follow_input_plan
 from ..redraw.manifest import ImageManifest, Manifest
 from . import case_meta
@@ -1876,6 +1877,31 @@ def _submit_entries(case: case_mod.Case, assets: list[dict]) -> list[dict]:
     return out
 
 
+RELIGHT_REGIONS_FILE = "relight/regions.json"
+"""区域覆盖定义的固定落点；``[relight] regions`` 指向它（决策 88）。"""
+
+
+def _relight_regions_path(case: case_mod.Case, cdir: Path) -> Path | None:
+    pointer = (case.relight or {}).get("regions")
+    if not pointer:
+        return None
+    return cdir / pointer
+
+
+def _relight_regions_payload(case: case_mod.Case,
+                             cdir: Path) -> tuple[dict | None, str | None]:
+    """区域文件的内容与校验错误：坏文件不阻塞整个 case 页面，只带 error。"""
+    path = _relight_regions_path(case, cdir)
+    if path is None or not path.is_file():
+        return None, None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        regions_mod.parse_regions(data)
+    except (OSError, json.JSONDecodeError, regions_mod.RegionError) as exc:
+        return None, str(exc)
+    return data, None
+
+
 def _relight_payload(case: case_mod.Case) -> dict | None:
     """relight 面板数据：两个槽位、``[relight]`` 草稿、当前成片与小样。
 
@@ -1887,11 +1913,14 @@ def _relight_payload(case: case_mod.Case) -> dict | None:
     gt, atmo = case.relight_slots()
     current = _relight_current(case, cdir)
     media = "image" if gt is not None and gt.kind == "image" else "video"
+    regions_data, regions_error = _relight_regions_payload(case, cdir)
     return {
         "gt": _slot_payload(case, gt),
         "atmo": _slot_payload(case, atmo),
         "media": media if gt is not None else None,
         "draft": dict(case.relight or {}),
+        "regions": regions_data,
+        "regions_error": regions_error,
         "current": file_entry(current) if current is not None else None,
         "current_report": (file_entry(current.with_suffix(".json"))
                            if current is not None and current.with_suffix(".json").is_file()
@@ -2324,6 +2353,43 @@ async def api_relight_draft(request):
     body = await request.json()
     try:
         case_mod.set_relight(name, body, _ctx["cases_root"])
+    except CaseError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(await asyncio.to_thread(_info_with_generation, name))
+
+
+async def api_relight_regions(request):
+    """读写区域覆盖定义（决策 88）：GET 取整份 JSON，POST 校验后整份落盘。"""
+    name = request.path_params["name"]
+    try:
+        case = case_mod.load(name, _ctx["cases_root"])
+    except CaseError:
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    if case.flow != "relight":
+        return JSONResponse({"error": f"case {name} 是 {case.flow} 流，不是 relight"},
+                            status_code=400)
+    cdir = case.dir(_ctx["cases_root"])
+    if request.method == "GET":
+        data, error = await asyncio.to_thread(_relight_regions_payload, case, cdir)
+        return JSONResponse({"regions": data, "error": error})
+
+    body = await request.json()
+    try:
+        regions_mod.parse_regions(body)
+    except regions_mod.RegionError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    path = cdir / RELIGHT_REGIONS_FILE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(body, ensure_ascii=False, indent=2) + "\n",
+                       encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:
+        return JSONResponse({"error": f"写区域文件失败：{exc}"}, status_code=500)
+    try:
+        case_mod.set_relight(name, {"regions": RELIGHT_REGIONS_FILE},
+                             _ctx["cases_root"])
     except CaseError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     return JSONResponse(await asyncio.to_thread(_info_with_generation, name))
@@ -3952,6 +4018,8 @@ routes = [
     Route("/api/case/{name}/owner", api_case_owner, methods=["POST"]),
     Route("/api/case/{name}/draft", api_draft, methods=["POST"]),
     Route("/api/case/{name}/relight", api_relight_draft, methods=["POST"]),
+    Route("/api/case/{name}/relight/regions", api_relight_regions,
+          methods=["GET", "POST"]),
     Route("/api/case/{name}/prompt", api_prompt, methods=["POST"]),
     Route("/api/case/{name}/params", api_params, methods=["POST"]),
     Route("/api/case/{name}/assets", api_assets, methods=["POST"]),

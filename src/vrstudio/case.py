@@ -39,7 +39,7 @@ RELIGHT_ATMO = "relight_atmo"
 #: ``[relight]`` 是这条流程唯一的草稿段：``current`` 指当前成片，``gt``/``atmo`` 指两个
 #: 槽位选中的素材 id，其余是上次运行的参数。
 _RELIGHT_KEYS = ("current", "gt", "atmo", "scene", "strength", "local_shading",
-                 "highlight_clip", "clip_knee", "clip_max", "ref_frame")
+                 "highlight_clip", "clip_knee", "clip_max", "ref_frame", "regions")
 
 #: ``[relight]`` 里指向素材的两把指针，以及各自要求的素材角色。
 _RELIGHT_SLOTS = {"gt": RELIGHT_GT, "atmo": RELIGHT_ATMO}
@@ -563,13 +563,13 @@ def _parse_relight(raw, path: Path) -> dict | None:
         if key not in raw:
             continue
         value = raw[key]
-        if key == "current":
+        if key == "current" or key == "regions":
             if not isinstance(value, str) or not value:
-                raise CaseError(f"{path}: [relight] current 必须是非空字符串")
+                raise CaseError(f"{path}: [relight] {key} 必须是非空字符串")
             rel = Path(value)
             if rel.is_absolute() or ".." in rel.parts:
                 raise CaseError(
-                    f"{path}: [relight] current 必须是 case 目录内的相对路径")
+                    f"{path}: [relight] {key} 必须是 case 目录内的相对路径")
         elif key in _RELIGHT_SLOTS:
             if not isinstance(value, str) or not re.fullmatch(r"[vi]\d+", value):
                 raise CaseError(

@@ -330,3 +330,55 @@ def test_viewport_endpoint_rejects_relight(tmp_path, client):
     rsp = client.post("/api/case/rl1/viewport", json={"fx": 0.5, "fy": 0.5})
     assert rsp.status_code == 400
     assert "选区草稿" in rsp.json()["error"]
+
+
+# ── 区域覆盖（决策 88）─────────────────────────────────────────────────────
+
+
+REGION_DOC = {
+    "version": 1,
+    "regions": [{
+        "id": "r1",
+        "name": "窗边高光",
+        "color": "#f59e0b",
+        "enabled": True,
+        "verts": [[-30, -20], [30, -20], [30, 20], [-30, 20]],
+        "feather_deg": 3.0,
+        "params": {"strength": 0.4, "local_shading": None,
+                   "clip": {"knee": 0.72, "max": 0.98}},
+        "ranges": None,
+    }],
+}
+
+
+def test_relight_regions_round_trip(tmp_path, client):
+    client.post("/api/cases", json={"flow": "relight", "name": "rl1"})
+    rsp = client.post("/api/case/rl1/relight/regions", json=REGION_DOC)
+    assert rsp.status_code == 200, rsp.text
+    body = rsp.json()
+    assert body["relight"]["regions"]["regions"][0]["id"] == "r1"
+    assert body["relight"]["regions_error"] is None
+
+    stored = tmp_path / "rl1" / "relight" / "regions.json"
+    assert stored.is_file()
+    case = case_mod.load("rl1", tmp_path)
+    assert case.relight["regions"] == "relight/regions.json"
+
+    rsp = client.get("/api/case/rl1/relight/regions")
+    assert rsp.status_code == 200
+    assert rsp.json()["regions"]["regions"][0]["name"] == "窗边高光"
+
+
+def test_relight_regions_reject_bad_document(tmp_path, client):
+    client.post("/api/cases", json={"flow": "relight", "name": "rl1"})
+    bad = dict(REGION_DOC, version=2)
+    rsp = client.post("/api/case/rl1/relight/regions", json=bad)
+    assert rsp.status_code == 400
+    assert "version" in rsp.json()["error"]
+    assert not (tmp_path / "rl1" / "relight" / "regions.json").exists()
+
+    broken = dict(REGION_DOC)
+    broken["regions"] = [dict(REGION_DOC["regions"][0], ranges=[{"start": 1, "end": 2}])]
+    rsp = client.post("/api/case/rl1/relight/regions", json=broken)
+    assert rsp.status_code == 400
+    assert "ranges" in rsp.json()["error"]

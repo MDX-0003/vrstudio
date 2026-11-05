@@ -399,7 +399,7 @@ def test_cli_strength_zero_matches_gt(tmp_path):
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert set(report) == {"gt", "atmo", "size", "params", "align", "clip", "light",
-                           "chroma", "seconds"}
+                           "chroma", "regions", "seconds"}
     assert set(report["params"]) == {"scene", "strength", "local_shading",
                                      "highlight_clip", "clip_knee", "clip_max"}
     assert set(report["align"]) == {
@@ -666,7 +666,7 @@ def test_video_strength_zero_keeps_gt_pixels(tmp_path):
     assert set(report) == {
         "gt", "atmo", "size", "frames", "fps", "kind", "started_at",
         "finished_at", "cache", "timing", "ref_frame", "ref_matched",
-        "params", "align", "clip", "light", "chroma", "seconds",
+        "params", "align", "clip", "light", "chroma", "regions", "seconds",
         "atmo_kind", "fields_mode"}
     assert report["atmo_kind"] == "image" and report["fields_mode"] == "fixed"
     assert report["size"] == [VW, VH] and report["frames"] == VN

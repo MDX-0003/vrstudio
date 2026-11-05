@@ -38,6 +38,7 @@ from ..media.imageio import ImageError, read_image, write_gray_png, write_png
 from ..media.videoio import FrameReader, FrameWriter, VideoIOError, probe
 from ..progress import Log, RateMeter
 from ..relight import cache as relight_cache
+from ..relight import regions as regions_mod
 from ..relight.align import (
     MAX_REFERENCE_SCAN,
     MIN_REFERENCE_STRUCTURE,
@@ -50,6 +51,7 @@ from ..relight.align import (
     structure_score,
     warp_to_gt,
     warp_with_matrix,
+    work_size,
 )
 from ..relight.atmo import AtmoMapping, mapping_for, work_frame, work_size_for
 from ..relight.bands import executor, workers_for
@@ -219,6 +221,7 @@ class RelightInputs:
     atmo: Path
     out: Path
     report: Path | None
+    regions: Path | None = None
     cache_file: Path | None = None
     gt_sha256: str | None = None
     gt_size: int = 0
@@ -233,6 +236,93 @@ def _conf(config: Path | None, overrides: list[str]) -> config_mod.Config:
         return config_mod.load(config, overrides)
     except (config_mod.ConfigError, OSError, ValueError) as exc:
         _param_error(f"配置错误：{exc}")
+
+
+def _load_region_list(path: Path | None) -> list[regions_mod.Region]:
+    """读区域文件；没有给路径时返回空表（走原标量路径）。"""
+    if path is None:
+        return []
+    try:
+        return regions_mod.load_regions(path)
+    except regions_mod.RegionError as exc:
+        _param_error(str(exc))
+
+
+def _region_maps(region_list: list[regions_mod.Region], params: Params,
+                 work: tuple[int, int]) -> regions_mod.RegionMaps | None:
+    """把区域叠加成 2K 参数场；没有区域时返回 ``None``。"""
+    if not region_list:
+        return None
+    clip = (params.clip_knee, params.clip_max) if params.highlight_clip else None
+    return regions_mod.build_maps(
+        region_list, work, strength=params.strength,
+        local_shading=params.local_shading, clip=clip)
+
+
+def _parse_sample_at(value: str | None) -> list[int] | None:
+    """``--sample-at 12,240,600``：去重排序后的帧号表。"""
+    if value is None:
+        return None
+    items = [item.strip() for item in value.split(",") if item.strip()]
+    if not items:
+        _param_error("--sample-at 至少要给一个帧号")
+    try:
+        indices = [int(item) for item in items]
+    except ValueError:
+        _param_error(f"--sample-at 必须是逗号分隔的帧号，收到 {value!r}")
+    if any(index < 0 for index in indices):
+        _param_error(f"--sample-at 帧号不能为负：{indices}")
+    return sorted(set(indices))
+
+
+def _check_sample_at(indices: list[int], frames: int | None) -> list[int]:
+    if frames:
+        bad = [index for index in indices if index >= frames]
+        if bad:
+            _param_error(f"--sample-at 帧号越界：{bad}（共 {frames} 帧，0 起计）")
+    return indices
+
+
+def _apply_clip(frame: np.ndarray, params: Params,
+                clip_full: tuple[np.ndarray, np.ndarray] | None, *,
+                pool=None, workers: int = 1) -> np.ndarray:
+    """区域裁切优先；没有区域裁切时退回全局开关。"""
+    if clip_full is not None:
+        return soft_clip(frame, clip_full[0], clip_full[1],
+                         pool=pool, workers=workers)
+    if params.highlight_clip:
+        return soft_clip(frame, params.clip_knee, params.clip_max,
+                         pool=pool, workers=workers)
+    return frame
+
+
+def _compose_light(fields: LightFields, size: tuple[int, int], params: Params,
+                   maps: regions_mod.RegionMaps | None, *,
+                   pool=None, workers: int = 1):
+    """有区域时用逐像素场，否则用原来的标量参数。"""
+    if maps is None:
+        return light_compose(fields, size, params.strength, params.local_shading,
+                             pool=pool, workers=workers)
+    return light_compose(fields, size, maps.strength, maps.local_shading,
+                         pool=pool, workers=workers)
+
+
+def _regions_report(region_list: list[regions_mod.Region],
+                    maps: regions_mod.RegionMaps | None) -> dict | None:
+    """报告里的区域摘要：数量、启用数、每个区域的像素占比与是否带裁切。"""
+    if not region_list:
+        return None
+    return {
+        "count": len(region_list),
+        "enabled": sum(1 for region in region_list if region.enabled),
+        "regions": [
+            {"id": region.id, "name": region.name,
+             "coverage": round(maps.coverage.get(region.id, 0.0), 5)
+             if maps is not None else 0.0}
+            for region in region_list
+        ],
+        "clip": bool(maps is not None and maps.has_clip),
+    }
 
 
 def _check_video(size: tuple[int, int]) -> None:
@@ -543,6 +633,7 @@ def _video_report(fixed: FixedLight | FixedGeometry, base: dict, frames: int,
         "ref_frame": fixed.ref_frame, "ref_matched": round(fixed.ref_matched, 4),
         "params": base["params"], "align": base["align"],
         "clip": base["clip"], "light": base["light"], "chroma": base["chroma"],
+        "regions": base["regions"],
         "seconds": base["seconds"],
     }
     if atmo_source is not None:
@@ -569,7 +660,8 @@ def _check_alignment(fixed: FixedLight | FixedGeometry) -> None:
 
 
 def _relight_image(gt: Path, atmo: Path, out: Path, params: Params, *,
-                   dump_light: bool, report: Path | None, started: float) -> None:
+                   dump_light: bool, report: Path | None, started: float,
+                   region_list: list[regions_mod.Region] | None = None) -> None:
     """单帧路径：读两张图、估一次变换与光照场、乘一次光场、写一张图。"""
     try:
         gt_image = read_image(gt)
@@ -578,6 +670,7 @@ def _relight_image(gt: Path, atmo: Path, out: Path, params: Params, *,
         _runtime_error(str(exc))
     check_inputs(gt_image, atmo_image)
     height, width = gt_image.shape[:2]
+    maps = _region_maps(region_list or [], params, work_size(width, height))
     typer.echo(f"relight: {width}x{height} scene={params.scene} "
                f"strength={params.strength} local-shading={params.local_shading}")
 
@@ -597,17 +690,25 @@ def _relight_image(gt: Path, atmo: Path, out: Path, params: Params, *,
 
     aligned = warp_to_gt(atmo_image, alignment)
     fields = estimate_fields(gt_image, aligned)
-    out_image = compose_relight(gt_image, fields, params.strength, params.local_shading)
+    if maps is None:
+        out_image = compose_relight(gt_image, fields, params.strength,
+                                    params.local_shading)
+        clip_full = None
+    else:
+        out_image = _compose_light(fields, (width, height), params, maps).apply(gt_image)
+        clip_full = regions_mod.upscale_clip(maps, (width, height))
     clipped_before = clipped_fraction(out_image)
     clip_stats = None
-    if params.highlight_clip:
-        out_image = soft_clip(out_image, params.clip_knee, params.clip_max)
+    if clip_full is not None or params.highlight_clip:
+        out_image = _apply_clip(out_image, params, clip_full)
         clip_stats = {
             "knee": params.clip_knee,
             "max": params.clip_max,
             "clipped_before": round(clipped_before, 5),
             "clipped_after": round(clipped_fraction(out_image), 5),
         }
+        if clip_full is not None:
+            clip_stats["regional"] = True
         typer.echo(f"clip: over-exposure {clip_stats['clipped_before']:.3%} "
                    f"-> {clip_stats['clipped_after']:.3%}")
 
@@ -629,6 +730,7 @@ def _relight_image(gt: Path, atmo: Path, out: Path, params: Params, *,
         align=align_report(alignment, width),
         clip=clip_stats, light=light_stats,
         chroma={"sigma": CHROMA_SIGMA},
+        regions=_regions_report(region_list or [], maps),
         seconds=time.perf_counter() - started,
     )
     typer.echo(f"wrote {out} ({summary['seconds']}s)")
@@ -658,7 +760,8 @@ class SampleOutput:
 
 
 def _write_samples(out_dir: Path, info, conf, light, indices: list[int],
-                   params: Params, log: Log) -> SampleOutput:
+                   params: Params, log: Log,
+                   clip_full: tuple[np.ndarray, np.ndarray] | None = None) -> SampleOutput:
     """按时间点 seek 逐帧取图：只解码被采样的那几帧，不整段解码。"""
     if out_dir.exists() and not out_dir.is_dir():
         _param_error(f"--sample 要求 --out 是目录，但它是文件：{out_dir}")
@@ -678,9 +781,7 @@ def _write_samples(out_dir: Path, info, conf, light, indices: list[int],
                 continue
             compose_start = time.perf_counter()
             relit = light.apply(np.ascontiguousarray(frame), pool=pool, workers=workers)
-            if params.highlight_clip:
-                relit = soft_clip(relit, params.clip_knee, params.clip_max,
-                                  pool=pool, workers=workers)
+            relit = _apply_clip(relit, params, clip_full, pool=pool, workers=workers)
             relit = chroma_lowpass(relit, frame, pool=pool, workers=workers)
             compose += time.perf_counter() - compose_start
             path = out_dir / f"sample_{index:06d}.png"
@@ -716,7 +817,9 @@ def _frame_opener(info, conf) -> Callable[..., Iterator[np.ndarray]]:
 def _relight_video(inputs: RelightInputs, params: Params, conf,
                    log: Log, *, ref_frame: int | None, sample: int | None,
                    crf: int | None, started: float,
-                   started_at: datetime) -> None:
+                   started_at: datetime,
+                   sample_at: list[int] | None = None,
+                   region_list: list[regions_mod.Region] | None = None) -> None:
     """整段路径：对齐与光照场只估一次，整段逐帧复用；``--sample`` 时只写采样帧。"""
     video_cfg = dict(conf.video, **({"crf": crf} if crf is not None else {}))
     try:
@@ -729,12 +832,14 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
         _runtime_error(str(exc))
     _check_video(info.size)
     width, height = info.size
+    maps = _region_maps(region_list or [], params, work_size(width, height))
     atmo_h, atmo_w = atmo_image.shape[:2]
     if (atmo_w, atmo_h) != (width, height):
         _param_error(f"尺寸不一致：GT 视频 {width}x{height}，氛围图 {atmo_w}x{atmo_h}")
     if not info.frames:
         log.info("ffprobe 未报告帧数：进度条只有速率，没有 ETA")
-    mode = f"sample={sample}" if sample is not None else "整段"
+    mode = (f"sample-at={sample_at}" if sample_at is not None
+            else (f"sample={sample}" if sample is not None else "整段"))
     log.step(f"relight: {width}x{height} {info.frames or '?'} frames @ {info.fps} "
              f"{mode} scene={params.scene} strength={params.strength} "
              f"local-shading={params.local_shading}")
@@ -786,14 +891,19 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
         "fields": round(resolved.timing.fields, 3),
     }
 
-    light = light_compose(fixed.fields, (width, height), params.strength,
-                          params.local_shading)
+    light = _compose_light(fixed.fields, (width, height), params, maps)
+    clip_full = regions_mod.upscale_clip(maps, (width, height)) if maps else None
+    clip_active = clip_full is not None or params.highlight_clip
 
-    if sample is not None:
-        indices = _sample_indices(info.frames, sample)
-        if not info.frames:
-            log.warn("ffprobe 未报告帧数：小样从片头连续取，不是全片均匀采样")
-        samples = _write_samples(inputs.out, info, conf, light, indices, params, log)
+    if sample is not None or sample_at is not None:
+        if sample_at is not None:
+            indices = _check_sample_at(sample_at, info.frames)
+        else:
+            indices = _sample_indices(info.frames, sample)
+            if not info.frames:
+                log.warn("ffprobe 未报告帧数：小样从片头连续取，不是全片均匀采样")
+        samples = _write_samples(inputs.out, info, conf, light, indices, params, log,
+                                 clip_full)
         written = samples.paths
         if not written:
             _runtime_error("小样一帧都没写出来：GT 视频解码不出任何帧")
@@ -803,6 +913,7 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
             params=params.as_dict(), align=align_report(fixed.alignment, width),
             clip=None, light=light_report(fixed.fields),
             chroma={"sigma": CHROMA_SIGMA},
+            regions=_regions_report(region_list or [], maps),
             seconds=total,
         )
         timing = {
@@ -849,12 +960,10 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
                     relit = light.apply(np.ascontiguousarray(frame),
                                         pool=pool, workers=workers)
                     # 小样统计在参考帧那一刻算完，只留一个浮点数，不跨整段持有 8K 帧。
-                    if (params.highlight_clip
-                            and writer.frames_written == fixed.ref_frame):
+                    if clip_active and writer.frames_written == fixed.ref_frame:
                         clip_before = clipped_fraction(relit)
-                    if params.highlight_clip:
-                        relit = soft_clip(relit, params.clip_knee, params.clip_max,
-                                          pool=pool, workers=workers)
+                    relit = _apply_clip(relit, params, clip_full,
+                                        pool=pool, workers=workers)
                     chroma_start = time.perf_counter()
                     relit = chroma_lowpass(relit, frame, pool=pool, workers=workers)
                     render_chroma += time.perf_counter() - chroma_start
@@ -878,10 +987,12 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
         _runtime_error("GT 视频解码不出任何帧")
 
     clip_stats = None
-    if params.highlight_clip:
+    if clip_active:
         clip_stats = {"knee": params.clip_knee, "max": params.clip_max,
                       "clipped_before": round(clip_before, 5)
                       if clip_before is not None else None}
+        if clip_full is not None:
+            clip_stats["regional"] = True
         log.info(f"clip: over-exposure of the reference frame "
                  f"{clip_stats['clipped_before']}")
     meter.done()
@@ -891,6 +1002,7 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
         params=params.as_dict(), align=align_report(fixed.alignment, width),
         clip=clip_stats, light=light_report(fixed.fields),
         chroma={"sigma": CHROMA_SIGMA},
+        regions=_regions_report(region_list or [], maps),
         seconds=total,
     )
     timing = {
@@ -938,20 +1050,21 @@ def _compose_pair(gt_frame: np.ndarray, atmo_small: np.ndarray,
                   alignment: AlignResult, params: Params,
                   work: tuple[int, int],
                   size: tuple[int, int], *,
-                  pool=None, workers: int = 1) -> tuple[np.ndarray, float]:
+                  pool=None, workers: int = 1,
+                  maps: regions_mod.RegionMaps | None = None) -> tuple[np.ndarray, float]:
     """一帧 GT 与对应氛围帧：2K 上估光场、原尺寸乘算。
 
     ``strength=0`` 时不估光场，直接返回 GT 的副本；这与 ``light_compose`` 的
-    单位变换等价，但省掉每帧一次的引导滤波与 8K 光场放大。
+    单位变换等价，但省掉每帧一次的引导滤波与 8K 光场放大。有区域时只有在场的
+    施加量全为 0 时才走这条捷径。
     """
     gt_small = work_frame(gt_frame, work)
     aligned = warp_with_matrix(atmo_small, alignment.matrix, work)
     match = structure_correlation(gray8(gt_small), gray8(aligned))
-    if params.strength == 0.0:
+    if params.strength == 0.0 and (maps is None or not maps.strength.any()):
         return np.ascontiguousarray(gt_frame), match
     fields = estimate_fields(gt_small, aligned, pool=pool)
-    light = light_compose(fields, size, params.strength, params.local_shading,
-                          pool=pool, workers=workers)
+    light = _compose_light(fields, size, params, maps, pool=pool, workers=workers)
     return light.apply(np.ascontiguousarray(gt_frame),
                        pool=pool, workers=workers), match
 
@@ -959,7 +1072,10 @@ def _compose_pair(gt_frame: np.ndarray, atmo_small: np.ndarray,
 def _write_samples_pair(out_dir: Path, gt_info, atmo_info, conf,
                         fixed: FixedGeometry, mapping: AtmoMapping,
                         params: Params, indices: list[int], log: Log,
-                        work: tuple[int, int]) -> SampleOutput:
+                        work: tuple[int, int],
+                        maps: regions_mod.RegionMaps | None = None,
+                        clip_full: tuple[np.ndarray, np.ndarray] | None = None,
+                        ) -> SampleOutput:
     """视频氛围的小样：每个采样点同时取 GT 帧与映射到的氛围帧。"""
     if out_dir.exists() and not out_dir.is_dir():
         _param_error(f"--sample 要求 --out 是目录，但它是文件：{out_dir}")
@@ -987,10 +1103,9 @@ def _write_samples_pair(out_dir: Path, gt_info, atmo_info, conf,
             compose_start = time.perf_counter()
             relit, match = _compose_pair(frame, atmo_small, fixed.alignment,
                                          params, work, gt_info.size,
-                                         pool=pool, workers=workers)
-            if params.highlight_clip:
-                relit = soft_clip(relit, params.clip_knee, params.clip_max,
-                                  pool=pool, workers=workers)
+                                         pool=pool, workers=workers, maps=maps)
+            relit = _apply_clip(relit, params, clip_full,
+                                pool=pool, workers=workers)
             relit = chroma_lowpass(relit, frame, pool=pool, workers=workers)
             compose += time.perf_counter() - compose_start
             matches.append(match)
@@ -1009,7 +1124,10 @@ def _write_samples_pair(out_dir: Path, gt_info, atmo_info, conf,
 def _render_pair(inputs: RelightInputs, gt_info, atmo_info,
                  fixed: FixedGeometry, mapping: AtmoMapping, params: Params,
                  conf, log: Log, video_cfg: dict,
-                 work: tuple[int, int]) -> PairRender:
+                 work: tuple[int, int],
+                 maps: regions_mod.RegionMaps | None = None,
+                 clip_full: tuple[np.ndarray, np.ndarray] | None = None
+                 ) -> PairRender:
     """整段渲染：两路顺序读，每帧取对应氛围帧、估光场、乘算、编码。"""
     meter = RateMeter(gt_info.frames or None, log)
     log.step("render pass")
@@ -1018,6 +1136,7 @@ def _render_pair(inputs: RelightInputs, gt_info, atmo_info,
     matches: list[float] = []
     clip_before: float | None = None
     track = _AtmoTrack(mapping, work)
+    clip_active = clip_full is not None or params.highlight_clip
     workers = workers_for()
     pool = executor(workers)
     render_start = time.perf_counter()
@@ -1047,13 +1166,13 @@ def _render_pair(inputs: RelightInputs, gt_info, atmo_info,
                     relit, match = _compose_pair(frame, atmo_small,
                                                  fixed.alignment, params,
                                                  work, gt_info.size,
-                                                 pool=pool, workers=workers)
+                                                 pool=pool, workers=workers,
+                                                 maps=maps)
                     matches.append(match)
-                    if params.highlight_clip and index == fixed.ref_frame:
+                    if clip_active and index == fixed.ref_frame:
                         clip_before = clipped_fraction(relit)
-                    if params.highlight_clip:
-                        relit = soft_clip(relit, params.clip_knee, params.clip_max,
-                                          pool=pool, workers=workers)
+                    relit = _apply_clip(relit, params, clip_full,
+                                        pool=pool, workers=workers)
                     chroma_start = time.perf_counter()
                     relit = chroma_lowpass(relit, frame, pool=pool, workers=workers)
                     render_chroma += time.perf_counter() - chroma_start
@@ -1077,10 +1196,12 @@ def _render_pair(inputs: RelightInputs, gt_info, atmo_info,
         _runtime_error("GT 视频解码不出任何帧")
 
     clip_stats = None
-    if params.highlight_clip:
+    if clip_active:
         clip_stats = {"knee": params.clip_knee, "max": params.clip_max,
                       "clipped_before": round(clip_before, 5)
                       if clip_before is not None else None}
+        if clip_full is not None:
+            clip_stats["regional"] = True
         log.info(f"clip: over-exposure of the reference frame "
                  f"{clip_stats['clipped_before']}")
     meter.done()
@@ -1100,7 +1221,9 @@ def _render_pair(inputs: RelightInputs, gt_info, atmo_info,
 def _relight_video_atmo(inputs: RelightInputs, params: Params, conf,
                         log: Log, *, ref_frame: int | None, sample: int | None,
                         crf: int | None, started: float,
-                        started_at: datetime) -> None:
+                        started_at: datetime,
+                        sample_at: list[int] | None = None,
+                        region_list: list[regions_mod.Region] | None = None) -> None:
     """视频 GT + 视频氛围：固定相似变换，逐帧从对应氛围帧重估光场。"""
     video_cfg = dict(conf.video, **({"crf": crf} if crf is not None else {}))
     try:
@@ -1114,9 +1237,11 @@ def _relight_video_atmo(inputs: RelightInputs, params: Params, conf,
     mapping = mapping_for(gt_info.frames, gt_info.fps_float,
                           atmo_info.frames, atmo_info.fps_float)
     work = work_size_for(width, height)
+    maps = _region_maps(region_list or [], params, work)
     if not gt_info.frames:
         log.info("GT ffprobe 未报告帧数：进度条只有速率，没有 ETA")
-    mode = f"sample={sample}" if sample is not None else "整段"
+    mode = (f"sample-at={sample_at}" if sample_at is not None
+            else (f"sample={sample}" if sample is not None else "整段"))
     log.step(f"relight: {width}x{height} {gt_info.frames or '?'} frames @ {gt_info.fps} "
              f"{mode} scene={params.scene} strength={params.strength} "
              f"local-shading={params.local_shading} atmo=video "
@@ -1183,13 +1308,17 @@ def _relight_video_atmo(inputs: RelightInputs, params: Params, conf,
         "atmo_ref_frame": mapping.index_for(fixed.ref_frame),
     }
 
-    if sample is not None:
-        indices = _sample_indices(gt_info.frames, sample)
-        if not gt_info.frames:
-            log.warn("GT ffprobe 未报告帧数：小样从片头连续取，不是全片均匀采样")
+    if sample is not None or sample_at is not None:
+        if sample_at is not None:
+            indices = _check_sample_at(sample_at, gt_info.frames)
+        else:
+            indices = _sample_indices(gt_info.frames, sample)
+            if not gt_info.frames:
+                log.warn("GT ffprobe 未报告帧数：小样从片头连续取，不是全片均匀采样")
+        clip_full = regions_mod.upscale_clip(maps, (width, height)) if maps else None
         samples = _write_samples_pair(
             inputs.out, gt_info, atmo_info, conf, fixed, mapping, params,
-            indices, log, work)
+            indices, log, work, maps, clip_full)
         written = samples.paths
         if not written:
             _runtime_error("小样一帧都没写出来：GT 或氛围视频解码不出任何帧")
@@ -1199,6 +1328,7 @@ def _relight_video_atmo(inputs: RelightInputs, params: Params, conf,
             params=params.as_dict(), align=align_report(fixed.alignment, width),
             clip=None, light=None,
             chroma={"sigma": CHROMA_SIGMA}, seconds=total,
+            regions=_regions_report(region_list or [], maps),
         )
         timing = {
             "cache_load": round(cache_load, 3),
@@ -1221,14 +1351,16 @@ def _relight_video_atmo(inputs: RelightInputs, params: Params, conf,
             atmo_source={**atmo_source, "atmo_match": samples.match}))
         return
 
+    clip_full = regions_mod.upscale_clip(maps, (width, height)) if maps else None
     render = _render_pair(inputs, gt_info, atmo_info, fixed, mapping, params,
-                          conf, log, video_cfg, work)
+                          conf, log, video_cfg, work, maps, clip_full)
     total = time.perf_counter() - started
     base = build_report(
         gt=str(inputs.gt), atmo=str(inputs.atmo), size=(width, height),
         params=params.as_dict(), align=align_report(fixed.alignment, width),
         clip=render.clip, light=None,
         chroma={"sigma": CHROMA_SIGMA}, seconds=total,
+        regions=_regions_report(region_list or [], maps),
     )
     timing = {
         "cache_load": round(cache_load, 3),
@@ -1277,6 +1409,12 @@ def relight(
     sample: int | None = typer.Option(
         None, "--sample",
         help="仅视频 GT：只渲染 N 帧均匀采样的小样 PNG 到 --out 目录，不编码整段"),
+    sample_at: str | None = typer.Option(
+        None, "--sample-at",
+        help="仅视频 GT：按帧号出小样，逗号分隔（如 12,240,600），与 --sample 互斥"),
+    regions: Path | None = typer.Option(
+        None, "--regions",
+        help="区域覆盖定义 JSON（version=1）；--case 模式缺省读 [relight] regions"),
     crf: int | None = typer.Option(
         None, "--crf", min=0, max=51,
         help="仅视频 GT：覆盖 video.crf；0 为无损，像素基线测试用它"),
@@ -1292,12 +1430,16 @@ def relight(
     started = time.perf_counter()
     started_at = _now()
     log = Log(quiet=quiet)
+    sample_indices = _parse_sample_at(sample_at)
+    sample_count = sample
+    if sample_count is None and sample_indices is not None:
+        sample_count = len(sample_indices)
     strength, local_shading = resolve_params(scene, strength, local_shading)
     if highlight_clip and not 0.0 < clip_knee < clip_max <= 1.0:
         _param_error(f"软裁切参数须满足 0 < knee < max <= 1，"
                      f"收到 knee={clip_knee}，max={clip_max}")
 
-    inputs = _resolve_inputs(gt, atmo, out, case, cases_dir, sample, report,
+    inputs = _resolve_inputs(gt, atmo, out, case, cases_dir, sample_count, report,
                              started_at)
 
     try:
@@ -1312,6 +1454,8 @@ def relight(
             _param_error("--ref-frame 只适用于视频 GT：图片 GT 没有参考帧的概念")
         if sample is not None:
             _param_error("--sample 只适用于视频 GT：图片 GT 本身就只出一帧")
+        if sample_indices is not None:
+            _param_error("--sample-at 只适用于视频 GT：图片 GT 本身就只出一帧")
         if crf is not None:
             _param_error("--crf 只适用于视频 GT：图片 GT 不经过视频编码")
     else:
@@ -1320,23 +1464,29 @@ def relight(
                          "需要时用 --sample 或对参考帧单独跑图片 GT")
         if sample is not None and sample <= 0:
             _param_error(f"--sample 必须不小于 1，收到 {sample}")
+        if sample_indices is not None and sample is not None:
+            _param_error("--sample 与 --sample-at 只能选一种：两者都是小样模式")
 
     params = Params(scene=scene, strength=strength, local_shading=local_shading,
                     highlight_clip=highlight_clip, clip_knee=clip_knee,
                     clip_max=clip_max)
+    region_list = _load_region_list(regions or inputs.regions)
     if kind == "image":
         _relight_image(inputs.gt, inputs.atmo, inputs.out, params,
-                       dump_light=dump_light, report=inputs.report, started=started)
+                       dump_light=dump_light, report=inputs.report, started=started,
+                       region_list=region_list)
     else:
         conf = _conf(config, overrides)
         if atmo_kind == "video":
             _relight_video_atmo(inputs, params, conf, log,
                                 ref_frame=ref_frame, sample=sample, crf=crf,
-                                started=started, started_at=started_at)
+                                started=started, started_at=started_at,
+                                sample_at=sample_indices, region_list=region_list)
         else:
             _relight_video(inputs, params, conf, log,
                            ref_frame=ref_frame, sample=sample, crf=crf,
-                           started=started, started_at=started_at)
+                           started=started, started_at=started_at,
+                           sample_at=sample_indices, region_list=region_list)
     if case:
         _record_into_case(case, cases_dir, inputs.out, sample is not None)
 
@@ -1376,6 +1526,10 @@ def _resolve_inputs(gt: Path | None, atmo: Path | None, out: Path | None,
         _param_error(f"case {case} 还缺{missing}：先放好两个槽位"
                      f"（vrstudio case relight --case {case} …）")
     cdir = loaded.dir(cases_dir)
+    regions_path = None
+    pointer = (loaded.relight or {}).get("regions")
+    if pointer:
+        regions_path = cdir / pointer
     suffix = ".png" if gt_asset.kind == "image" else ".mp4"
     stamp = started_at.strftime("%Y%m%d-%H%M%S")
     target = (cdir / "out" / "samples" / stamp if sample is not None
@@ -1396,6 +1550,7 @@ def _resolve_inputs(gt: Path | None, atmo: Path | None, out: Path | None,
     return RelightInputs(
         gt=gt_path, atmo=atmo_path, out=target,
         report=report if report is not None else target.with_suffix(".json"),
+        regions=regions_path,
         cache_file=cache_file,
         gt_sha256=gt_asset.sha256, gt_size=gt_size, gt_mtime_ns=gt_mtime_ns,
         atmo_sha256=atmo_asset.sha256, atmo_size=atmo_size,
