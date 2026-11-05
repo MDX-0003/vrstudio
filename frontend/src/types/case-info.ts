@@ -264,6 +264,30 @@ export interface RelightPayload {
   samples: FileInfo[]
   /** 最近一次小样的报告 JSON；老小样没有报告时为 null。 */
   sample_report: FileInfo | null
+  /** 区域覆盖定义；没有区域或文件坏掉时为 null（坏掉时 regions_error 给出原因）。 */
+  regions: RelightRegionDoc | null
+  regions_error: string | null
+}
+
+/** 区域覆盖的一个区域（决策 88）。`params` 里 null 表示沿用默认值。 */
+export interface RelightRegion {
+  id: string
+  name: string
+  color: string
+  enabled: boolean
+  verts: Array<[number, number]>
+  feather_deg: number
+  params: {
+    strength: number | null
+    local_shading: number | null
+    clip: { knee: number; max: number } | null
+  }
+  ranges: null
+}
+
+export interface RelightRegionDoc {
+  version: 1
+  regions: RelightRegion[]
 }
 
 export interface StepFiles {

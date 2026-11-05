@@ -5,6 +5,9 @@ import { Picture, Refresh, VideoPlay } from '@element-plus/icons-vue'
 import { fetchCase, runOperation, saveRelightDraft } from '@/api/case'
 import { getJson } from '@/api/client'
 import FileRow from '@/components/common/FileRow.vue'
+import RegionWorkbench from '@/components/relight/RegionWorkbench.vue'
+import { defaultsFromDraft } from '@/constants/relightParams'
+import type { DefaultParams } from '@/constants/relightParams'
 import { useCaseTasks } from '@/composables/useCaseTasks'
 import { taskStatusMeta } from '@/constants/taskStatus'
 import { gateBlocked } from '@/utils/gates'
@@ -88,6 +91,19 @@ const form = ref({
   sample: 1,
 })
 
+/** 默认参数（未覆盖处）：默认卡与区域卡共用同一份描述表与同一个 ParamRow。 */
+const localDefaults = ref<DefaultParams>(defaultsFromDraft({}))
+const gtUrl = computed(() => payload.value?.gt?.entry?.open_url ?? null)
+
+function onDefaults(next: DefaultParams): void {
+  localDefaults.value = next
+  form.value.strength = next.strength
+  form.value.local_shading = next.local_shading
+  form.value.highlight_clip = next.clip !== null
+  form.value.clip_knee = next.clip?.knee ?? 0.72
+  form.value.clip_max = next.clip?.max ?? 0.98
+}
+
 function applyDraft(): void {
   const d = draft.value
   form.value = {
@@ -100,6 +116,7 @@ function applyDraft(): void {
     crf: '',
     sample: 1,
   }
+  localDefaults.value = defaultsFromDraft(d)
 }
 
 async function loadReport(): Promise<void> {
@@ -279,49 +296,26 @@ const percent = (value: number | undefined): string =>
           class="gate-alert"
         />
 
-        <div class="param-grid">
+        <RegionWorkbench
+          v-if="payload"
+          :case-name="props.caseName"
+          :payload="payload"
+          :source-url="gtUrl"
+          :defaults="localDefaults"
+          @update:defaults="onDefaults"
+          @updated="(info) => emit('updated', info)"
+        />
+
+        <div v-if="isVideo" class="param-grid ref-row">
           <label class="param">
-            <span>整体施加量</span>
-            <el-slider v-model="form.strength" :min="0" :max="1" :step="0.05" show-input />
-          </label>
-          <label class="param">
-            <span>局部明暗</span>
-            <el-slider v-model="form.local_shading" :min="0" :max="1" :step="0.05" show-input />
-          </label>
-          <label v-if="isVideo" class="param">
             <span>参考帧（留空自动选）</span>
             <el-input v-model="form.ref_frame" size="small" placeholder="例如 12；0 起计" />
           </label>
-          <label v-if="isVideo" class="param">
+          <label class="param">
             <span>编码质量 crf（留空用配置）</span>
             <el-input v-model="form.crf" size="small" placeholder="0–51，18 是生产默认" />
           </label>
         </div>
-
-        <div class="clip-row">
-          <el-checkbox v-model="form.highlight_clip">高光软裁切</el-checkbox>
-          <template v-if="form.highlight_clip">
-            <span class="muted">拐点</span>
-            <el-input-number
-              v-model="form.clip_knee"
-              :min="0.01"
-              :max="0.99"
-              :step="0.01"
-              size="small"
-            />
-            <span class="muted">上限</span>
-            <el-input-number
-              v-model="form.clip_max"
-              :min="0.02"
-              :max="1"
-              :step="0.01"
-              size="small"
-            />
-          </template>
-        </div>
-        <p class="clip-hint muted">
-          高光软裁切（通常不需要开，只在合并完成后，对亮度大于拐点的像素进行缩放）
-        </p>
 
         <div class="action-row">
           <template v-if="isVideo">
@@ -553,8 +547,12 @@ const percent = (value: number | undefined): string =>
   align-items: start;
 }
 
-.relight-layout > .panel:nth-child(3) {
+.relight-layout > .panel:nth-child(1) {
   grid-column: 1 / -1;
+}
+
+.ref-row {
+  margin-top: var(--space-4);
 }
 
 .param-grid {
@@ -569,20 +567,6 @@ const percent = (value: number | undefined): string =>
   gap: var(--space-1);
   font-size: var(--text-xs);
   color: var(--color-text-muted);
-}
-
-.clip-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
-  font-size: var(--text-xs);
-}
-
-.clip-hint {
-  margin: var(--space-2) 0 0;
-  font-size: var(--text-xs);
 }
 
 .action-row {
@@ -686,7 +670,7 @@ const percent = (value: number | undefined): string =>
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .relight-layout > .panel:nth-child(3) {
+  .relight-layout > .panel:nth-child(1) {
     grid-column: auto;
   }
 }
