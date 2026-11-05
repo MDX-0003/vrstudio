@@ -214,6 +214,29 @@ export function longitudeSpan(verts: LonLat[]): number {
   return Math.max(...lons) - Math.min(...lons)
 }
 
+/**
+ * 多边形绕极点的圈数（0 表示不绕）。
+ *
+ * 逐边取最短经度差（闭合边也算）后求和再除以 360：正常区域是 0；边界绕极点一整圈
+ * 时是 ±1。这种形状在经纬度平面上必然自重叠，引擎的单多边形模型表示不了。
+ */
+export function polygonWinding(verts: LonLat[]): number {
+  const unwrapped = unwrapLongitudes(verts)
+  if (unwrapped.length < 3) return 0
+  let total = 0
+  for (let index = 0; index < unwrapped.length; index += 1) {
+    const current = unwrapped[index]
+    const next = unwrapped[(index + 1) % unwrapped.length]
+    let delta = next[0] - current[0]
+    if (index === unwrapped.length - 1) {
+      while (delta > 180) delta -= 360
+      while (delta < -180) delta += 360
+    }
+    total += delta
+  }
+  return Math.round(total / 360)
+}
+
 function orientation(p: LonLat, q: LonLat, r: LonLat): number {
   const value = (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
   if (Math.abs(value) < 1e-9) return 0

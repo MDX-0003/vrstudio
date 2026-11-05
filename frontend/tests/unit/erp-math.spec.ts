@@ -6,6 +6,7 @@ import {
   longitudeSpan,
   pointInPolygon,
   polygonSelfIntersects,
+  polygonWinding,
   project,
   unproject,
   unwrapLongitudes,
@@ -83,5 +84,14 @@ describe('erpMath', () => {
     expect(polygonSelfIntersects(bowtie)).toBe(true)
     const rectangle: Array<[number, number]> = [[0, 0], [10, 0], [10, 10], [0, 10]]
     expect(polygonSelfIntersects(rectangle)).toBe(false)
+  })
+
+  it('绕极点一整圈的边界 winding 非零', () => {
+    const ring: Array<[number, number]> = []
+    for (let index = 0; index < 8; index += 1) ring.push([index * 45, 60])
+    expect(Math.abs(polygonWinding(ring))).toBe(1)
+    // 加了极点顶点也仍然绕一圈
+    expect(Math.abs(polygonWinding([...ring, [0, 89]]))).toBe(1)
+    expect(polygonWinding([[0, 0], [90, 0], [90, 10], [0, 10]])).toBe(0)
   })
 })

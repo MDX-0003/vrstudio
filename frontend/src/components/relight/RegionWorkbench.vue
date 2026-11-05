@@ -9,7 +9,7 @@ import { saveRelightRegions } from '@/api/relight'
 import { saveRelightDraft } from '@/api/case'
 import type { RelightPayload, RelightRegion } from '@/types/case-info'
 import type { LonLat } from '@/utils/erpMath'
-import { longitudeSpan, polygonSelfIntersects } from '@/utils/erpMath'
+import { longitudeSpan, polygonSelfIntersects, polygonWinding } from '@/utils/erpMath'
 
 /**
  * 区域工作台（决策 88，方案 A）：视图占主位，右侧是区域列表与选中区域的参数组，
@@ -146,7 +146,7 @@ function select(id: string): void {
 
 /** 已存在的区域也可能不合法（旧数据或手改）：列表里标出来，避免静默画错。 */
 function regionInvalid(region: RelightRegion): boolean {
-  return longitudeSpan(region.verts) > 360 || polygonSelfIntersects(region.verts)
+  return polygonWinding(region.verts) !== 0 || polygonSelfIntersects(region.verts)
 }
 
 function startDraw(): void {
@@ -179,12 +179,17 @@ function closeDraft(): void {
     mode.value = 'orbit'
     return
   }
-  // 球面上的简单闭合多边形不能绕超过一整圈；超过后引擎画出来会自重叠。
+  // 绕极点的区域在经纬度平面上必然自重叠；它的报错要说清原因，不给「边交叉」的误导。
   const span = longitudeSpan(points)
-  if (span > 360) {
+  const winding = polygonWinding(points)
+  const hasPole = points.some(([, lat]) => Math.abs(lat) >= 89)
+  if (winding !== 0) {
     ElMessage.error(
-      `这个区域绕经度 ${Math.round(span)}°，超过一整圈，无法用一个闭合多边形表示；`
-      + '请拆成两块，或让上边界经过极点。',
+      hasPole
+        ? `这个区域含极点、边界又绕满了一圈（经度跨度 ${Math.round(span)}°），`
+          + '单个闭合多边形表示不了；请拆成东西两块。'
+        : `这个区域绕着极点转了 ${Math.abs(winding)} 圈（经度跨度 ${Math.round(span)}°），`
+          + '单个闭合多边形表示不了；请拆成两块，或让边界经过极点。',
     )
     return
   }
