@@ -58,9 +58,9 @@ from ..media.videoio import VideoIOError
 from ..patch import sidecar as sidecar_mod
 from ..patch.projection import viewport_erp_rects, viewport_erp_size
 from ..procenv import decode_text, utf8_env
-from ..relight import regions as regions_mod
 from ..redraw.geometry import follow_input_plan
 from ..redraw.manifest import ImageManifest, Manifest
+from ..relight import regions as regions_mod
 from . import case_meta
 from .identity import (
     MAX_NAME_LENGTH,

@@ -307,22 +307,54 @@ def _compose_light(fields: LightFields, size: tuple[int, int], params: Params,
                          pool=pool, workers=workers)
 
 
+def _regions_summary_line(region_list: list[regions_mod.Region],
+                          source: Path | None) -> str:
+    enabled = sum(1 for region in region_list if region.enabled)
+    return f"regions: {len(region_list)} defined, {enabled} enabled, from {source}"
+
+
 def _regions_report(region_list: list[regions_mod.Region],
-                    maps: regions_mod.RegionMaps | None) -> dict | None:
-    """报告里的区域摘要：数量、启用数、每个区域的像素占比与是否带裁切。"""
+                    maps: regions_mod.RegionMaps | None,
+                    source: Path | None = None) -> dict | None:
+    """报告里的区域摘要：文件身份、数量、逐区域的参数与像素占比。
+
+    把完整的顶点与参数写进报告，是为了事后验收不依赖 regions.json 是否被改过：
+    报告自己就能说明这次运行用的是哪一组区域。
+    """
     if not region_list:
         return None
-    return {
+    report: dict = {
         "count": len(region_list),
         "enabled": sum(1 for region in region_list if region.enabled),
+        "clip": bool(maps is not None and maps.has_clip),
         "regions": [
-            {"id": region.id, "name": region.name,
-             "coverage": round(maps.coverage.get(region.id, 0.0), 5)
-             if maps is not None else 0.0}
+            {
+                "id": region.id,
+                "name": region.name,
+                "enabled": region.enabled,
+                "feather_deg": region.feather_deg,
+                "verts": [[round(lon, 6), round(lat, 6)] for lon, lat in region.verts],
+                "params": {
+                    "strength": region.params.strength,
+                    "local_shading": region.params.local_shading,
+                    "clip": None if region.params.clip is None else {
+                        "knee": region.params.clip[0],
+                        "max": region.params.clip[1],
+                    },
+                },
+                "coverage": round(maps.coverage.get(region.id, 0.0), 5)
+                if maps is not None else 0.0,
+            }
             for region in region_list
         ],
-        "clip": bool(maps is not None and maps.has_clip),
     }
+    if source is not None:
+        report["file"] = str(source)
+        try:
+            report["sha256"] = case_mod.file_sha256(source)
+        except OSError:
+            report["sha256"] = None
+    return report
 
 
 def _check_video(size: tuple[int, int]) -> None:
@@ -661,7 +693,8 @@ def _check_alignment(fixed: FixedLight | FixedGeometry) -> None:
 
 def _relight_image(gt: Path, atmo: Path, out: Path, params: Params, *,
                    dump_light: bool, report: Path | None, started: float,
-                   region_list: list[regions_mod.Region] | None = None) -> None:
+                   region_list: list[regions_mod.Region] | None = None,
+                   regions_source: Path | None = None) -> None:
     """单帧路径：读两张图、估一次变换与光照场、乘一次光场、写一张图。"""
     try:
         gt_image = read_image(gt)
@@ -671,6 +704,8 @@ def _relight_image(gt: Path, atmo: Path, out: Path, params: Params, *,
     check_inputs(gt_image, atmo_image)
     height, width = gt_image.shape[:2]
     maps = _region_maps(region_list or [], params, work_size(width, height))
+    if region_list:
+        typer.echo(_regions_summary_line(region_list, regions_source))
     typer.echo(f"relight: {width}x{height} scene={params.scene} "
                f"strength={params.strength} local-shading={params.local_shading}")
 
@@ -730,7 +765,7 @@ def _relight_image(gt: Path, atmo: Path, out: Path, params: Params, *,
         align=align_report(alignment, width),
         clip=clip_stats, light=light_stats,
         chroma={"sigma": CHROMA_SIGMA},
-        regions=_regions_report(region_list or [], maps),
+        regions=_regions_report(region_list or [], maps, regions_source),
         seconds=time.perf_counter() - started,
     )
     typer.echo(f"wrote {out} ({summary['seconds']}s)")
@@ -819,7 +854,8 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
                    crf: int | None, started: float,
                    started_at: datetime,
                    sample_at: list[int] | None = None,
-                   region_list: list[regions_mod.Region] | None = None) -> None:
+                   region_list: list[regions_mod.Region] | None = None,
+                   regions_source: Path | None = None) -> None:
     """整段路径：对齐与光照场只估一次，整段逐帧复用；``--sample`` 时只写采样帧。"""
     video_cfg = dict(conf.video, **({"crf": crf} if crf is not None else {}))
     try:
@@ -833,6 +869,8 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
     _check_video(info.size)
     width, height = info.size
     maps = _region_maps(region_list or [], params, work_size(width, height))
+    if region_list:
+        log.info(_regions_summary_line(region_list, regions_source))
     atmo_h, atmo_w = atmo_image.shape[:2]
     if (atmo_w, atmo_h) != (width, height):
         _param_error(f"尺寸不一致：GT 视频 {width}x{height}，氛围图 {atmo_w}x{atmo_h}")
@@ -913,7 +951,7 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
             params=params.as_dict(), align=align_report(fixed.alignment, width),
             clip=None, light=light_report(fixed.fields),
             chroma={"sigma": CHROMA_SIGMA},
-            regions=_regions_report(region_list or [], maps),
+            regions=_regions_report(region_list or [], maps, regions_source),
             seconds=total,
         )
         timing = {
@@ -1002,7 +1040,7 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
         params=params.as_dict(), align=align_report(fixed.alignment, width),
         clip=clip_stats, light=light_report(fixed.fields),
         chroma={"sigma": CHROMA_SIGMA},
-        regions=_regions_report(region_list or [], maps),
+        regions=_regions_report(region_list or [], maps, regions_source),
         seconds=total,
     )
     timing = {
@@ -1223,7 +1261,8 @@ def _relight_video_atmo(inputs: RelightInputs, params: Params, conf,
                         crf: int | None, started: float,
                         started_at: datetime,
                         sample_at: list[int] | None = None,
-                        region_list: list[regions_mod.Region] | None = None) -> None:
+                        region_list: list[regions_mod.Region] | None = None,
+                        regions_source: Path | None = None) -> None:
     """视频 GT + 视频氛围：固定相似变换，逐帧从对应氛围帧重估光场。"""
     video_cfg = dict(conf.video, **({"crf": crf} if crf is not None else {}))
     try:
@@ -1238,6 +1277,8 @@ def _relight_video_atmo(inputs: RelightInputs, params: Params, conf,
                           atmo_info.frames, atmo_info.fps_float)
     work = work_size_for(width, height)
     maps = _region_maps(region_list or [], params, work)
+    if region_list:
+        log.info(_regions_summary_line(region_list, regions_source))
     if not gt_info.frames:
         log.info("GT ffprobe 未报告帧数：进度条只有速率，没有 ETA")
     mode = (f"sample-at={sample_at}" if sample_at is not None
@@ -1328,7 +1369,7 @@ def _relight_video_atmo(inputs: RelightInputs, params: Params, conf,
             params=params.as_dict(), align=align_report(fixed.alignment, width),
             clip=None, light=None,
             chroma={"sigma": CHROMA_SIGMA}, seconds=total,
-            regions=_regions_report(region_list or [], maps),
+            regions=_regions_report(region_list or [], maps, regions_source),
         )
         timing = {
             "cache_load": round(cache_load, 3),
@@ -1360,7 +1401,7 @@ def _relight_video_atmo(inputs: RelightInputs, params: Params, conf,
         params=params.as_dict(), align=align_report(fixed.alignment, width),
         clip=render.clip, light=None,
         chroma={"sigma": CHROMA_SIGMA}, seconds=total,
-        regions=_regions_report(region_list or [], maps),
+        regions=_regions_report(region_list or [], maps, regions_source),
     )
     timing = {
         "cache_load": round(cache_load, 3),
@@ -1470,23 +1511,26 @@ def relight(
     params = Params(scene=scene, strength=strength, local_shading=local_shading,
                     highlight_clip=highlight_clip, clip_knee=clip_knee,
                     clip_max=clip_max)
-    region_list = _load_region_list(regions or inputs.regions)
+    regions_source = regions or inputs.regions
+    region_list = _load_region_list(regions_source)
     if kind == "image":
         _relight_image(inputs.gt, inputs.atmo, inputs.out, params,
                        dump_light=dump_light, report=inputs.report, started=started,
-                       region_list=region_list)
+                       region_list=region_list, regions_source=regions_source)
     else:
         conf = _conf(config, overrides)
         if atmo_kind == "video":
             _relight_video_atmo(inputs, params, conf, log,
                                 ref_frame=ref_frame, sample=sample, crf=crf,
                                 started=started, started_at=started_at,
-                                sample_at=sample_indices, region_list=region_list)
+                                sample_at=sample_indices, region_list=region_list,
+                                regions_source=regions_source)
         else:
             _relight_video(inputs, params, conf, log,
                            ref_frame=ref_frame, sample=sample, crf=crf,
                            started=started, started_at=started_at,
-                           sample_at=sample_indices, region_list=region_list)
+                           sample_at=sample_indices, region_list=region_list,
+                           regions_source=regions_source)
     if case:
         _record_into_case(case, cases_dir, inputs.out, sample is not None)
 

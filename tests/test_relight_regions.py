@@ -334,10 +334,16 @@ def test_cli_applies_regions_and_reports_them(tmp_path):
     assert int(np.abs(produced[8, 8].astype(int) - plain[8, 8].astype(int)).max()) <= 1
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    assert report["regions"]["count"] == 1
-    assert report["regions"]["enabled"] == 1
-    assert report["regions"]["regions"][0]["id"] == "r1"
-    assert report["regions"]["regions"][0]["coverage"] > 0
+    region_report = report["regions"]
+    assert region_report["count"] == 1
+    assert region_report["enabled"] == 1
+    assert region_report["regions"][0]["id"] == "r1"
+    assert region_report["regions"][0]["coverage"] > 0
+    # 报告自己带文件身份与完整定义：事后验收不依赖 regions.json 有没有被改过。
+    assert region_report["file"].endswith("regions.json")
+    assert len(region_report["sha256"]) == 64
+    assert region_report["regions"][0]["params"]["strength"] == 0.0
+    assert len(region_report["regions"][0]["verts"]) == 4
 
 
 def test_cli_report_has_null_regions_without_a_file(tmp_path):
