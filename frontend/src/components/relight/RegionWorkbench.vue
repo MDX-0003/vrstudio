@@ -35,6 +35,8 @@ const selectedId = ref<string | null>(regions.value[0]?.id ?? null)
 const mode = ref<'orbit' | 'poly'>('orbit')
 const draft = ref<LonLat[] | null>(null)
 const renamingId = ref<string | null>(null)
+/** 高亮选区：勾选时保持默认的醒目叠加，取消后只留轻量的几何参考。 */
+const highlightSelection = ref(true)
 const saving = ref(false)
 const saveState = ref<'idle' | 'pending' | 'saved' | 'error'>('idle')
 const error = ref<string | null>(props.payload.regions_error)
@@ -299,6 +301,10 @@ onBeforeUnmount(() => {
         >多边形</button>
         <button class="btn" type="button" disabled>套索</button>
         <span class="spacer"></span>
+        <label class="toggle">
+          <input v-model="highlightSelection" type="checkbox" />
+          高亮选区
+        </label>
         <span class="muted hint">选中后拖顶点改形 · 边上单击加点 · 右键删点 · 双击闭合</span>
       </div>
 
@@ -309,6 +315,7 @@ onBeforeUnmount(() => {
         :selected-id="selectedId"
         :draft="draft"
         :mode="mode"
+        :highlight="highlightSelection"
         @select="select"
         @add-point="addPoint"
         @close-draft="closeDraft"
@@ -465,6 +472,16 @@ onBeforeUnmount(() => {
 
 .hint {
   font-size: 11px;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  white-space: nowrap;
 }
 
 .btn {

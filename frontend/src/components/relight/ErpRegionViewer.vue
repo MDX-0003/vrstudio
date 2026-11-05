@@ -25,6 +25,8 @@ const props = defineProps<{
   selectedId: string | null
   draft: LonLat[] | null
   mode: 'orbit' | 'poly'
+  /** 高亮选区：勾选时是默认的醒目叠加，取消后收细边线、缩小顶点并降低透明度。 */
+  highlight: boolean
 }>()
 
 const emit = defineEmits<{
@@ -218,13 +220,15 @@ function drawOverlay(): void {
   if (!canvas || !context) return
   context.clearRect(0, 0, size.width, size.height)
   const scale = dpr
+  const dim = !props.highlight
   for (const region of props.regions) {
     if (!region.enabled) continue
     const projected = projectPolygon(region.verts, pose, size)
     const selected = region.id === props.selectedId
-    context.fillStyle = rgba(region.color, selected ? 0.26 : 0.14)
-    context.strokeStyle = region.color
-    context.lineWidth = (selected ? 3 : 1.6) * scale
+    const fillAlpha = (selected ? 0.26 : 0.14) * (dim ? 0.35 : 1)
+    context.fillStyle = rgba(region.color, fillAlpha)
+    context.strokeStyle = dim ? rgba(region.color, 0.55) : region.color
+    context.lineWidth = (selected ? 3 : 1.6) * (dim ? 0.5 : 1) * scale
     context.setLineDash(selected ? [] : [6 * scale, 4 * scale])
     if (projected.allFront) {
       const path = new Path2D()
@@ -245,14 +249,15 @@ function drawOverlay(): void {
     }
     context.setLineDash([])
     if (selected) {
+      const half = (dim ? 2.5 : 4) * scale
       for (const [lon, lat] of region.verts) {
         const point = project(lon, lat, pose, size)
         if (!point) continue
-        context.fillStyle = '#fff'
-        context.strokeStyle = region.color
-        context.lineWidth = 2 * scale
+        context.fillStyle = dim ? 'rgba(255,255,255,0.45)' : '#fff'
+        context.strokeStyle = dim ? rgba(region.color, 0.55) : region.color
+        context.lineWidth = (dim ? 1.2 : 2) * scale
         context.beginPath()
-        context.rect(point[0] - 4 * scale, point[1] - 4 * scale, 8 * scale, 8 * scale)
+        context.rect(point[0] - half, point[1] - half, half * 2, half * 2)
         context.fill()
         context.stroke()
       }
@@ -266,9 +271,9 @@ function drawOverlay(): void {
       context.textBaseline = 'middle'
       const label = region.name
       const width = context.measureText(label).width
-      context.fillStyle = 'rgba(15,23,42,.72)'
+      context.fillStyle = dim ? 'rgba(15,23,42,.42)' : 'rgba(15,23,42,.72)'
       context.fillRect(cx - width / 2 - 5 * scale, cy - 8 * scale, width + 10 * scale, 16 * scale)
-      context.fillStyle = '#e2e8f0'
+      context.fillStyle = dim ? 'rgba(226,232,240,.62)' : '#e2e8f0'
       context.fillText(label, cx, cy)
     }
   }
@@ -493,7 +498,7 @@ watch(() => props.sourceUrl, (url) => applySource(url), {
 })
 
 watch(
-  () => [props.regions, props.selectedId, props.draft, props.mode],
+  () => [props.regions, props.selectedId, props.draft, props.mode, props.highlight],
   () => {
     dirty = true
   },
