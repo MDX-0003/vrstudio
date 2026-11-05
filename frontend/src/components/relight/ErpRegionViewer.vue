@@ -59,6 +59,7 @@ let uniforms: Record<string, WebGLUniformLocation | null> = {}
 let ready = false
 let lastFrameKey = ''
 let drag: { x: number; y: number; yaw: number; pitch: number } | null = null
+let dragButton = 0
 let vertexDrag: { id: string; index: number } | null = null
 let moved = false
 let cursor: Vec2 | null = null
@@ -384,8 +385,12 @@ function edgeInsert(point: Vec2): { index: number; lon: number; lat: number } | 
 function onPointerDown(event: PointerEvent): void {
   const point = localPoint(event)
   if (props.mode === 'poly') {
-    const [lon, lat] = unproject(point[0], point[1], pose, size)
-    emit('add-point', lon, lat)
+    // 绘制时拖动画布就是转向（左/中/右键都行），松手没移动才算落一个顶点。
+    if (event.button === 1) event.preventDefault()
+    drag = { x: event.clientX, y: event.clientY, yaw: pose.yaw, pitch: pose.pitch }
+    dragButton = event.button
+    moved = false
+    overlay.value?.setPointerCapture(event.pointerId)
     return
   }
   const vertex = vertexAt(point)
@@ -395,6 +400,7 @@ function onPointerDown(event: PointerEvent): void {
     return
   }
   drag = { x: event.clientX, y: event.clientY, yaw: pose.yaw, pitch: pose.pitch }
+  dragButton = event.button
   moved = false
   overlay.value?.setPointerCapture(event.pointerId)
 }
@@ -421,6 +427,16 @@ function onPointerMove(event: PointerEvent): void {
 }
 
 function onPointerUp(event: PointerEvent): void {
+  if (props.mode === 'poly') {
+    const clicked = drag !== null && !moved && dragButton === 0
+    drag = null
+    if (clicked) {
+      const point = localPoint(event)
+      const [lon, lat] = unproject(point[0], point[1], pose, size)
+      emit('add-point', lon, lat)
+    }
+    return
+  }
   if (vertexDrag) {
     vertexDrag = null
     return
@@ -445,6 +461,11 @@ function onPointerUp(event: PointerEvent): void {
 }
 
 function onContextMenu(event: MouseEvent): void {
+  if (props.mode === 'poly') {
+    // 绘制时右键用于拖动转向，不弹浏览器菜单，也不删顶点。
+    event.preventDefault()
+    return
+  }
   const point = localPoint(event)
   const vertex = vertexAt(point)
   if (!vertex) return
@@ -598,7 +619,13 @@ defineExpose({ resetView, togglePlay, seek })
       <div class="tag">
         <span class="chip">GT · {{ currentTime.toFixed(1) }}s</span>
       </div>
-      <div class="hint">拖动转向 · 滚轮缩放 · 点击区域选中</div>
+      <div class="hint">
+        {{
+          props.mode === 'poly'
+            ? '拖动画面转向 · 单击加点 · 双击或回车闭合 · Esc 取消'
+            : '拖动转向 · 滚轮缩放 · 点击区域选中'
+        }}
+      </div>
     </div>
     <div v-if="props.media === 'video'" class="scrub">
       <button class="play" type="button" @click="togglePlay">{{ playing ? '❚❚' : '▶' }}</button>

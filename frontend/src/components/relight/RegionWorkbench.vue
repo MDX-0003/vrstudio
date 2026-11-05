@@ -271,6 +271,10 @@ function onKey(event: KeyboardEvent): void {
   } else if (event.key === 'Escape') {
     draft.value = null
     mode.value = 'orbit'
+  } else if (event.key === 'Backspace') {
+    // 落错点时回退上一个顶点，不必整个重画。
+    event.preventDefault()
+    if (draft.value?.length) draft.value = draft.value.slice(0, -1)
   }
 }
 
@@ -305,7 +309,7 @@ onBeforeUnmount(() => {
           <input v-model="highlightSelection" type="checkbox" />
           高亮选区
         </label>
-        <span class="muted hint">选中后拖顶点改形 · 边上单击加点 · 右键删点 · 双击闭合</span>
+        <span class="muted hint">绘制时拖动画面转向、单击加点 · 选中后拖顶点改形、边上单击加点、右键删点</span>
       </div>
 
       <ErpRegionViewer
