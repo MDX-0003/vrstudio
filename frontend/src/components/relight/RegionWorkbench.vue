@@ -24,6 +24,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   updated: [info: CaseInfo]
   'update:defaults': [value: DefaultParams]
+  busy: [value: boolean]
 }>()
 
 const COLORS = ['#f59e0b', '#38bdf8', '#a3e635', '#f472b6', '#c084fc']
@@ -44,6 +45,10 @@ let draftTimer: number | null = null
 const selected = computed(
   () => regions.value.find((region) => region.id === selectedId.value) ?? null,
 )
+
+/** 有未落盘的区域改动时禁止跑任务，否则可能用上一次的 regions.json。 */
+const busy = computed(() => saveState.value === 'pending' || saving.value)
+watch(busy, (value) => emit('busy', value))
 
 function fallbackFor(desc: ParamDesc): number {
   if (desc.id === 'strength') return props.defaults.strength

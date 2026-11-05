@@ -94,6 +94,8 @@ const form = ref({
 /** 默认参数（未覆盖处）：默认卡与区域卡共用同一份描述表与同一个 ParamRow。 */
 const localDefaults = ref<DefaultParams>(defaultsFromDraft({}))
 const gtUrl = computed(() => payload.value?.gt?.entry?.open_url ?? null)
+/** 区域还有未落盘的改动：期间禁用运行按钮。 */
+const regionBusy = ref(false)
 
 function onDefaults(next: DefaultParams): void {
   localDefaults.value = next
@@ -304,6 +306,7 @@ const percent = (value: number | undefined): string =>
           :defaults="localDefaults"
           @update:defaults="onDefaults"
           @updated="(info) => emit('updated', info)"
+          @busy="regionBusy = $event"
         />
 
         <div v-if="isVideo" class="param-grid ref-row">
@@ -331,7 +334,7 @@ const percent = (value: number | undefined): string =>
               size="small"
               :icon="Picture"
               :loading="running === 'sample'"
-              :disabled="gateBlocked(gate)"
+              :disabled="gateBlocked(gate) || regionBusy"
               @click="run('sample')"
             >
               先看 {{ form.sample }} 帧小样
@@ -341,7 +344,7 @@ const percent = (value: number | undefined): string =>
               size="small"
               :icon="VideoPlay"
               :loading="running === 'full'"
-              :disabled="gateBlocked(gate)"
+              :disabled="gateBlocked(gate) || regionBusy"
               @click="run('full')"
             >
               开始重打光（整段）
