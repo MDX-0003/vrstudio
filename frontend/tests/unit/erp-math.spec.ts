@@ -3,10 +3,14 @@ import {
   densify,
   lonLatFromDirection,
   directionFromLonLat,
+  isPoleCapShape,
   longitudeSpan,
   pointInPolygon,
+  pointInRegion,
   polygonSelfIntersects,
   polygonWinding,
+  regionBoundary,
+  regionErpPolygon,
   regionShapeIssue,
   project,
   unproject,
@@ -132,5 +136,43 @@ describe('erpMath', () => {
 
     const bowtie: Array<[number, number]> = [[0, 0], [10, 10], [10, 0], [0, 10]]
     expect(regionShapeIssue(bowtie)?.kind).toBe('self-intersect')
+  })
+
+  it('盖帽合成接缝短边与极点边，命中判定覆盖缺口', () => {
+    const cap: Array<[number, number]> = []
+    for (let index = 0; index <= 15; index += 1) cap.push([-170 + index * 22.6, 60])
+    expect(isPoleCapShape(cap)).toBe(true)
+    expect(regionShapeIssue(cap, 'north')).toBeNull()
+    expect(polygonSelfIntersects(regionBoundary(cap, 'north'), false)).toBe(false)
+
+    const boundary = regionBoundary(cap, 'north')
+    expect(boundary).toHaveLength(cap.length + 1)
+    expect(boundary[boundary.length - 1]).toEqual([190, 60])
+
+    const polygon = regionErpPolygon(cap, 'north')
+    expect(polygon.slice(-2)).toEqual([[190, 90], [-170, 90]])
+
+    expect(pointInRegion(0, 80, cap, 'north')).toBe(true)
+    expect(pointInRegion(175, 80, cap, 'north')).toBe(true)
+    expect(pointInRegion(-175, 80, cap, 'north')).toBe(true)
+    expect(pointInRegion(0, 50, cap, 'north')).toBe(false)
+    expect(pointInRegion(0, -80, cap, 'north')).toBe(false)
+
+    const south = cap.map(([lon]) => [lon, -60] as [number, number])
+    expect(pointInRegion(0, -80, south, 'south')).toBe(true)
+    expect(pointInRegion(0, 80, south, 'south')).toBe(false)
+    // 同一个环标记成相反极点时，取的是球面上相反的一侧。
+    expect(pointInRegion(0, -80, cap, 'south')).toBe(true)
+  })
+
+  it('盖帽要求恰好绕一圈，普通多边形不能带 pole', () => {
+    const rectangle: Array<[number, number]> = [[0, 0], [10, 0], [10, 10], [0, 10]]
+    expect(regionShapeIssue(rectangle, 'north')?.kind).toBe('winding')
+    expect(isPoleCapShape(rectangle)).toBe(false)
+
+    const twice: Array<[number, number]> = []
+    for (let index = 0; index < 16; index += 1) twice.push([index * 45, 60])
+    expect(isPoleCapShape(twice)).toBe(false)
+    expect(regionShapeIssue(twice, 'north')?.kind).toBe('winding')
   })
 })

@@ -7,6 +7,9 @@
 
 - 顶点是 ``[lon, lat]``，单位度。经度允许超出 ±180 且不 wrap：跨接缝的多边形写成
   ``179`` 与 ``181`` 两个点，光栅化时按 ±360 平移补画。
+- ``pole`` 为 ``north`` / ``south`` 时表示含该极点的盖帽：``verts`` 是绕该极点一圈的
+  闭环，光栅化时把首个顶点按 ±360 复制成接缝短边，再沿纬度 ±90 补极点边。
+  盖帽只表示极点所在的一侧，不表示环带、洞或极点的补集。
 - 参数是稀疏表：``None`` 表示沿用默认值，该通道不参与叠加。
 - 叠加按数组顺序，后一个盖在前一个上面；羽化只在该区域边界与下方值之间过渡。
 - 没有区域或全部 ``enabled = false`` 时返回 ``None``，调用方走原来的标量路径，
@@ -29,7 +32,8 @@ LAT_LIMIT = 89.5
 MAX_ABS_LON = 720.0
 """经度绝对值上限：允许绕一两圈，但拒绝明显的单位错误（例如把像素当度数）。"""
 
-_REGION_KEYS = ("id", "name", "color", "enabled", "verts", "feather_deg", "params", "ranges")
+_REGION_KEYS = ("id", "name", "color", "enabled", "verts", "pole",
+                "feather_deg", "params", "ranges")
 _PARAM_KEYS = ("strength", "local_shading", "clip")
 
 
@@ -53,6 +57,7 @@ class Region:
     color: str
     enabled: bool
     verts: tuple[tuple[float, float], ...]
+    pole: str | None
     feather_deg: float
     params: RegionParams
 
@@ -167,8 +172,12 @@ def _parse_region(raw, index: int, *, validate_geometry: bool = False) -> Region
             raise RegionError(f"{where}（{rid}）的纬度 {lat} 超出 ±{LAT_LIMIT}")
         points.append((lon, lat))
 
+    pole = raw.get("pole")
+    if pole is not None and pole not in ("north", "south"):
+        raise RegionError(f"{where}（{rid}）的 pole 必须是 north、south 或 null")
+
     if validate_geometry:
-        _check_shape(points, where, rid)
+        _check_shape(points, pole, where, rid)
 
     feather = raw.get("feather_deg", 0.0)
     if isinstance(feather, bool) or not isinstance(feather, (int, float)) or feather < 0:
@@ -209,7 +218,7 @@ def _parse_region(raw, index: int, *, validate_geometry: bool = False) -> Region
 
     return Region(
         id=rid, name=name, color=color, enabled=enabled,
-        verts=tuple(points), feather_deg=float(feather),
+        verts=tuple(points), pole=pole, feather_deg=float(feather),
         params=RegionParams(strength=strength, local_shading=shading, clip=clip),
     )
 
@@ -285,22 +294,110 @@ def _blend(field: np.ndarray, alpha: np.ndarray, value: float) -> None:
     field -= delta
 
 
-def _check_shape(points: list[tuple[float, float]], where: str, rid: str) -> None:
+def _check_shape(points: list[tuple[float, float]], pole: str | None,
+                 where: str, rid: str) -> None:
     """拒绝单个 ERP 闭合多边形装不下的形状。
 
-    两类：边界绕极点转圈（扭转量非零），以及绕出去再折返、经度跨度超过一整圈的带。
-    两者在切平面上都会自重叠，交给 ``fillPoly`` 会画成一条横带或近零的缝。
+    普通区域：扭转量必须为 0、跨度不超过 360°、边不自交。
+    盖帽（``pole`` 非空）：边界必须绕该极点恰好一圈、边不自交。
     """
     span = _longitude_span(points)
     winding = _winding(points)
-    if winding != 0:
+    if pole is None:
+        if winding != 0:
+            raise RegionError(
+                f"{where}（{rid}）的边界绕极点转了 {abs(winding)} 圈"
+                f"（经度跨度 {span:.0f}°），单个闭合多边形表示不了；请拆成两块")
+        if span > 360.0:
+            raise RegionError(
+                f"{where}（{rid}）的经度跨度 {span:.0f}° 超过一整圈，"
+                "单个闭合多边形在切平面上会自重叠；请沿经线拆成两块")
+        if _self_intersects(_unwrap(points)):
+            raise RegionError(f"{where}（{rid}）的边与边交叉")
+        return
+    if abs(winding) != 1:
         raise RegionError(
-            f"{where}（{rid}）的边界绕极点转了 {abs(winding)} 圈（经度跨度 {span:.0f}°），"
-            "单个闭合多边形表示不了；请拆成两块")
+            f"{where}（{rid}）的 pole 区域边界必须绕该极点恰好一圈，"
+            f"当前扭转量 {winding}（经度跨度 {span:.0f}°）")
     if span > 360.0:
         raise RegionError(
-            f"{where}（{rid}）的经度跨度 {span:.0f}° 超过一整圈，"
-            "单个闭合多边形在切平面上会自重叠；请沿经线拆成两块")
+            f"{where}（{rid}）的 pole 区域经度跨度 {span:.0f}° 超过一整圈，"
+            "切平面闭合后会自重叠；请沿经线拆成两块")
+    if _self_intersects(_pole_boundary(points, pole), closed=False):
+        raise RegionError(f"{where}（{rid}）的边与边交叉")
+
+
+def _pole_boundary(points: list[tuple[float, float]],
+                   pole: str) -> list[tuple[float, float]]:
+    """盖帽的真实边界：展开后的闭环，末尾补上接缝短边的复制点。"""
+    lifted = _unwrap(points)
+    first = lifted[0]
+    last = lifted[-1]
+    sign = 1.0 if last[0] >= first[0] else -1.0
+    return [*lifted, (first[0] + 360.0 * sign, first[1])]
+
+
+def _pole_polygon(points: list[tuple[float, float]],
+                  pole: str) -> list[tuple[float, float]]:
+    """盖帽在 ERP 平面上的闭合多边形：真实边界 + 两条经线边 + 极点边。"""
+    boundary = _pole_boundary(points, pole)
+    pole_lat = 90.0 if pole == "north" else -90.0
+    return [
+        *boundary,
+        (boundary[-1][0], pole_lat),
+        (boundary[0][0], pole_lat),
+    ]
+
+
+def _self_intersects(polygon: list[tuple[float, float]], *,
+                     closed: bool = True) -> bool:
+    """边与边是否交叉；相邻边不算。``closed=False`` 时不检查末边回到首点。"""
+    count = len(polygon)
+    if count < (4 if closed else 3):
+        return False
+    edge_count = count if closed else count - 1
+    for index in range(edge_count):
+        start, end = polygon[index], polygon[(index + 1) % count]
+        if start == end:
+            continue
+        for other in range(index + 1, edge_count):
+            if other == index + 1 or (closed and index == 0
+                                      and other == edge_count - 1):
+                continue
+            a, b = polygon[other], polygon[(other + 1) % count]
+            if a == b:
+                continue
+            if _segments_intersect(start, end, a, b):
+                return True
+    return False
+
+
+def _orientation(a: tuple[float, float], b: tuple[float, float],
+                 c: tuple[float, float]) -> int:
+    value = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    if abs(value) < 1e-9:
+        return 0
+    return 1 if value > 0 else -1
+
+
+def _on_segment(a: tuple[float, float], b: tuple[float, float],
+                c: tuple[float, float]) -> bool:
+    return (min(a[0], c[0]) <= b[0] <= max(a[0], c[0])
+            and min(a[1], c[1]) <= b[1] <= max(a[1], c[1]))
+
+
+def _segments_intersect(a: tuple[float, float], b: tuple[float, float],
+                        c: tuple[float, float], d: tuple[float, float]) -> bool:
+    o1 = _orientation(a, b, c)
+    o2 = _orientation(a, b, d)
+    o3 = _orientation(c, d, a)
+    o4 = _orientation(c, d, b)
+    if o1 != o2 and o3 != o4:
+        return True
+    return ((o1 == 0 and _on_segment(a, c, b))
+            or (o2 == 0 and _on_segment(a, d, b))
+            or (o3 == 0 and _on_segment(c, a, d))
+            or (o4 == 0 and _on_segment(c, b, d)))
 
 
 def _longitude_span(points: list[tuple[float, float]]) -> float:
@@ -330,7 +427,7 @@ def _winding(points: list[tuple[float, float]]) -> int:
 
 def _alpha(region: Region, width: int, height: int) -> np.ndarray | None:
     """区域掩码的羽化权重，2K 尺度 float32；多边形为空时返回 ``None``。"""
-    mask = _rasterize(region.verts, width, height)
+    mask = _rasterize(region.verts, width, height, region.pole)
     if not mask.any():
         return None
     feather_px = region.feather_deg * width / 360.0
@@ -344,11 +441,14 @@ def _alpha(region: Region, width: int, height: int) -> np.ndarray | None:
 
 
 def _rasterize(verts: tuple[tuple[float, float], ...],
-               width: int, height: int) -> np.ndarray:
-    """把球面多边形画到 ERP 网格；跨接缝时按 ±width 平移补画。"""
-    unwrapped = _unwrap(verts)
-    xs = np.array([(lon + 180.0) / 360.0 * width for lon, _ in unwrapped], dtype=np.float64)
-    ys = np.array([(90.0 - lat) / 180.0 * height for _, lat in unwrapped], dtype=np.float64)
+               width: int, height: int, pole: str | None = None) -> np.ndarray:
+    """把区域画到 ERP 网格；跨接缝时按 ±width 平移补画。
+
+    盖帽先合成 ERP 平面上的闭合多边形：真实边界 + 接缝短边 + 极点边。
+    """
+    polygon = _pole_polygon(verts, pole) if pole else _unwrap(verts)
+    xs = np.array([(lon + 180.0) / 360.0 * width for lon, _ in polygon], dtype=np.float64)
+    ys = np.array([(90.0 - lat) / 180.0 * height for _, lat in polygon], dtype=np.float64)
     points = np.stack([xs, ys], axis=1).round().astype(np.int32)
     mask = np.zeros((height, width), dtype=np.uint8)
     for shift in (-width, 0, width):

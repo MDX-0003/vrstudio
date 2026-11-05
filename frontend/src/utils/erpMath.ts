@@ -9,6 +9,7 @@
 export type LonLat = [number, number]
 export type Vec3 = [number, number, number]
 export type Vec2 = [number, number]
+export type Pole = 'north' | 'south'
 
 export interface Pose {
   yaw: number
@@ -24,6 +25,8 @@ export interface Viewport {
 export const MIN_FOV = (30 * Math.PI) / 180
 export const MAX_FOV = (120 * Math.PI) / 180
 export const MAX_PITCH = (89 * Math.PI) / 180
+/** 区域顶点的纬度上限，与引擎的 `LAT_LIMIT` 一致；极点由 `pole` 标记，不存 ±90。 */
+export const MAX_REGION_LAT = 89.5
 
 export const ERP_VERT_SRC = `
 attribute vec2 aPos;
@@ -154,12 +157,41 @@ export function unwrapLongitudes(verts: LonLat[]): LonLat[] {
   return out
 }
 
+/**
+ * 盖帽的真实边界：展开后的闭环，末尾补上接缝短边的复制点。
+ *
+ * 普通区域直接返回展开后的闭环。盖帽的末尾点是首个顶点平移 ±360 后的副本，
+ * 它代表同一条经线；这一段就是用户闭合时画下的真实短边。
+ */
+export function regionBoundary(verts: LonLat[], pole: Pole | null): LonLat[] {
+  const lifted = unwrapLongitudes(verts)
+  if (!pole || lifted.length === 0) return lifted
+  const first = lifted[0]
+  const last = lifted[lifted.length - 1]
+  const sign = last[0] >= first[0] ? 1 : -1
+  return [...lifted, [first[0] + 360 * sign, first[1]]]
+}
+
+/**
+ * 区域在 ERP 平面上的闭合多边形：普通区域是展开后的闭环；盖帽再补两条经线边
+ * 与一条跨整幅的极点边。两条经线边在球面上是同一条经线、方向相反，只用于闭合。
+ */
+export function regionErpPolygon(verts: LonLat[], pole: Pole | null): LonLat[] {
+  const boundary = regionBoundary(verts, pole)
+  if (!pole || boundary.length === 0) return boundary
+  const first = boundary[0]
+  const last = boundary[boundary.length - 1]
+  const poleLat = pole === 'north' ? 90 : -90
+  return [...boundary, [last[0], poleLat], [first[0], poleLat]]
+}
+
 /** 按最大步长细分边：屏幕上的折线因此贴近球面边界，也便于裁到前半球。 */
-export function densify(verts: LonLat[], maxStepDeg = 2): LonLat[] {
+export function densify(verts: LonLat[], maxStepDeg = 2, closed = true): LonLat[] {
   const unwrapped = unwrapLongitudes(verts)
   if (unwrapped.length < 2) return unwrapped
   const out: LonLat[] = []
-  for (let index = 0; index < unwrapped.length; index += 1) {
+  const edgeCount = closed ? unwrapped.length : unwrapped.length - 1
+  for (let index = 0; index < edgeCount; index += 1) {
     const [lon0, lat0] = unwrapped[index]
     const [lon1, lat1] = unwrapped[(index + 1) % unwrapped.length]
     const steps = Math.max(
@@ -184,26 +216,47 @@ export function projectPolygon(
   verts: LonLat[],
   pose: Pose,
   view: Viewport,
+  closed = true,
 ): ProjectedPolygon {
-  const points = densify(verts).map(([lon, lat]) => project(lon, lat, pose, view))
+  const points = densify(verts, 2, closed).map(([lon, lat]) => project(lon, lat, pose, view))
   return { points, allFront: points.every((point) => point !== null) }
 }
 
-/** 球面点是否落在多边形内；按 unwrap 后的经度做平面射线法。 */
-export function pointInPolygon(lon: number, lat: number, verts: LonLat[]): boolean {
-  const polygon = unwrapLongitudes(verts)
+/** 球面点是否落在已展开到切平面的多边形内；按平面射线法判定。 */
+function pointInLiftedPolygon(lon: number, lat: number, polygon: LonLat[]): boolean {
   if (polygon.length < 3) return false
-  let x = lon
-  while (x - polygon[0][0] > 180) x -= 360
-  while (x - polygon[0][0] < -180) x += 360
   let inside = false
   for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
     const [xi, yi] = polygon[i]
     const [xj, yj] = polygon[j]
     const crosses = yi > lat !== (yj > lat)
-    if (crosses && x < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) inside = !inside
+    if (crosses && lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) inside = !inside
   }
   return inside
+}
+
+/**
+ * 球面点是否落在区域里。
+ *
+ * 区域先展开到切平面；查询点在 x、x±360 三个代表位置上取并集，因此跨度接近 360°
+ * 的盖帽与跨接缝区域都能正确命中。
+ */
+export function pointInRegion(
+  lon: number,
+  lat: number,
+  verts: LonLat[],
+  pole: Pole | null = null,
+): boolean {
+  const polygon = regionErpPolygon(verts, pole)
+  if (polygon.length < 3) return false
+  return pointInLiftedPolygon(lon, lat, polygon)
+    || pointInLiftedPolygon(lon - 360, lat, polygon)
+    || pointInLiftedPolygon(lon + 360, lat, polygon)
+}
+
+/** 球面点是否落在普通多边形内；是 {@link pointInRegion} 的无盖帽形式。 */
+export function pointInPolygon(lon: number, lat: number, verts: LonLat[]): boolean {
+  return pointInRegion(lon, lat, verts, null)
 }
 
 /** unwrap 后的经度跨度；超过 360° 就不是球面上的简单闭合多边形了。 */
@@ -243,15 +296,39 @@ export type RegionShapeIssue =
   | { kind: 'self-intersect' }
 
 /**
+ * 闭合草稿能否建成盖帽：边界绕极点恰好一圈、经度跨度不超过 360°、真实边界不自交。
+ *
+ * 极点取哪一侧不影响这条判定，调用方再用 {@link regionShapeIssue} 带 `pole` 复核。
+ */
+export function isPoleCapShape(verts: LonLat[]): boolean {
+  if (Math.abs(polygonWinding(verts)) !== 1) return false
+  if (longitudeSpan(verts) > 360) return false
+  return !polygonSelfIntersects(regionBoundary(verts, 'north'), false)
+}
+
+/**
  * 单个闭合多边形能否表示这个区域；不能时返回原因，能表示返回 null。
  *
- * 两类形状装不下：边界绕极点转圈（扭转量非零），以及绕出去再折返、经度跨度超过
- * 一整圈的带（扭转量可能为 0，但切平面闭合后仍自重叠）。工作台只用这个函数判定，
- * 文案由调用方按 kind 生成。
+ * 普通区域装不下两类形状：边界绕极点转圈（扭转量非零），以及绕出去再折返、经度
+ * 跨度超过一整圈的带（扭转量可能为 0，但切平面闭合后仍自重叠）。盖帽要求边界绕
+ * 该极点恰好一圈且真实边界不自交。
  */
-export function regionShapeIssue(verts: LonLat[]): RegionShapeIssue | null {
+export function regionShapeIssue(
+  verts: LonLat[],
+  pole: Pole | null = null,
+): RegionShapeIssue | null {
   const span = longitudeSpan(verts)
   const winding = polygonWinding(verts)
+  if (pole) {
+    if (Math.abs(winding) !== 1) {
+      return { kind: 'winding', winding, span, hasPole: true }
+    }
+    if (span > 360) return { kind: 'span', span }
+    if (polygonSelfIntersects(regionBoundary(verts, pole), false)) {
+      return { kind: 'self-intersect' }
+    }
+    return null
+  }
   if (winding !== 0) {
     return {
       kind: 'winding',
@@ -291,20 +368,22 @@ function segmentsIntersect(a: LonLat, b: LonLat, c: LonLat, d: LonLat): boolean 
   return false
 }
 
-/** 边与边是否交叉（相邻边不算）；用于闭合前拒绝自交多边形。 */
-export function polygonSelfIntersects(verts: LonLat[]): boolean {
+/** 边与边是否交叉（相邻边不算）；``closed=false`` 时不检查末边回到首点。 */
+export function polygonSelfIntersects(verts: LonLat[], closed = true): boolean {
   const polygon = unwrapLongitudes(verts)
   const count = polygon.length
-  if (count < 4) return false
-  for (let i = 0; i < count; i += 1) {
-    for (let j = i + 1; j < count; j += 1) {
-      if (i === j) continue
-      const adjacent = (i + 1) % count === j || (j + 1) % count === i
-      if (adjacent) continue
-      if (segmentsIntersect(
-        polygon[i], polygon[(i + 1) % count],
-        polygon[j], polygon[(j + 1) % count],
-      )) return true
+  if (count < (closed ? 4 : 3)) return false
+  const edgeCount = closed ? count : count - 1
+  for (let i = 0; i < edgeCount; i += 1) {
+    const a = polygon[i]
+    const b = polygon[(i + 1) % count]
+    if (a[0] === b[0] && a[1] === b[1]) continue
+    for (let j = i + 1; j < edgeCount; j += 1) {
+      if (j === i + 1 || (closed && i === 0 && j === edgeCount - 1)) continue
+      const c = polygon[j]
+      const d = polygon[(j + 1) % count]
+      if (c[0] === d[0] && c[1] === d[1]) continue
+      if (segmentsIntersect(a, b, c, d)) return true
     }
   }
   return false

@@ -1,4 +1,5 @@
 import type { Flow, Gates } from '@/types/case'
+import type { Pole } from '@/utils/erpMath'
 
 export interface AssetDetail {
   id: string
@@ -276,6 +277,8 @@ export interface RelightRegion {
   color: string
   enabled: boolean
   verts: Array<[number, number]>
+  /** 非空表示含该极点的盖帽；缺省或 null 为普通闭合多边形（决策 89）。 */
+  pole?: Pole | null
   feather_deg: number
   params: {
     strength: number | null

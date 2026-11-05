@@ -6,13 +6,14 @@ import {
   clampFov,
   clampPitch,
   densify,
-  pointInPolygon,
+  pointInRegion,
   project,
   projectPolygon,
+  regionBoundary,
+  regionErpPolygon,
   unproject,
-  unwrapLongitudes,
 } from '@/utils/erpMath'
-import type { LonLat, Pose, Vec2 } from '@/utils/erpMath'
+import type { LonLat, Pole, Pose, Vec2 } from '@/utils/erpMath'
 import type { RelightRegion } from '@/types/case-info'
 
 /**
@@ -219,7 +220,7 @@ function drawGL(): void {
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
 }
 
-/** 在 ERP 画布上画一个多边形，跨接缝时按 ±width 补画。 */
+/** 在 ERP 画布上画区域，跨接缝时按 ±width 补画；填充与轮廓分别用各自的边界。 */
 function paintEquirect(
   context: CanvasRenderingContext2D,
   verts: LonLat[],
@@ -227,19 +228,35 @@ function paintEquirect(
   height: number,
   fill: boolean,
   stroke: boolean,
+  pole: Pole | null = null,
 ): void {
-  const polygon = unwrapLongitudes(verts)
-  for (const shift of [-width, 0, width]) {
-    context.beginPath()
-    polygon.forEach(([lon, lat], index) => {
-      const x = ((lon + shift + 180) / 360) * width
-      const y = ((90 - lat) / 180) * height
-      if (index === 0) context.moveTo(x, y)
-      else context.lineTo(x, y)
-    })
-    context.closePath()
-    if (fill) context.fill()
-    if (stroke) context.stroke()
+  if (fill) {
+    const polygon = regionErpPolygon(verts, pole)
+    for (const shift of [-width, 0, width]) {
+      context.beginPath()
+      polygon.forEach(([lon, lat], index) => {
+        const x = ((lon + shift + 180) / 360) * width
+        const y = ((90 - lat) / 180) * height
+        if (index === 0) context.moveTo(x, y)
+        else context.lineTo(x, y)
+      })
+      context.closePath()
+      context.fill()
+    }
+  }
+  if (stroke) {
+    const boundary = regionBoundary(verts, pole)
+    for (const shift of [-width, 0, width]) {
+      context.beginPath()
+      boundary.forEach(([lon, lat], index) => {
+        const x = ((lon + shift + 180) / 360) * width
+        const y = ((90 - lat) / 180) * height
+        if (index === 0) context.moveTo(x, y)
+        else context.lineTo(x, y)
+      })
+      if (!pole) context.closePath()
+      context.stroke()
+    }
   }
 }
 
@@ -260,7 +277,7 @@ function renderMask(): void {
         region.color,
         region.id === props.selectedId ? 0.26 : 0.14,
       )
-      paintEquirect(context, region.verts, MASK_WIDTH, MASK_HEIGHT, true, false)
+      paintEquirect(context, region.verts, MASK_WIDTH, MASK_HEIGHT, true, false, region.pole)
     }
   }
   maskDirty = false
@@ -296,7 +313,7 @@ function drawThumbnail(): void {
   context.fillStyle = rgba(region.color, props.highlight ? 0.35 : 0.18)
   context.strokeStyle = region.color
   context.lineWidth = 2
-  paintEquirect(context, region.verts, width, height, true, true)
+  paintEquirect(context, region.verts, width, height, true, true, region.pole)
 }
 
 function rgba(hex: string, alpha: number): string {
@@ -327,7 +344,10 @@ function drawOverlay(): void {
   const dim = !props.highlight
   for (const region of props.regions) {
     if (!region.enabled) continue
-    const projected = projectPolygon(region.verts, pose, size)
+    const outline = region.pole
+      ? regionBoundary(region.verts, region.pole)
+      : region.verts
+    const projected = projectPolygon(outline, pose, size, !region.pole)
     const selected = region.id === props.selectedId
     const fillAlpha = selected ? 0.26 : 0.14
     context.fillStyle = rgba(region.color, fillAlpha)
@@ -557,7 +577,7 @@ function onPointerUp(event: PointerEvent): void {
       const [lon, lat] = unproject(point[0], point[1], pose, size)
       for (let index = props.regions.length - 1; index >= 0; index -= 1) {
         const region = props.regions[index]
-        if (region.enabled && pointInPolygon(lon, lat, region.verts)) {
+        if (region.enabled && pointInRegion(lon, lat, region.verts, region.pole)) {
           emit('select', region.id)
           break
         }

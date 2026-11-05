@@ -49,7 +49,7 @@ def textured_erp(width: int = 480, height: int | None = None, seed: int = 3) -> 
 
 
 def region_doc(verts, *, strengths=None, shading=None, clip=None,
-               feather=0.0, enabled=True, name="r1") -> dict:
+               feather=0.0, enabled=True, name="r1", pole=None) -> dict:
     params: dict = {}
     if strengths is not None:
         params["strength"] = strengths
@@ -62,6 +62,7 @@ def region_doc(verts, *, strengths=None, shading=None, clip=None,
         "regions": [{
             "id": name, "name": name, "color": "#f59e0b", "enabled": enabled,
             "verts": [list(point) for point in verts],
+            "pole": pole,
             "feather_deg": feather, "params": params, "ranges": None,
         }],
     }
@@ -121,9 +122,76 @@ def test_parse_rejects_ranges_clip_and_geometry_limits():
         parse_regions(doc)
 
 
-def _cap_ring() -> list[list[float]]:
-    """跨度 339° 的绕极盖帽：-170° 走到 169°，纬度 60°。"""
-    return [[-170.0 + index * 22.6, 60.0] for index in range(16)]
+def _cap_ring(lat: float = 60.0) -> list[list[float]]:
+    """跨度 339° 的绕极盖帽：-170° 走到 169°，纬度 ``lat``。"""
+    return [[-170.0 + index * 22.6, lat] for index in range(16)]
+
+
+def test_parse_accepts_a_pole_cap_and_validates_the_field():
+    regions = parse_regions(region_doc(_cap_ring(), pole="north"),
+                            validate_geometry=True)
+    assert regions[0].pole == "north"
+
+    bad = region_doc(_cap_ring(), pole="up")
+    with pytest.raises(RegionError, match="pole"):
+        parse_regions(bad)
+
+    # 不绕极点的普通多边形不能标记成盖帽。
+    with pytest.raises(RegionError, match="恰好一圈"):
+        parse_regions(region_doc([[-30, -20], [30, -20], [0, 20]], pole="north"),
+                      validate_geometry=True)
+
+    # 绕两圈的边界也不能标记成盖帽。
+    twice = [[index * 45.0, 60.0] for index in range(16)]
+    with pytest.raises(RegionError, match="恰好一圈"):
+        parse_regions(region_doc(twice, pole="north"), validate_geometry=True)
+
+
+def test_strict_geometry_rejects_self_intersection():
+    bowtie = region_doc([[0, 0], [10, 10], [10, 0], [0, 10]])
+    with pytest.raises(RegionError, match="交叉"):
+        parse_regions(bowtie, validate_geometry=True)
+
+
+def test_rasterize_pole_cap_covers_the_pole_side():
+    for pole, lat, inside_row, outside_row in (
+        ("north", 60.0, 10, 100),
+        ("south", -60.0, 170, 80),
+    ):
+        regions = parse_regions(
+            region_doc(_cap_ring(lat), pole=pole, strengths=0.0),
+            validate_geometry=True)
+        maps = build_maps(regions, (360, 180), strength=1.0,
+                          local_shading=0.35, clip=None)
+        assert maps is not None
+        field = maps.strength
+        # 极点在首行/末行；边界两侧各取一行判断。
+        for column in (0, 90, 180, 270, 355):
+            assert field[inside_row, column] == pytest.approx(0.0), (pole, column)
+        assert field[outside_row, 180] == pytest.approx(1.0)
+        # 整行对照解析判定：60° 到极点是 30/180 的行，所有经度都要被覆盖。
+        if pole == "north":
+            assert np.allclose(field[:31, :], 0.0)
+            assert np.allclose(field[40:, :], 1.0)
+        else:
+            assert np.allclose(field[151:, :], 0.0)
+            assert np.allclose(field[:140, :], 1.0)
+        # 360×180 的 ERP 上，60° 到极点是 30/180 的行。
+        assert 0.15 < maps.coverage["r1"] < 0.18
+
+
+def test_rasterize_westward_cap_matches_eastward():
+    def cap_mask(verts):
+        regions = parse_regions(region_doc(verts, pole="north", strengths=0.0),
+                                validate_geometry=True)
+        maps = build_maps(regions, (360, 180), strength=1.0,
+                          local_shading=0.35, clip=None)
+        assert maps is not None
+        return maps.strength
+
+    east = cap_mask(_cap_ring())
+    west = cap_mask([[170.0 - index * 22.6, 60.0] for index in range(16)])
+    assert np.array_equal(east, west)
 
 
 def test_strict_geometry_rejects_pole_caps_and_long_bands():
@@ -319,6 +387,28 @@ def test_cli_rejects_a_region_that_wraps_the_pole(tmp_path):
     ])
     assert result.exit_code == 2
     assert "绕极点" in result.output
+
+
+def test_cli_applies_a_pole_cap_and_reports_it(tmp_path):
+    gt_path, atmo_path = _write_case(tmp_path)
+    gt = cv2.imread(str(gt_path), cv2.IMREAD_COLOR)
+    regions_path = tmp_path / "regions.json"
+    regions_path.write_text(json.dumps(region_doc(
+        _cap_ring(), pole="north", strengths=0.0)), encoding="utf-8")
+
+    out_path = tmp_path / "cap.png"
+    report_path = tmp_path / "cap_report.json"
+    result = runner.invoke(app, [
+        "relight", "--gt", str(gt_path), "--atmo", str(atmo_path),
+        "--out", str(out_path), "--regions", str(regions_path),
+        "--report", str(report_path),
+    ])
+    assert result.exit_code == 0, result.output
+    produced = cv2.imread(str(out_path), cv2.IMREAD_COLOR)
+    # 256×128 的 ERP 上，纬度 80° 落在第 7 行，位于北极盖帽内。
+    assert np.array_equal(produced[7, 128], gt[7, 128])
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["regions"]["regions"][0]["pole"] == "north"
 
 
 def test_cli_rejects_sample_at_on_image_gt(tmp_path):

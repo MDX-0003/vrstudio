@@ -96,6 +96,8 @@ const localDefaults = ref<DefaultParams>(defaultsFromDraft({}))
 const gtUrl = computed(() => payload.value?.gt?.entry?.open_url ?? null)
 /** 区域还有未落盘的改动：期间禁用运行按钮。 */
 const regionBusy = ref(false)
+/** 有区域装不下或自交：引擎会按参数错拒绝，先在界面上挡住。 */
+const regionInvalid = ref(false)
 
 function onDefaults(next: DefaultParams): void {
   localDefaults.value = next
@@ -307,6 +309,7 @@ const percent = (value: number | undefined): string =>
           :defaults="localDefaults"
           @update:defaults="onDefaults"
           @busy="regionBusy = $event"
+          @invalid="regionInvalid = $event"
         />
 
         <div v-if="isVideo" class="param-grid ref-row">
@@ -334,7 +337,7 @@ const percent = (value: number | undefined): string =>
               size="small"
               :icon="Picture"
               :loading="running === 'sample'"
-              :disabled="gateBlocked(gate) || regionBusy"
+              :disabled="gateBlocked(gate) || regionBusy || regionInvalid"
               @click="run('sample')"
             >
               先看 {{ form.sample }} 帧小样
@@ -344,7 +347,7 @@ const percent = (value: number | undefined): string =>
               size="small"
               :icon="VideoPlay"
               :loading="running === 'full'"
-              :disabled="gateBlocked(gate) || regionBusy"
+              :disabled="gateBlocked(gate) || regionBusy || regionInvalid"
               @click="run('full')"
             >
               开始重打光（整段）
@@ -356,11 +359,12 @@ const percent = (value: number | undefined): string =>
             size="small"
             :icon="VideoPlay"
             :loading="running === 'full'"
-            :disabled="gateBlocked(gate)"
+            :disabled="gateBlocked(gate) || regionInvalid"
             @click="run('full')"
           >
             开始重打光
           </el-button>
+          <span v-if="regionInvalid" class="invalid-hint">有区域不合法，先在区域工作台修正或删除</span>
           <span v-if="isVideo" class="muted">整段逐帧复用同一份光照场；8K 单帧约 3–4 秒</span>
         </div>
 
@@ -617,6 +621,12 @@ const percent = (value: number | undefined): string =>
   font-size: var(--text-sm);
   font-weight: 400;
   color: var(--color-text-muted);
+}
+
+.invalid-hint {
+  margin-left: var(--space-2);
+  font-size: var(--text-xs);
+  color: #92400e;
 }
 
 .timing-line {

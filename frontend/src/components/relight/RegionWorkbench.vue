@@ -8,8 +8,8 @@ import type { DefaultParams, ParamDesc } from '@/constants/relightParams'
 import { saveRelightRegions } from '@/api/relight'
 import { saveRelightDraft } from '@/api/case'
 import type { RelightPayload, RelightRegion } from '@/types/case-info'
-import type { LonLat } from '@/utils/erpMath'
-import { regionShapeIssue } from '@/utils/erpMath'
+import type { LonLat, Pole } from '@/utils/erpMath'
+import { MAX_REGION_LAT, isPoleCapShape, regionShapeIssue } from '@/utils/erpMath'
 import type { RegionShapeIssue } from '@/utils/erpMath'
 
 /**
@@ -26,6 +26,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:defaults': [value: DefaultParams]
   busy: [value: boolean]
+  invalid: [value: boolean]
 }>()
 
 const COLORS = ['#f59e0b', '#38bdf8', '#a3e635', '#f472b6', '#c084fc']
@@ -39,6 +40,10 @@ const draft = ref<LonLat[] | null>(null)
 const renamingId = ref<string | null>(null)
 /** 高亮选区：勾选时保持默认的醒目叠加，取消后只留轻量的几何参考。 */
 const highlightSelection = ref(true)
+/** 盖帽确认：闭合时绕极点一圈的草稿先停在这里，选完上方/下方再保存。 */
+const capVisible = ref(false)
+const capPole = ref<Pole>('north')
+const capPoints = ref<LonLat[] | null>(null)
 const saving = ref(false)
 const saveState = ref<'idle' | 'pending' | 'saved' | 'error'>('idle')
 const error = ref<string | null>(props.payload.regions_error)
@@ -55,6 +60,10 @@ const selected = computed(
 /** 有未落盘的区域改动时禁止跑任务，否则可能用上一次的 regions.json。 */
 const busy = computed(() => saveState.value === 'pending' || saving.value)
 watch(busy, (value) => emit('busy', value))
+
+/** 已存在的区域不合法时同样禁止运行：引擎会在读取时按参数错拒绝。 */
+const invalidCount = computed(() => regions.value.filter(regionInvalid).length)
+watch(invalidCount, (value) => emit('invalid', value > 0), { immediate: true })
 
 function fallbackFor(desc: ParamDesc): number {
   if (desc.id === 'strength') return props.defaults.strength
@@ -147,7 +156,7 @@ function select(id: string): void {
 
 /** 已存在的区域也可能不合法（旧数据或手改）：列表里标出来，避免静默画错。 */
 function regionInvalid(region: RelightRegion): boolean {
-  return regionShapeIssue(region.verts) !== null
+  return regionShapeIssue(region.verts, region.pole ?? null) !== null
 }
 
 /** 把形状问题翻成用户能据此改形的说明。 */
@@ -167,6 +176,46 @@ function shapeIssueMessage(issue: RegionShapeIssue): string {
   return '多边形的边与边交叉，请调整顶点后再闭合。'
 }
 
+function addRegion(points: LonLat[], pole: Pole | null): void {
+  const index = regions.value.length + 1
+  const region: RelightRegion = {
+    id: `r${Date.now().toString(36)}`,
+    name: `区域 ${index}`,
+    color: COLORS[(index - 1) % COLORS.length],
+    enabled: true,
+    verts: points,
+    pole,
+    feather_deg: 3,
+    params: emptyRegionParams(),
+    ranges: null,
+  }
+  regions.value = [...regions.value, region]
+  selectedId.value = region.id
+  draft.value = null
+  mode.value = 'orbit'
+  scheduleRegionSave()
+}
+
+/** 确认盖帽：草稿点与选中的极点一起落成区域。 */
+function confirmCap(): void {
+  const points = capPoints.value
+  if (!points) return
+  addRegion(points, capPole.value)
+  capVisible.value = false
+  capPoints.value = null
+}
+
+/** 取消盖帽：保留草稿点，用户可以继续加点、调整后重试。 */
+function cancelCap(): void {
+  capVisible.value = false
+  capPoints.value = null
+  ElMessage.info('已保留草稿；按 Esc 取消，或调整顶点后再回车')
+}
+
+function onCapClosed(): void {
+  capPoints.value = null
+}
+
 function startDraw(): void {
   if (regions.value.length >= MAX_REGIONS) {
     ElMessage.warning(`区域最多 ${MAX_REGIONS} 个`)
@@ -179,7 +228,12 @@ function startDraw(): void {
 function addPoint(lon: number, lat: number): void {
   if (!draft.value) draft.value = []
   if (draft.value.length >= MAX_VERTICES) return
-  draft.value = [...draft.value, [lon, lat]]
+  draft.value = [...draft.value, [lon, clampLat(lat)]]
+}
+
+/** 反投影可以落到 ±90°，引擎只接受 ±89.5°；极点由盖帽标记表示。 */
+function clampLat(lat: number): number {
+  return Math.max(-MAX_REGION_LAT, Math.min(MAX_REGION_LAT, lat))
 }
 
 function closeDraft(): void {
@@ -197,42 +251,33 @@ function closeDraft(): void {
     mode.value = 'orbit'
     return
   }
-  // 切平面上的单个闭合多边形装不下两类形状：绕极点转圈，以及绕出去再折返、
-  // 跨度超过一整圈的带。自交单独拒绝。
+  // 绕极点恰好一圈的草稿先问清楚要哪一侧；其余装不下的形状直接拒绝。
+  if (isPoleCapShape(points)) {
+    const meanLat = points.reduce((sum, [, lat]) => sum + lat, 0) / points.length
+    capPole.value = meanLat >= 0 ? 'north' : 'south'
+    capPoints.value = points
+    capVisible.value = true
+    return
+  }
   const issue = regionShapeIssue(points)
   if (issue) {
     ElMessage.error(shapeIssueMessage(issue))
     return
   }
-  const index = regions.value.length + 1
-  const region: RelightRegion = {
-    id: `r${Date.now().toString(36)}`,
-    name: `区域 ${index}`,
-    color: COLORS[(index - 1) % COLORS.length],
-    enabled: true,
-    verts: points,
-    feather_deg: 3,
-    params: emptyRegionParams(),
-    ranges: null,
-  }
-  regions.value = [...regions.value, region]
-  selectedId.value = region.id
-  draft.value = null
-  mode.value = 'orbit'
-  scheduleRegionSave()
+  addRegion(points, null)
 }
 
 function moveVertex(id: string, index: number, lon: number, lat: number): void {
   const region = regions.value.find((item) => item.id === id)
   if (!region) return
-  region.verts[index] = [lon, lat]
+  region.verts[index] = [lon, clampLat(lat)]
   scheduleRegionSave()
 }
 
 function insertVertex(id: string, index: number, lon: number, lat: number): void {
   const region = regions.value.find((item) => item.id === id)
   if (!region || region.verts.length >= MAX_VERTICES) return
-  region.verts.splice(index, 0, [lon, lat])
+  region.verts.splice(index, 0, [lon, clampLat(lat)])
   scheduleRegionSave()
 }
 
@@ -295,6 +340,7 @@ watch(() => props.payload.regions_error, (value) => {
 })
 
 function onKey(event: KeyboardEvent): void {
+  if (capVisible.value) return
   if (mode.value !== 'poly') return
   if (event.key === 'Enter') {
     event.preventDefault()
@@ -401,6 +447,7 @@ onBeforeUnmount(() => {
             />
             <span v-else class="name" @dblclick.stop="startRename(region.id)">{{ region.name }}</span>
             <span v-if="regionInvalid(region)" class="chip warn" title="这个区域绕极点转圈、经度跨度超过一整圈或边自交，单个闭合多边形表示不了">⚠</span>
+            <span v-if="region.pole" class="chip small">{{ region.pole === 'north' ? '包含上方' : '包含下方' }}</span>
             <span class="chip small">整段</span>
             <button class="icon" type="button" :title="region.enabled ? '停用（不参与合成）' : '启用'" @click.stop="toggleEnabled(region.id)">
               {{ region.enabled ? '◉' : '○' }}
@@ -477,6 +524,26 @@ onBeforeUnmount(() => {
 
       <el-alert v-if="error" type="warning" :closable="false" :title="error" />
     </div>
+
+    <el-dialog
+      v-model="capVisible"
+      title="这个区域绕极点一圈"
+      width="360px"
+      append-to-body
+      @closed="onCapClosed"
+    >
+      <p class="muted tip">
+        区域取极点所在的一侧；接缝短边与极点边由渲染合成，不会出现在顶点里。
+      </p>
+      <el-radio-group v-model="capPole">
+        <el-radio value="north">包含上方</el-radio>
+        <el-radio value="south">包含下方</el-radio>
+      </el-radio-group>
+      <template #footer>
+        <button class="btn" type="button" @click="cancelCap">取消</button>
+        <button class="btn on" type="button" @click="confirmCap">建成盖帽</button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -580,7 +647,7 @@ onBeforeUnmount(() => {
 
 .region-row {
   display: grid;
-  grid-template-columns: 10px 1fr auto auto auto;
+  grid-template-columns: 10px 1fr auto auto auto auto auto;
   align-items: center;
   gap: var(--space-2);
   padding: 6px 8px;

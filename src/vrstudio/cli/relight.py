@@ -332,6 +332,7 @@ def _regions_report(region_list: list[regions_mod.Region],
                 "id": region.id,
                 "name": region.name,
                 "enabled": region.enabled,
+                "pole": region.pole,
                 "feather_deg": region.feather_deg,
                 "verts": [[round(lon, 6), round(lat, 6)] for lon, lat in region.verts],
                 "params": {
