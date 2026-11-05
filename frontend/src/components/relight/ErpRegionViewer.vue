@@ -334,6 +334,31 @@ function visibleRuns(points: Array<Vec2 | null>): Vec2[][] {
   return runs
 }
 
+/**
+ * 把一条经纬度折线投影后只画可见段。
+ *
+ * 草稿折线与「最后一个顶点 → 鼠标」的预览都走这里：边在经纬度平面上线性插值，
+ * 投影后是曲线；端点转到相机背后时，靠近鼠标的那一段仍然可见，虚线不会整段消失。
+ */
+function strokeVisibleLonLat(
+  context: CanvasRenderingContext2D,
+  verts: LonLat[],
+  closed = false,
+): void {
+  if (verts.length < 2) return
+  const projected = densify(verts, 2, closed)
+    .map(([lon, lat]) => project(lon, lat, pose, size))
+  for (const run of visibleRuns(projected)) {
+    if (run.length < 2) continue
+    context.beginPath()
+    context.moveTo(run[0][0], run[0][1])
+    for (let index = 1; index < run.length; index += 1) {
+      context.lineTo(run[index][0], run[index][1])
+    }
+    context.stroke()
+  }
+}
+
 function drawOverlay(): void {
   const canvas = overlay.value
   const context = canvas?.getContext('2d')
@@ -402,32 +427,18 @@ function drawOverlay(): void {
     }
   }
   if (props.draft?.length) {
-    const points = props.draft.map(([lon, lat]) => project(lon, lat, pose, size))
     context.strokeStyle = '#fbbf24'
     context.lineWidth = 2 * scale
     context.setLineDash([5 * scale, 4 * scale])
-    context.beginPath()
-    let started = false
-    for (const point of points) {
-      if (!point) {
-        started = false
-        continue
-      }
-      if (!started) {
-        context.moveTo(point[0], point[1])
-        started = true
-      } else context.lineTo(point[0], point[1])
-    }
-    context.stroke()
-    const last = points[points.length - 1]
-    if (last && cursor) {
-      context.beginPath()
-      context.moveTo(last[0], last[1])
-      context.lineTo(cursor[0], cursor[1])
-      context.stroke()
+    strokeVisibleLonLat(context, props.draft)
+    const lastVertex = props.draft[props.draft.length - 1]
+    if (lastVertex && cursor) {
+      const [cursorLon, cursorLat] = unproject(cursor[0], cursor[1], pose, size)
+      strokeVisibleLonLat(context, [lastVertex, [cursorLon, cursorLat]])
     }
     context.setLineDash([])
-    for (const point of points) {
+    for (const [lon, lat] of props.draft) {
+      const point = project(lon, lat, pose, size)
       if (!point) continue
       context.fillStyle = '#fbbf24'
       context.beginPath()
