@@ -50,8 +50,9 @@ def gate_registration(reg, min_band_correlation: float = 0.60,
     Correlation asks "are these two bands the same scene?"; a reframed canvas
     scores near zero while a mere brightness gradient still scores ~0.95. A flat
     cost curve means ``d*`` may be a coincidental match and is a warning, not a
-    failure. ``reg`` is duck-typed: both :class:`RegistrationResult` and the
-    report dataclass expose ``quality`` and ``correlation``.
+    failure -- :func:`applied_shift` turns that warning into "blend at 0".
+    ``reg`` is duck-typed: both :class:`RegistrationResult` and the report
+    dataclass expose ``quality`` and ``correlation``.
     """
     if not np.isfinite(reg.quality):
         return "ok"
@@ -60,6 +61,17 @@ def gate_registration(reg, min_band_correlation: float = 0.60,
     if reg.quality < warn_quality:
         return "warn"
     return "ok"
+
+
+def applied_shift(reg, gate: str) -> int:
+    """The shift the blend may use, given the canvas-premise gate.
+
+    ``warn`` means the cost curve is flat (``quality`` near 1): ``d*`` is a
+    coincidental match, and rolling the band by it duplicates ``|d*|`` columns
+    inside the blend instead of aligning anything. The detected value stays out
+    of the render -- the caller records 0 in the report and logs the detection.
+    """
+    return 0 if gate == "warn" else int(reg.d_star)
 
 
 def to_gray(frame: np.ndarray) -> np.ndarray:

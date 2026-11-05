@@ -32,7 +32,7 @@ from .mask import make_mask
 from .pipeline import TransformContext, apply_chain, build_chain
 from .recompose_core import (RecomposeSpec, finalize, recompose, restore_canvas,
                              slice_regions)
-from .registration import (RegistrationResult, circular_translate,
+from .registration import (RegistrationResult, applied_shift, circular_translate,
                            gate_registration)
 from .verify_core import SeamMetrics, seam_metrics, verdict
 
@@ -201,14 +201,15 @@ def stitch_image(
 ) -> ImageStitch:
     """Turn one generated 21:9 canvas into a closed 2:1 panorama.
 
-    ``follow_input`` scales the geometry to the generated image's pixel density
-    instead of the case's source resolution; the output then keeps the source
-    aspect at a smaller size. It falls back to the case resolution when the input
-    is not smaller or the scaled band would be too narrow.
+    ``follow_input`` derives the output geometry from the generated image's own
+    size: the canvas is the generated raster, the band is what its aspect implies,
+    and the output keeps the source aspect at that size. It falls back to the case
+    resolution when the derived band would be too narrow or when the derived size
+    equals the case resolution.
 
     Raises :class:`ImageFlowError` when the model reframed the canvas (band
     correlation below the threshold) or the manifest has no redundancy. A flat
-    cost curve is only a warning: ``d*`` may be a coincidental match.
+    cost curve is only a warning, and it is blended without a shift.
     """
     if generated.ndim != 3 or generated.shape[2] != 3:
         raise ImageFlowError(
@@ -221,7 +222,7 @@ def stitch_image(
 
     output_plan = plan
     if follow_input:
-        scaled = follow_input_plan(plan, generated.shape[1])
+        scaled = follow_input_plan(plan, (generated.shape[1], generated.shape[0]))
         if scaled is not None:
             output_plan = scaled
     mode = "input" if output_plan is not plan else "case"
@@ -245,7 +246,10 @@ def stitch_image(
             f"likely cropped or reframed the canvas, so slicing would put the seam "
             f"in the wrong place")
 
-    out = finalize(recompose(canvas, replace(spec, d_star=reg.d_star)))
+    shift = applied_shift(reg, gate)
+    if shift != reg.d_star:
+        reg = replace(reg, d_star=shift)
+    out = finalize(recompose(canvas, replace(spec, d_star=shift)))
     metrics = seam_metrics(out, interior_band)
     status, reasons = verdict(metrics, None, max_wrap_percentile,
                               worst_interior_tol)

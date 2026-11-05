@@ -1529,10 +1529,10 @@ def _relight_step_files(case: case_mod.Case, cdir: Path) -> dict:
 def _output_options(case: case_mod.Case, cdir: Path) -> list[dict]:
     """Output sizes this flow can produce right now.
 
-    The second option follows the recompose/merge input's pixel density; it is
-    computed with the same ``follow_input_plan`` the CLIs use, so the page never
-    re-implements the scale rule. The option is absent when the input is not
-    smaller or the scaled band would be too narrow.
+    The second option is derived from the recompose/merge input's own size (not
+    from the case canvas), computed with the same ``follow_input_plan`` the CLIs
+    use, so the page never re-implements the rule. The option is absent when the
+    input cannot be followed or the derived size equals the case resolution.
     """
     plan = None
     input_path: Path | None = None
@@ -1556,9 +1556,10 @@ def _output_options(case: case_mod.Case, cdir: Path) -> list[dict]:
     options = [{"mode": "case", "width": plan.W, "height": plan.H}]
     if input_path is not None and input_path.is_file():
         kind = "video" if input_path.suffix.lower() in _VIDEO_EXTS else "image"
-        width = _media_meta(input_path, kind).get("width")
-        if width:
-            scaled = follow_input_plan(plan, int(width))
+        meta = _media_meta(input_path, kind)
+        width, height = meta.get("width"), meta.get("height")
+        if width and height:
+            scaled = follow_input_plan(plan, (int(width), int(height)))
             if scaled is not None:
                 options.append({"mode": "input", "width": scaled.W, "height": scaled.H})
     return options

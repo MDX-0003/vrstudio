@@ -7,6 +7,7 @@ closure identity at the scaled size rather than only checking numbers.
 from __future__ import annotations
 
 from fractions import Fraction
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -21,6 +22,7 @@ from vrstudio.redraw.image import pad_image, stitch_image
 from vrstudio.redraw.manifest import from_image_plan
 from vrstudio.redraw.padding import pad_horizontal
 from vrstudio.redraw.recompose_core import RecomposeSpec, recompose_u8
+from vrstudio.redraw.registration import applied_shift
 from vrstudio.web import app as web_app
 
 ASPECT = Fraction(21, 9)
@@ -48,22 +50,34 @@ def _case_plan(width: int = 384, height: int = 192):
 
 def test_scaled_plan_matches_the_input_density_and_keeps_2_to_1():
     plan = _case_plan(8192, 4096)
-    scaled = follow_input_plan(plan, 1000)
+    scaled = follow_input_plan(plan, (1000, 428))
     assert scaled is not None
     assert (scaled.W, scaled.H, scaled.Wc, scaled.L, scaled.P) == (856, 428, 1000, 144, 72)
     assert scaled.W == 2 * scaled.H
     assert_closure(scaled)
 
 
-def test_input_at_or_above_the_source_is_not_followed():
+def test_an_input_larger_than_the_case_is_followed():
+    """The input is a canvas: its content region is wider than the source."""
     plan = _case_plan(8192, 4096)
-    assert follow_input_plan(plan, plan.W) is None
-    assert follow_input_plan(plan, plan.Wc) is None
+    scaled = follow_input_plan(plan, (12000, 5142))
+    assert scaled is not None
+    assert scaled.W > plan.W
+    assert scaled.Wc == 12000
+    assert scaled.H == 5142
+    assert_closure(scaled)
+
+
+def test_input_at_the_case_resolution_is_not_followed():
+    plan = _case_plan(8192, 4096)
+    assert follow_input_plan(plan, plan.canvas_size) is None
 
 
 def test_input_too_small_for_a_band_is_not_followed():
     plan = _case_plan(8192, 4096)
-    assert follow_input_plan(plan, 20) is None
+    assert follow_input_plan(plan, (20, 8)) is None
+    assert follow_input_plan(plan, (0, 0)) is None
+    assert follow_input_plan(plan, (1024, 1024)) is None      # narrower than the source
 
 
 # ── 视频单帧核心 ────────────────────────────────────────────────────────
@@ -71,7 +85,7 @@ def test_input_too_small_for_a_band_is_not_followed():
 
 def test_scaled_recompose_is_a_rotation_at_the_scaled_geometry():
     case_plan = _case_plan()
-    scaled = follow_input_plan(case_plan, 224)
+    scaled = follow_input_plan(case_plan, (224, 96))
     assert scaled is not None
     src = synthetic_erp(scaled.W, scaled.H, seed=11)
     canvas = pad_horizontal(src, scaled.P).astype(np.float64)
@@ -96,7 +110,7 @@ def _case_pad(tmp_path):
 def test_scaled_stitch_is_a_rotation_at_the_scaled_geometry(tmp_path):
     case_pad = _case_pad(tmp_path)
     case_plan = case_pad.manifest.to_pad_plan()
-    scaled = follow_input_plan(case_plan, 224)
+    scaled = follow_input_plan(case_plan, (224, 96))
     assert scaled is not None
     src = synthetic_erp(scaled.W, scaled.H, seed=7)
     canvas = pad_horizontal(src, scaled.P)
@@ -141,6 +155,21 @@ def test_case_info_exposes_both_output_sizes(tmp_path, client):
     options = {item["mode"]: (item["width"], item["height"])
                for item in info["output_options"]}
     assert options == {"case": (384, 192), "input": (192, 96)}
+
+
+def test_case_info_follows_an_input_larger_than_the_case(tmp_path, client):
+    _image_case_with_input(tmp_path, 896)
+    info = client.get("/api/case/f1").json()
+    options = {item["mode"]: (item["width"], item["height"])
+               for item in info["output_options"]}
+    assert options == {"case": (384, 192), "input": (768, 384)}
+
+
+def test_flat_cost_curve_blends_without_a_shift():
+    reg = SimpleNamespace(d_star=-43, quality=1.0016, correlation=0.68)
+    assert applied_shift(reg, "warn") == 0
+    assert applied_shift(reg, "ok") == -43
+    assert applied_shift(reg, "fail") == -43
 
 
 def test_merge_op_passes_follow_input(tmp_path, client):

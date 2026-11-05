@@ -30,8 +30,8 @@ from ..redraw.manifest import Manifest
 from ..progress import Log, RateMeter
 from ..redraw.recompose_core import (ComposeBuffers, RecomposeSpec, recompose_u8,
                                      restore_canvas, slice_regions)
-from ..redraw.registration import (RegistrationResult, circular_translate,
-                                   gate_registration, to_gray)
+from ..redraw.registration import (RegistrationResult, applied_shift,
+                                   circular_translate, gate_registration, to_gray)
 from ..redraw.report import (BlendReport, RecomposeReport, RegistrationReport, RepairReport)
 from ..redraw.verify_core import SeamAccumulator, verdict
 from ..media.videoio import FrameReader, FrameWriter, probe
@@ -153,9 +153,9 @@ def main(
     # invariant is still asserted on real geometry rather than re-argued.
     output_plan = plan
     if follow_input:
-        scaled = follow_input_plan(plan, info.size[0])
+        scaled = follow_input_plan(plan, info.size)
         if scaled is None:
-            log.warn("跟随输入不适用（输入不小于源分辨率，或缩放后冗余带过窄）："
+            log.warn("跟随输入不适用（输入尺寸退化、缩放后冗余带过窄，或与案例分辨率相同）："
                      "按案例分辨率输出")
         else:
             output_plan = scaled
@@ -256,6 +256,12 @@ def main(
     if d_star is not None:
         log.warn(f"--d-star {d_star} overrides the automatic choice ({reg.d_star})")
         reg = replace(reg, d_star=int(d_star))
+    else:
+        shift = applied_shift(reg, reg.verdict)
+        if shift != reg.d_star:
+            log.warn(f"配准代价曲线平坦（quality {reg.quality:.2f}），d* = {reg.d_star} "
+                     f"是巧合匹配：按 0 混合，报告记 0")
+            reg = replace(reg, d_star=shift)
 
     if reg.verdict == "fail" and not force:
         log.error(
@@ -270,7 +276,9 @@ def main(
                       output_mode=output_mode, output_size=(out_w, out_h))
         raise typer.Exit(1)
     if reg.verdict == "warn":
-        log.warn("registration is not decisive (flat cost curve); d* may be a coincidental match")
+        log.warn("registration is not decisive (flat cost curve); "
+                 + ("using the forced --d-star" if d_star is not None
+                    else "blending without a shift"))
 
     if dry_run:
         raise typer.Exit(0)

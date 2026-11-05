@@ -322,36 +322,46 @@ def restore_height(generated_size: tuple[int, int], canvas_width: int) -> int:
 _MIN_FOLLOW_L = 8
 
 
-def follow_input_plan(plan: PadPlan, input_width: int) -> PadPlan | None:
-    """Scale ``plan`` to the pixel density of an input ``input_width`` wide.
+def follow_input_plan(plan: PadPlan, input_size: tuple[int, int]) -> PadPlan | None:
+    """Derive the output geometry from the input's own size.
 
-    The output keeps the source's aspect and the canvas's target aspect, so the
-    scaled geometry is derived by ``plan_pad`` itself -- closure is asserted on
-    it instead of being re-argued field by field. The scale is relative to the
-    *canvas* width, which is what the tool was asked to return.
+    The input is a canvas -- the source plus circular redundancy -- at whatever
+    resolution the tool returned, so its *own* aspect says where the redundancy
+    ends. The case canvas's target aspect and band width are deliberately not
+    consulted: a 21:9, 16:9 or 2.5:1 return each yields the band its own framing
+    implies, which is what "ignore the canvas" means here.
 
-    Returns ``None`` when following the input is pointless or unsafe: an input at
-    least as wide as the source gains no detail, and a band below
-    ``_MIN_FOLLOW_L`` columns cannot hold the blend and its endpoint lock.
+    The output keeps the source's aspect at the input's height, and the scaled
+    geometry is derived by ``plan_pad`` from the input's aspect -- closure is
+    asserted on it instead of being re-argued field by field, and the scaled
+    canvas is the input's own size, so the restore resamples nothing.
+
+    Returns ``None`` only when the derivation is impossible or meaningless: bad
+    dimensions, a band below ``_MIN_FOLLOW_L`` columns (too narrow for the blend
+    and its endpoint lock), or an output identical to the case resolution
+    (there would be nothing to choose).
     """
-    if input_width <= 0 or input_width >= plan.W:
+    iw, ih = int(input_size[0]), int(input_size[1])
+    iw -= iw % 2
+    ih -= ih % 2
+    if iw <= 0 or ih <= 0 or plan.W <= 0 or plan.H <= 0:
         return None
-    s = Fraction(input_width, plan.Wc)
-    out_w = round_even(plan.W * s)
+    out_h = round_even(ih)
+    out_w = round_even(out_h * Fraction(plan.W, plan.H))
     if plan.W == 2 * plan.H:
         # Keep the ERP's exact 2:1: the half-width must be even too.
         out_w -= out_w % 4
         out_h = out_w // 2
-    else:
-        out_h = round_even(out_w * Fraction(plan.H, plan.W))
     if out_w < 16 or out_h < 2:
         return None
     try:
-        scaled = plan_pad(PadSpec((out_w, out_h), plan.target_aspect),
+        scaled = plan_pad(PadSpec((out_w, out_h), Fraction(iw, ih)),
                           pre_roll="none")
     except GeometryError:
         return None
     if scaled.P < 1 or scaled.L < _MIN_FOLLOW_L:
+        return None
+    if (scaled.W, scaled.H) == (plan.W, plan.H):
         return None
     return scaled
 
