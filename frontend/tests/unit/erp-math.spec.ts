@@ -7,6 +7,7 @@ import {
   pointInPolygon,
   polygonSelfIntersects,
   polygonWinding,
+  regionShapeIssue,
   project,
   unproject,
   unwrapLongitudes,
@@ -93,5 +94,43 @@ describe('erpMath', () => {
     // 加了极点顶点也仍然绕一圈
     expect(Math.abs(polygonWinding([...ring, [0, 89]]))).toBe(1)
     expect(polygonWinding([[0, 0], [90, 0], [90, 10], [0, 10]])).toBe(0)
+  })
+
+  it('跨度 339° 的绕极盖帽也判为绕极点', () => {
+    // 用户实际遇到的形状：-170° 走到 169°，纬度 60°，只差 21° 没走到接缝。
+    const cap: Array<[number, number]> = []
+    for (let index = 0; index <= 15; index += 1) cap.push([-170 + index * 22.6, 60])
+    expect(longitudeSpan(cap)).toBeCloseTo(339, 6)
+    expect(polygonWinding(cap)).toBe(1)
+    expect(regionShapeIssue(cap)?.kind).toBe('winding')
+  })
+
+  it('形状校验把绕极点、跨度超限与自交分开', () => {
+    const rectangle: Array<[number, number]> = [[0, 0], [10, 0], [10, 10], [0, 10]]
+    expect(regionShapeIssue(rectangle)).toBeNull()
+
+    const ring: Array<[number, number]> = []
+    for (let index = 0; index < 8; index += 1) ring.push([index * 45, 60])
+    const winding = regionShapeIssue(ring)
+    expect(winding?.kind).toBe('winding')
+    if (winding?.kind === 'winding') {
+      expect(Math.abs(winding.winding)).toBe(1)
+      expect(winding.hasPole).toBe(false)
+    }
+    const withPole = regionShapeIssue([...ring, [0, 89]])
+    expect(withPole?.kind).toBe('winding')
+    if (withPole?.kind === 'winding') expect(withPole.hasPole).toBe(true)
+
+    // 绕出去再折返：扭转量为 0，但跨度 680°，切平面闭合后仍自重叠。
+    const ribbon: Array<[number, number]> = [
+      [0, 0], [170, 10], [340, 0], [510, 10], [680, 0],
+      [680, -10], [510, -20], [340, -20], [170, -20], [0, -20],
+    ]
+    expect(polygonWinding(ribbon)).toBe(0)
+    expect(longitudeSpan(ribbon)).toBeCloseTo(680, 6)
+    expect(regionShapeIssue(ribbon)?.kind).toBe('span')
+
+    const bowtie: Array<[number, number]> = [[0, 0], [10, 10], [10, 0], [0, 10]]
+    expect(regionShapeIssue(bowtie)?.kind).toBe('self-intersect')
   })
 })

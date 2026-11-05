@@ -121,6 +121,33 @@ def test_parse_rejects_ranges_clip_and_geometry_limits():
         parse_regions(doc)
 
 
+def _cap_ring() -> list[list[float]]:
+    """跨度 339° 的绕极盖帽：-170° 走到 169°，纬度 60°。"""
+    return [[-170.0 + index * 22.6, 60.0] for index in range(16)]
+
+
+def test_strict_geometry_rejects_pole_caps_and_long_bands():
+    cap = region_doc(_cap_ring())
+    # Web 读接口保持宽松：旧区域要能显示出来，页面才能标 ⚠ 并删除。
+    assert len(parse_regions(cap)) == 1
+    with pytest.raises(RegionError, match="绕极点"):
+        parse_regions(cap, validate_geometry=True)
+
+    # 扭转量为 0，但跨度 680°，切平面闭合后仍会画成整幅横带。
+    ribbon = region_doc([
+        [0, 0], [170, 10], [340, 0], [510, 10], [680, 0],
+        [680, -10], [510, -20], [340, -20], [170, -20], [0, -20],
+    ])
+    with pytest.raises(RegionError, match="经度跨度"):
+        parse_regions(ribbon, validate_geometry=True)
+
+    # 拆成东西两半后各自合法；极点一侧用 89° 收口，避开引擎的 ±89.5° 限制。
+    east = region_doc([[0, 60], [60, 60], [120, 60], [180, 60], [180, 89], [0, 89]])
+    assert len(parse_regions(east, validate_geometry=True)) == 1
+    rectangle = region_doc([[-30, -20], [30, -20], [30, 20], [-30, 20]])
+    assert len(parse_regions(rectangle, validate_geometry=True)) == 1
+
+
 def test_load_reports_the_file_on_bad_json(tmp_path):
     path = tmp_path / "regions.json"
     path.write_text("{not json", encoding="utf-8")
@@ -280,6 +307,18 @@ def test_cli_rejects_a_bad_regions_file(tmp_path):
     ])
     assert result.exit_code == 2
     assert "区域" in result.output
+
+
+def test_cli_rejects_a_region_that_wraps_the_pole(tmp_path):
+    gt_path, atmo_path = _write_case(tmp_path)
+    cap = tmp_path / "regions.json"
+    cap.write_text(json.dumps(region_doc(_cap_ring())), encoding="utf-8")
+    result = runner.invoke(app, [
+        "relight", "--gt", str(gt_path), "--atmo", str(atmo_path),
+        "--out", str(tmp_path / "out.png"), "--regions", str(cap),
+    ])
+    assert result.exit_code == 2
+    assert "绕极点" in result.output
 
 
 def test_cli_rejects_sample_at_on_image_gt(tmp_path):

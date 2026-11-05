@@ -80,7 +80,10 @@ class RegionMaps:
 
 
 def load_regions(path: str | Path) -> list[Region]:
-    """读区域文件并校验；文件不存在或 JSON 坏掉都按参数错报出真实原因。"""
+    """读区域文件并校验；文件不存在或 JSON 坏掉都按参数错报出真实原因。
+
+    运行路径打开几何校验：手改文件或旧数据即使绕过界面检查，也不会静默画出错误掩码。
+    """
     target = Path(path)
     try:
         data = json.loads(target.read_text(encoding="utf-8"))
@@ -89,13 +92,17 @@ def load_regions(path: str | Path) -> list[Region]:
     except json.JSONDecodeError as exc:
         raise RegionError(f"区域文件不是合法 JSON：{target}（{exc}）") from exc
     try:
-        return parse_regions(data)
+        return parse_regions(data, validate_geometry=True)
     except RegionError as exc:
         raise RegionError(f"{target}: {exc}") from exc
 
 
-def parse_regions(data) -> list[Region]:
-    """把区域文件的内容校验成 ``Region`` 列表。"""
+def parse_regions(data, *, validate_geometry: bool = False) -> list[Region]:
+    """把区域文件的内容校验成 ``Region`` 列表。
+
+    结构校验总是执行；``validate_geometry`` 追加「单个闭合多边形能否表示」的检查。
+    CLI 运行路径打开它，Web 读接口保持关闭：旧区域要先能显示出来，页面才能标 ⚠ 并删除。
+    """
     if not isinstance(data, dict):
         raise RegionError("区域文件必须是对象")
     unknown = sorted(set(data) - {"version", "regions"})
@@ -112,7 +119,7 @@ def parse_regions(data) -> list[Region]:
     out: list[Region] = []
     seen: set[str] = set()
     for index, raw in enumerate(raw_regions):
-        region = _parse_region(raw, index)
+        region = _parse_region(raw, index, validate_geometry=validate_geometry)
         if region.id in seen:
             raise RegionError(f"区域 id 重复：{region.id!r}")
         seen.add(region.id)
@@ -120,7 +127,7 @@ def parse_regions(data) -> list[Region]:
     return out
 
 
-def _parse_region(raw, index: int) -> Region:
+def _parse_region(raw, index: int, *, validate_geometry: bool = False) -> Region:
     where = f"第 {index + 1} 个区域"
     if not isinstance(raw, dict):
         raise RegionError(f"{where} 必须是对象")
@@ -159,6 +166,9 @@ def _parse_region(raw, index: int) -> Region:
         if abs(lat) > LAT_LIMIT:
             raise RegionError(f"{where}（{rid}）的纬度 {lat} 超出 ±{LAT_LIMIT}")
         points.append((lon, lat))
+
+    if validate_geometry:
+        _check_shape(points, where, rid)
 
     feather = raw.get("feather_deg", 0.0)
     if isinstance(feather, bool) or not isinstance(feather, (int, float)) or feather < 0:
@@ -273,6 +283,49 @@ def _blend(field: np.ndarray, alpha: np.ndarray, value: float) -> None:
     delta = field - np.float32(value)
     delta *= alpha
     field -= delta
+
+
+def _check_shape(points: list[tuple[float, float]], where: str, rid: str) -> None:
+    """拒绝单个 ERP 闭合多边形装不下的形状。
+
+    两类：边界绕极点转圈（扭转量非零），以及绕出去再折返、经度跨度超过一整圈的带。
+    两者在切平面上都会自重叠，交给 ``fillPoly`` 会画成一条横带或近零的缝。
+    """
+    span = _longitude_span(points)
+    winding = _winding(points)
+    if winding != 0:
+        raise RegionError(
+            f"{where}（{rid}）的边界绕极点转了 {abs(winding)} 圈（经度跨度 {span:.0f}°），"
+            "单个闭合多边形表示不了；请拆成两块")
+    if span > 360.0:
+        raise RegionError(
+            f"{where}（{rid}）的经度跨度 {span:.0f}° 超过一整圈，"
+            "单个闭合多边形在切平面上会自重叠；请沿经线拆成两块")
+
+
+def _longitude_span(points: list[tuple[float, float]]) -> float:
+    """``_unwrap`` 之后的经度跨度；超过 360° 的形状在 ERP 平面上会自重叠。"""
+    lons = [lon for lon, _ in _unwrap(points)]
+    return max(lons) - min(lons) if lons else 0.0
+
+
+def _winding(points: list[tuple[float, float]]) -> int:
+    """边界绕极点的圈数：逐边取最短经度差（闭合边也算）求和后除以 360。"""
+    unwrapped = _unwrap(points)
+    count = len(unwrapped)
+    if count < 3:
+        return 0
+    total = 0.0
+    for index, (lon, _) in enumerate(unwrapped):
+        next_lon = unwrapped[(index + 1) % count][0]
+        delta = next_lon - lon
+        if index == count - 1:
+            while delta > 180.0:
+                delta -= 360.0
+            while delta < -180.0:
+                delta += 360.0
+        total += delta
+    return int(round(total / 360.0))
 
 
 def _alpha(region: Region, width: int, height: int) -> np.ndarray | None:

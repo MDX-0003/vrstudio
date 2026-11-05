@@ -237,6 +237,34 @@ export function polygonWinding(verts: LonLat[]): number {
   return Math.round(total / 360)
 }
 
+export type RegionShapeIssue =
+  | { kind: 'winding'; winding: number; span: number; hasPole: boolean }
+  | { kind: 'span'; span: number }
+  | { kind: 'self-intersect' }
+
+/**
+ * 单个闭合多边形能否表示这个区域；不能时返回原因，能表示返回 null。
+ *
+ * 两类形状装不下：边界绕极点转圈（扭转量非零），以及绕出去再折返、经度跨度超过
+ * 一整圈的带（扭转量可能为 0，但切平面闭合后仍自重叠）。工作台只用这个函数判定，
+ * 文案由调用方按 kind 生成。
+ */
+export function regionShapeIssue(verts: LonLat[]): RegionShapeIssue | null {
+  const span = longitudeSpan(verts)
+  const winding = polygonWinding(verts)
+  if (winding !== 0) {
+    return {
+      kind: 'winding',
+      winding,
+      span,
+      hasPole: verts.some(([, lat]) => Math.abs(lat) >= 89),
+    }
+  }
+  if (span > 360) return { kind: 'span', span }
+  if (polygonSelfIntersects(verts)) return { kind: 'self-intersect' }
+  return null
+}
+
 function orientation(p: LonLat, q: LonLat, r: LonLat): number {
   const value = (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
   if (Math.abs(value) < 1e-9) return 0

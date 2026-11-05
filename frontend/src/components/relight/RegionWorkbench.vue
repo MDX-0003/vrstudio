@@ -9,7 +9,8 @@ import { saveRelightRegions } from '@/api/relight'
 import { saveRelightDraft } from '@/api/case'
 import type { RelightPayload, RelightRegion } from '@/types/case-info'
 import type { LonLat } from '@/utils/erpMath'
-import { longitudeSpan, polygonSelfIntersects, polygonWinding } from '@/utils/erpMath'
+import { regionShapeIssue } from '@/utils/erpMath'
+import type { RegionShapeIssue } from '@/utils/erpMath'
 
 /**
  * 区域工作台（决策 88，方案 A）：视图占主位，右侧是区域列表与选中区域的参数组，
@@ -146,7 +147,24 @@ function select(id: string): void {
 
 /** 已存在的区域也可能不合法（旧数据或手改）：列表里标出来，避免静默画错。 */
 function regionInvalid(region: RelightRegion): boolean {
-  return polygonWinding(region.verts) !== 0 || polygonSelfIntersects(region.verts)
+  return regionShapeIssue(region.verts) !== null
+}
+
+/** 把形状问题翻成用户能据此改形的说明。 */
+function shapeIssueMessage(issue: RegionShapeIssue): string {
+  if (issue.kind === 'winding') {
+    const turns = Math.abs(issue.winding)
+    return issue.hasPole
+      ? `这个区域含极点、边界又绕极点转了 ${turns} 圈（经度跨度 ${Math.round(issue.span)}°），`
+        + '单个闭合多边形表示不了；请拆成东西两块。'
+      : `这个区域绕着极点转了 ${turns} 圈（经度跨度 ${Math.round(issue.span)}°），`
+        + '单个闭合多边形表示不了；请拆成两块。'
+  }
+  if (issue.kind === 'span') {
+    return `这个区域的经度跨度 ${Math.round(issue.span)}°，绕出去再折返的带在切平面上会自重叠，`
+      + '单个闭合多边形表示不了；请沿经线拆成两块。'
+  }
+  return '多边形的边与边交叉，请调整顶点后再闭合。'
 }
 
 function startDraw(): void {
@@ -179,22 +197,11 @@ function closeDraft(): void {
     mode.value = 'orbit'
     return
   }
-  // 绕极点的区域在经纬度平面上必然自重叠；它的报错要说清原因，不给「边交叉」的误导。
-  const span = longitudeSpan(points)
-  const winding = polygonWinding(points)
-  const hasPole = points.some(([, lat]) => Math.abs(lat) >= 89)
-  if (winding !== 0) {
-    ElMessage.error(
-      hasPole
-        ? `这个区域含极点、边界又绕满了一圈（经度跨度 ${Math.round(span)}°），`
-          + '单个闭合多边形表示不了；请拆成东西两块。'
-        : `这个区域绕着极点转了 ${Math.abs(winding)} 圈（经度跨度 ${Math.round(span)}°），`
-          + '单个闭合多边形表示不了；请拆成两块，或让边界经过极点。',
-    )
-    return
-  }
-  if (polygonSelfIntersects(points)) {
-    ElMessage.error('多边形的边与边交叉，请调整顶点后再闭合。')
+  // 切平面上的单个闭合多边形装不下两类形状：绕极点转圈，以及绕出去再折返、
+  // 跨度超过一整圈的带。自交单独拒绝。
+  const issue = regionShapeIssue(points)
+  if (issue) {
+    ElMessage.error(shapeIssueMessage(issue))
     return
   }
   const index = regions.value.length + 1
@@ -393,7 +400,7 @@ onBeforeUnmount(() => {
               @blur="finishRename(region.id, $event)"
             />
             <span v-else class="name" @dblclick.stop="startRename(region.id)">{{ region.name }}</span>
-            <span v-if="regionInvalid(region)" class="chip warn" title="这个区域绕经度超过一圈或边自交，引擎画出的形状会不符合预期">⚠</span>
+            <span v-if="regionInvalid(region)" class="chip warn" title="这个区域绕极点转圈、经度跨度超过一整圈或边自交，单个闭合多边形表示不了">⚠</span>
             <span class="chip small">整段</span>
             <button class="icon" type="button" :title="region.enabled ? '停用（不参与合成）' : '启用'" @click.stop="toggleEnabled(region.id)">
               {{ region.enabled ? '◉' : '○' }}
