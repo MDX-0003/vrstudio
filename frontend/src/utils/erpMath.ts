@@ -84,6 +84,20 @@ export function lonLatFromDirection(dir: Vec3): LonLat {
   ]
 }
 
+/**
+ * 经纬度 → ERP 像素。``shiftPx`` 是整周平移的像素量，用于跨接缝的补画；
+ * 它加在像素坐标上，不能加在经度上（加经度会变成 2048°，不是一整周）。
+ */
+export function erpPixel(
+  lon: number,
+  lat: number,
+  width: number,
+  height: number,
+  shiftPx = 0,
+): Vec2 {
+  return [((lon + 180) / 360) * width + shiftPx, ((90 - lat) / 180) * height]
+}
+
 /** 球面点投到画布像素；落在相机背后时返回 null。 */
 export function project(
   lon: number,

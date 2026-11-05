@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   densify,
+  erpPixel,
   lonLatFromDirection,
   directionFromLonLat,
   isPoleCapShape,
@@ -136,6 +137,13 @@ describe('erpMath', () => {
 
     const bowtie: Array<[number, number]> = [[0, 0], [10, 10], [10, 0], [0, 10]]
     expect(regionShapeIssue(bowtie)?.kind).toBe('self-intersect')
+  })
+
+  it('密度细分与 ERP 像素换算', () => {
+    expect(erpPixel(0, 0, 2048, 1024)).toEqual([1024, 512])
+    expect(erpPixel(180, 90, 2048, 1024)).toEqual([2048, 0])
+    // 接缝补画是整周平移：2048 像素 = 360°，不是 2048°。
+    expect(erpPixel(0, 0, 2048, 1024, -2048)).toEqual([-1024, 512])
   })
 
   it('盖帽合成接缝短边与极点边，命中判定覆盖缺口', () => {

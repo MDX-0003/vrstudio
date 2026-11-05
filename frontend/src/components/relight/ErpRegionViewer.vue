@@ -6,6 +6,7 @@ import {
   clampFov,
   clampPitch,
   densify,
+  erpPixel,
   pointInRegion,
   project,
   projectPolygon,
@@ -235,8 +236,7 @@ function paintEquirect(
     for (const shift of [-width, 0, width]) {
       context.beginPath()
       polygon.forEach(([lon, lat], index) => {
-        const x = ((lon + shift + 180) / 360) * width
-        const y = ((90 - lat) / 180) * height
+        const [x, y] = erpPixel(lon, lat, width, height, shift)
         if (index === 0) context.moveTo(x, y)
         else context.lineTo(x, y)
       })
@@ -249,8 +249,7 @@ function paintEquirect(
     for (const shift of [-width, 0, width]) {
       context.beginPath()
       boundary.forEach(([lon, lat], index) => {
-        const x = ((lon + shift + 180) / 360) * width
-        const y = ((90 - lat) / 180) * height
+        const [x, y] = erpPixel(lon, lat, width, height, shift)
         if (index === 0) context.moveTo(x, y)
         else context.lineTo(x, y)
       })
