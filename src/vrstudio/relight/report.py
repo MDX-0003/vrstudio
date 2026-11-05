@@ -1,8 +1,8 @@
 """报告 JSON 与诊断图（返回数组，不写文件）。
 
 报告字段固定，不随运行变化：``gt``/``atmo``/``size``/``params``/``align``/``clip``/
-``light``/``seconds``；``clip`` 与 ``light`` 未启用时为 ``null``，而不是缺键。报告只
-用于人工核对与回归，不是跨仓库契约（决策 48）。
+``light``/``chroma``/``seconds``；``clip``、``light`` 与 ``chroma`` 未启用时为 ``null``，
+而不是缺键。报告只用于人工核对与回归，不是跨仓库契约（决策 48）。
 
 诊断图与六联对比全部用 opencv 生成：``media`` 之外不引入 Pillow，标签是英文
 （Hershey 字体没有中文字形）。
@@ -56,7 +56,7 @@ def light_report(fields: LightFields) -> dict:
 
 def build_report(*, gt: str, atmo: str, size: tuple[int, int], params: dict,
                  align: dict | None, clip: dict | None, light: dict | None,
-                 seconds: float) -> dict:
+                 chroma: dict | None, seconds: float) -> dict:
     return {
         "gt": gt,
         "atmo": atmo,
@@ -65,6 +65,7 @@ def build_report(*, gt: str, atmo: str, size: tuple[int, int], params: dict,
         "align": align,
         "clip": clip,
         "light": light,
+        "chroma": chroma,
         "seconds": round(seconds, 1),
     }
 

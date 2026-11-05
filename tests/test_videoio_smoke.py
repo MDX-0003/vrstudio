@@ -130,6 +130,27 @@ def test_video_roundtrip_through_files(tmp_path):
     assert worst <= 5, f"file round trip drifted by {worst} levels"
 
 
+def test_writer_writes_bt709_tags(tmp_path):
+    """交付统一写全四个色彩标签（决策 86）：无标签时播放端会按 BT.709 解释 BT.601 的数据。"""
+    import subprocess
+
+    from vrstudio.media.binres import ffprobe
+
+    conf = config_mod.load()
+    conf.data["video"]["preset"] = "ultrafast"
+    conf.data["video"]["crf"] = 0
+    src = tmp_path / "tagged.mp4"
+    _write(src, _closed_erp(1), conf)
+
+    r = subprocess.run(
+        [ffprobe(conf), "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=color_space,color_primaries,color_transfer,color_range",
+         "-of", "csv=p=0", str(src)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    tags = {token.strip() for token in r.stdout.strip().split(",") if token.strip()}
+    assert tags == {"bt709", "tv"}, r.stdout
+
+
 def test_cli_pad_and_recompose_and_verify(tmp_path):
     """Drive the installed entry points, not just the library."""
     import os

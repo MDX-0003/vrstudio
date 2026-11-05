@@ -53,7 +53,13 @@ from ..relight.align import (
 )
 from ..relight.atmo import AtmoMapping, mapping_for, work_frame, work_size_for
 from ..relight.bands import executor, workers_for
-from ..relight.compose import clipped_fraction, light_compose, soft_clip
+from ..relight.compose import (
+    CHROMA_SIGMA,
+    chroma_lowpass,
+    clipped_fraction,
+    light_compose,
+    soft_clip,
+)
 from ..relight.compose import relight as compose_relight
 from ..relight.fields import LightFields, estimate_fields
 from ..relight.report import (
@@ -536,7 +542,8 @@ def _video_report(fixed: FixedLight | FixedGeometry, base: dict, frames: int,
         "cache": cache, "timing": timing,
         "ref_frame": fixed.ref_frame, "ref_matched": round(fixed.ref_matched, 4),
         "params": base["params"], "align": base["align"],
-        "clip": base["clip"], "light": base["light"], "seconds": base["seconds"],
+        "clip": base["clip"], "light": base["light"], "chroma": base["chroma"],
+        "seconds": base["seconds"],
     }
     if atmo_source is not None:
         summary.update(atmo_source)
@@ -604,6 +611,8 @@ def _relight_image(gt: Path, atmo: Path, out: Path, params: Params, *,
         typer.echo(f"clip: over-exposure {clip_stats['clipped_before']:.3%} "
                    f"-> {clip_stats['clipped_after']:.3%}")
 
+    out_image = chroma_lowpass(out_image, gt_image)
+
     try:
         write_png(out, out_image)
     except (ImageError, OSError) as exc:
@@ -619,6 +628,7 @@ def _relight_image(gt: Path, atmo: Path, out: Path, params: Params, *,
         params=params.as_dict(),
         align=align_report(alignment, width),
         clip=clip_stats, light=light_stats,
+        chroma={"sigma": CHROMA_SIGMA},
         seconds=time.perf_counter() - started,
     )
     typer.echo(f"wrote {out} ({summary['seconds']}s)")
@@ -671,6 +681,7 @@ def _write_samples(out_dir: Path, info, conf, light, indices: list[int],
             if params.highlight_clip:
                 relit = soft_clip(relit, params.clip_knee, params.clip_max,
                                   pool=pool, workers=workers)
+            relit = chroma_lowpass(relit, frame, pool=pool, workers=workers)
             compose += time.perf_counter() - compose_start
             path = out_dir / f"sample_{index:06d}.png"
             write_start = time.perf_counter()
@@ -791,6 +802,7 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
             gt=str(inputs.gt), atmo=str(inputs.atmo), size=(width, height),
             params=params.as_dict(), align=align_report(fixed.alignment, width),
             clip=None, light=light_report(fixed.fields),
+            chroma={"sigma": CHROMA_SIGMA},
             seconds=total,
         )
         timing = {
@@ -816,7 +828,7 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
     clip_before = None
     meter = RateMeter(info.frames or None, log)
     log.step("render pass")
-    render_decode = render_compose = render_write = 0.0
+    render_decode = render_compose = render_write = render_chroma = 0.0
     render_start = time.perf_counter()
     loop_end = render_start
     workers = workers_for()
@@ -843,6 +855,9 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
                     if params.highlight_clip:
                         relit = soft_clip(relit, params.clip_knee, params.clip_max,
                                           pool=pool, workers=workers)
+                    chroma_start = time.perf_counter()
+                    relit = chroma_lowpass(relit, frame, pool=pool, workers=workers)
+                    render_chroma += time.perf_counter() - chroma_start
                     render_compose += time.perf_counter() - compose_start
                     write_start = time.perf_counter()
                     writer.write(relit)
@@ -875,6 +890,7 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
         gt=str(inputs.gt), atmo=str(inputs.atmo), size=(width, height),
         params=params.as_dict(), align=align_report(fixed.alignment, width),
         clip=clip_stats, light=light_report(fixed.fields),
+        chroma={"sigma": CHROMA_SIGMA},
         seconds=total,
     )
     timing = {
@@ -882,6 +898,7 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
         **setup_timing,
         "render_decode": round(render_decode, 3),
         "render_compose": round(render_compose, 3),
+        "render_chroma": round(render_chroma, 3),
         "render_write": round(render_write, 3),
         "render_flush": round(render_flush, 3),
         "render_total": round(render_total, 3),
@@ -974,6 +991,7 @@ def _write_samples_pair(out_dir: Path, gt_info, atmo_info, conf,
             if params.highlight_clip:
                 relit = soft_clip(relit, params.clip_knee, params.clip_max,
                                   pool=pool, workers=workers)
+            relit = chroma_lowpass(relit, frame, pool=pool, workers=workers)
             compose += time.perf_counter() - compose_start
             matches.append(match)
             path = out_dir / f"sample_{index:06d}.png"
@@ -996,6 +1014,7 @@ def _render_pair(inputs: RelightInputs, gt_info, atmo_info,
     meter = RateMeter(gt_info.frames or None, log)
     log.step("render pass")
     render_decode = render_atmo_decode = render_compose = render_write = 0.0
+    render_chroma = 0.0
     matches: list[float] = []
     clip_before: float | None = None
     track = _AtmoTrack(mapping, work)
@@ -1035,6 +1054,9 @@ def _render_pair(inputs: RelightInputs, gt_info, atmo_info,
                     if params.highlight_clip:
                         relit = soft_clip(relit, params.clip_knee, params.clip_max,
                                           pool=pool, workers=workers)
+                    chroma_start = time.perf_counter()
+                    relit = chroma_lowpass(relit, frame, pool=pool, workers=workers)
+                    render_chroma += time.perf_counter() - chroma_start
                     render_compose += time.perf_counter() - compose_start
                     write_start = time.perf_counter()
                     writer.write(relit)
@@ -1066,6 +1088,7 @@ def _render_pair(inputs: RelightInputs, gt_info, atmo_info,
         "render_decode": round(render_decode, 3),
         "render_decode_atmo": round(render_atmo_decode, 3),
         "render_compose": round(render_compose, 3),
+        "render_chroma": round(render_chroma, 3),
         "render_write": round(render_write, 3),
         "render_flush": round(render_flush, 3),
         "render_total": round(render_total, 3),
@@ -1174,7 +1197,8 @@ def _relight_video_atmo(inputs: RelightInputs, params: Params, conf,
         base = build_report(
             gt=str(inputs.gt), atmo=str(inputs.atmo), size=(width, height),
             params=params.as_dict(), align=align_report(fixed.alignment, width),
-            clip=None, light=None, seconds=total,
+            clip=None, light=None,
+            chroma={"sigma": CHROMA_SIGMA}, seconds=total,
         )
         timing = {
             "cache_load": round(cache_load, 3),
@@ -1203,7 +1227,8 @@ def _relight_video_atmo(inputs: RelightInputs, params: Params, conf,
     base = build_report(
         gt=str(inputs.gt), atmo=str(inputs.atmo), size=(width, height),
         params=params.as_dict(), align=align_report(fixed.alignment, width),
-        clip=render.clip, light=None, seconds=total,
+        clip=render.clip, light=None,
+        chroma={"sigma": CHROMA_SIGMA}, seconds=total,
     )
     timing = {
         "cache_load": round(cache_load, 3),

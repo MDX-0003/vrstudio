@@ -26,6 +26,14 @@ from .bands import run_tasks
 GUIDED_RADIUS_2K = 12
 GUIDED_EPS = 300.0
 
+SHADOW_PIVOT = 0.01
+"""暗部置信权重的半效点：线性亮度，约等于 sRGB 28/255。
+
+``gain = low(atmo)/low(GT)`` 在两个小量相除时没有物理意义：8-bit 夜戏里 71% 的像素
+低于 0.01，实测这一段 gain 的 p95 是 12–13、最大值 149。低于这个量级时 GT 只剩
+量化与编码噪声，乘算不该进入；0.01 是 8-bit 素材还能承载反射率的下界。
+"""
+
 _IDX = np.arange(256, dtype=np.float64) / 255.0
 LUT_SRGB_TO_LINEAR = np.where(
     _IDX <= 0.04045,
@@ -91,6 +99,18 @@ def luma(linear_bgr: np.ndarray) -> np.ndarray:
     return (0.2126 * linear_bgr[..., 2]
             + 0.7152 * linear_bgr[..., 1]
             + 0.0722 * linear_bgr[..., 0])
+
+
+def shadow_weight(gt_light: np.ndarray) -> np.ndarray:
+    """乘算场的暗部置信权重，与 ``gt_light`` 同尺寸的 (h, w) float32，取值 0..1。
+
+    ``w = G / (G + SHADOW_PIVOT)``：GT 低频亮度在 0.01（线性）以上时接近 1，越黑越小，
+    全黑处为 0。它乘在 ``gain`` 与 ``visibility`` 的指数上，让比值只在 GT 有信号的
+    位置生效；``strength = 0`` 时指数仍为 0，逐位恒等不受影响。
+    """
+    low = luma(gt_light)
+    np.maximum(low, 0.0, out=low)
+    return low / (low + SHADOW_PIVOT)
 
 
 def guided(guide: np.ndarray, src: np.ndarray,

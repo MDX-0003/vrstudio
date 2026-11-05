@@ -222,14 +222,26 @@ class FrameWriter:
                 f"yuv420p needs even dimensions, got {self.width}x{self.height}; "
                 f"trim or rescale the canvas before encoding"
             )
+        encoder = str(self.video_cfg["encoder"])
+        # 交付统一按 BT.709 转换并写全四个色彩标签（决策 86）：不写标签时 swscale
+        # 用默认的 BT.601 转 YUV，而播放端对无标签的 HD/8K 流按 BT.709 解释，
+        # 同一文件两种矩阵会差出 1–2 个码值的均值与 9 个码值的 p99。
         args = [ffmpeg(self.config), "-y", "-v", "error", "-nostdin",
                 "-f", "rawvideo", "-pix_fmt", FRAME_PIX_FMT,
                 "-s", f"{self.width}x{self.height}", "-r", self.fps, "-i", "-",
-                "-an", "-c:v", str(self.video_cfg["encoder"]),
+                "-an",
+                "-vf", "scale=in_range=full:out_range=tv:out_color_matrix=bt709",
+                "-c:v", encoder,
                 "-crf", str(self.video_cfg["crf"]),
                 "-preset", str(self.video_cfg["preset"]),
                 "-pix_fmt", str(self.video_cfg["pix_fmt"]),
-                "-threads", "0", str(self.tmp)]
+                "-colorspace", "bt709", "-color_primaries", "bt709",
+                "-color_trc", "bt709", "-color_range", "tv"]
+        if encoder.startswith("libx264"):
+            # x264 只把前两项写进 VUI；primaries / transfer 要通过它自己的参数给。
+            args += ["-x264-params",
+                     "colorprim=bt709:transfer=bt709:colormatrix=bt709"]
+        args += ["-threads", "0", str(self.tmp)]
         self._proc = subprocess.Popen(args, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         return self
 

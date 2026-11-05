@@ -1,17 +1,22 @@
-"""合成：把光照场乘到 GT 上，以及高光软裁切。
+"""合成：把光照场乘到 GT 上，以及高光软裁切与色度差低通。
 
-公式（线性光，决策 48）：
+公式（线性光，决策 48；暗部置信权重见决策 84）：
 
 ```text
+w        = G_low / (G_low + SHADOW_PIVOT)
 Ws       = (1 - strength) × I + strength × W
-out_lin  = GT_lin × Ws × gY^strength × V^(local_shading × strength)
+out_lin  = GT_lin × Ws × gY^(strength × w) × V^(local_shading × strength × w)
 ```
 
-``strength=0`` 时 ``Ws`` 退化为单位矩阵、两个指数都是 0，输出与 GT 逐位一致；
+``strength=0`` 时两个指数都是 0、``Ws`` 退化为单位矩阵，输出与 GT 逐位一致；
 这是验收基线，不是巧合。``local_shading`` 只作用在可见度项上：0 表示只用低频
 光场，1 表示完全跟随 AI 画出的局部明暗。
 
-视频版（决策 56）把光场与强度折成 ``LightCompose`` 一次，逐帧只调 ``apply``。
+``w`` 让比值只在 GT 有信号的亮度区间生效：夜戏里七成像素低于 1% 线性亮度，
+那里的 ``gain`` 是两个近黑量相除，直接乘上去会把量化噪声与编码块放大成可见的灰雾。
+
+``chroma_lowpass`` 在 8-bit 输出之后单独处理色度：只把 ``relit - GT`` 的色度差磨平，
+亮度重打光保持不动（决策 85）。它按行带分线程，结果与整帧计算逐位相同。
 """
 
 from __future__ import annotations
@@ -22,7 +27,13 @@ import cv2
 import numpy as np
 
 from .bands import run_bands
-from .fields import LightFields, linear_to_srgb8_inplace, srgb_to_linear
+from .fields import LightFields, linear_to_srgb8_inplace, shadow_weight, srgb_to_linear
+
+CHROMA_SIGMA = 2.0
+"""色度差的低通 σ（输出分辨率的像素）。由 4:2:0 的色度采样率决定，不是创作参数。"""
+
+CHROMA_BAND_MARGIN = 8
+"""行带外扩行数：必须大于 σ=2 对应高斯核的半径（6），否则带边界会与整帧不同。"""
 
 
 @dataclass(frozen=True)
@@ -34,8 +45,8 @@ class LightCompose:
     把强度与局部明暗折进指数与矩阵，则 ``apply`` 与 ``relight`` 逐位一致。
     """
 
-    gain: np.ndarray          # gY^strength，(H, W) float32
-    visibility: np.ndarray    # V^(local_shading × strength)，(H, W) float32
+    gain: np.ndarray          # gY^(strength × w)，(H, W) float32
+    visibility: np.ndarray    # V^(local_shading × strength × w)，(H, W) float32
     white_balance: np.ndarray # (1 - strength) I + strength W，3×3 float32
 
     def apply(self, gt8: np.ndarray, *, pool=None, workers: int = 1) -> np.ndarray:
@@ -58,12 +69,17 @@ class LightCompose:
         return out
 
 
-def _power_bands(field: np.ndarray, exponent: float, pool, workers: int) -> None:
-    """就地求幂；分带执行与整帧执行逐元素相同。"""
-    value = np.float32(exponent)
+def _power_bands(field: np.ndarray, exponent, pool, workers: int) -> None:
+    """就地求幂；``exponent`` 是标量或与 ``field`` 同尺寸的数组。
+
+    分带执行与整帧执行逐元素相同：行带只切片，不改变任何一个元素的指数值。
+    """
+    scalar = np.ndim(exponent) == 0
+    value = np.float32(exponent) if scalar else exponent
 
     def band(y0: int, y1: int) -> None:
-        np.power(field[y0:y1], value, out=field[y0:y1])
+        exp = value if scalar else value[y0:y1]
+        np.power(field[y0:y1], exp, out=field[y0:y1])
 
     run_bands(field.shape[0], band, pool, workers)
 
@@ -71,13 +87,21 @@ def _power_bands(field: np.ndarray, exponent: float, pool, workers: int) -> None
 def light_compose(fields: LightFields, size: tuple[int, int],
                   strength: float, local_shading: float, *,
                   pool=None, workers: int = 1) -> LightCompose:
-    """把 2K 光场放大到 ``size`` 并折进强度参数，得到逐帧可复用的 ``LightCompose``。"""
+    """把 2K 光场折进强度参数并放大到 ``size``，得到逐帧可复用的 ``LightCompose``。
+
+    指数带暗部置信权重 ``w``（决策 84），所以先在 2K 上求幂、再放大；放大后的场与
+    原实现的顺序不同，但仍然是同一份光场。
+    """
+    weight = shadow_weight(fields.gt_light)
+    gain = fields.gain.copy()
+    visibility = fields.visibility.copy()
+    _power_bands(gain, np.float32(strength) * weight, pool, workers)
+    _power_bands(visibility, np.float32(local_shading * strength) * weight,
+                 pool, workers)
     width, height = size
-    gain = cv2.resize(fields.gain, (width, height), interpolation=cv2.INTER_LINEAR)
-    visibility = cv2.resize(fields.visibility, (width, height),
+    gain = cv2.resize(gain, (width, height), interpolation=cv2.INTER_LINEAR)
+    visibility = cv2.resize(visibility, (width, height),
                             interpolation=cv2.INTER_LINEAR)
-    _power_bands(gain, strength, pool, workers)
-    _power_bands(visibility, local_shading * strength, pool, workers)
     white_balance = ((1.0 - strength) * np.eye(3, dtype=np.float32)
                      + strength * fields.white_balance)
     return LightCompose(
@@ -124,6 +148,41 @@ def soft_clip(bgr8: np.ndarray, knee: float = 0.72, max_out: float = 0.98, *,
             0, 255).astype(np.uint8)
 
     run_bands(bgr8.shape[0], band, pool, workers)
+    return out
+
+
+def chroma_lowpass(bgr8: np.ndarray, gt8: np.ndarray, *,
+                   sigma: float = CHROMA_SIGMA,
+                   pool=None, workers: int = 1) -> np.ndarray:
+    """保留重打光的亮度，只把"额外加上去的色度对比"磨平（决策 85）。
+
+    ``relit - GT`` 分解成亮度分量（BGR 权重 0.114/0.587/0.299 的投影）与色度向量，
+    对色度向量做高斯模糊再加回。亮度分量逐位不动，所以重打光的明暗结果不变；
+    改变的是色度差的高频部分——4:2:0 的色度只有半分辨率，抬亮的色度边界在成片里
+    表现为彩色台阶，这一步把它们收回到 GT 的量级。
+
+    按行带执行，带外扩 ``CHROMA_BAND_MARGIN`` 行，保证带内结果与整帧计算逐位相同。
+    """
+    height = bgr8.shape[0]
+    out = np.empty(bgr8.shape, dtype=bgr8.dtype)
+
+    def band(y0: int, y1: int) -> None:
+        e0 = max(0, y0 - CHROMA_BAND_MARGIN)
+        e1 = min(height, y1 + CHROMA_BAND_MARGIN)
+        diff = bgr8[e0:e1].astype(np.float32)
+        diff -= gt8[e0:e1].astype(np.float32)
+        y = (0.114 * diff[..., 0] + 0.587 * diff[..., 1]
+             + 0.299 * diff[..., 2])
+        diff -= y[..., None]                       # diff 变成色度向量
+        smooth = cv2.GaussianBlur(diff, (0, 0), sigma)
+        smooth -= diff
+        relit = bgr8[e0:e1].astype(np.float32)
+        relit += smooth
+        np.clip(relit, 0, 255, out=relit)
+        start = y0 - e0
+        out[y0:y1] = relit[start:start + (y1 - y0)].astype(np.uint8)
+
+    run_bands(height, band, pool, workers)
     return out
 
 

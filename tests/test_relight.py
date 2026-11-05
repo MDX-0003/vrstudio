@@ -37,13 +37,22 @@ from vrstudio.relight.align import (
     warp_to_gt,
 )
 from vrstudio.relight.compose import (
+    CHROMA_SIGMA,
     LightCompose,
+    chroma_lowpass,
     clipped_fraction,
     light_compose,
     relight,
     soft_clip,
 )
-from vrstudio.relight.fields import estimate_fields, linear_to_srgb8, srgb_to_linear
+from vrstudio.relight.fields import (
+    SHADOW_PIVOT,
+    LightFields,
+    estimate_fields,
+    linear_to_srgb8,
+    shadow_weight,
+    srgb_to_linear,
+)
 from vrstudio.relight.bands import executor, workers_for
 
 runner = CliRunner()
@@ -209,9 +218,104 @@ def test_light_compose_matches_the_reference_formula():
     assert int(np.abs(got.astype(np.int16) - want).max()) == 0
 
 
+# ── 暗部置信权重（决策 84）：比值只在 GT 有信号处生效 ─────────────────────
+
+
+def test_shadow_weight_is_a_smooth_zero_to_one_gate():
+    zero = np.zeros((1, 1, 3), np.float32)
+    at_pivot = np.full((1, 1, 3), SHADOW_PIVOT, np.float32)
+    bright = np.full((1, 1, 3), 1.0, np.float32)
+    assert float(shadow_weight(zero)[0, 0]) == 0.0
+    assert float(shadow_weight(at_pivot)[0, 0]) == pytest.approx(0.5)
+    assert float(shadow_weight(bright)[0, 0]) > 0.98
+
+    ramp = np.linspace(0.0, 1.0, 64, dtype=np.float32).reshape(1, 64, 1)
+    ramp = np.repeat(ramp, 3, axis=2)
+    weight = shadow_weight(ramp)
+    assert weight.min() >= 0.0 and weight.max() <= 1.0
+    assert np.all(np.diff(weight[0]) >= 0)
+
+
+def test_light_compose_leaves_black_gt_untouched_under_a_huge_gain():
+    """近黑处 gain 可以是 149 倍；权重为 0 时乘算场必须完全不进入。"""
+    fields = LightFields(
+        gain=np.full((8, 16), 149.0, np.float32),
+        visibility=np.full((8, 16), 2.0, np.float32),
+        light=np.zeros((8, 16, 3), np.float32),
+        gt_light=np.zeros((8, 16, 3), np.float32),
+        white_balance=np.eye(3, dtype=np.float32),
+    )
+    gt = np.zeros((8, 16, 3), np.uint8)
+    out = light_compose(fields, (16, 8), 1.0, 1.0).apply(gt)
+    assert np.array_equal(out, gt)
+
+
+def test_strength_stays_monotone_under_the_shadow_weight():
+    """strength 越大离 full relight 越远/越近都不会来回摆；0 仍然是 GT。"""
+    gt = textured_erp(128, 64, seed=51)
+    atmo = np.clip(gt.astype(np.float32) * 0.5 + 60, 0, 255).astype(np.uint8)
+    fields = estimate_fields(gt, atmo)
+    means = [light_compose(fields, (128, 64), s, 0.35).apply(gt).mean()
+             for s in (0.0, 0.3, 0.6, 0.9, 1.0)]
+    assert means[0] == pytest.approx(gt.mean())
+    diffs = np.diff(means)
+    assert np.all(diffs >= -1e-9) or np.all(diffs <= 1e-9), means
+
+
+# ── 色度差低通（决策 85）：亮度不动，色度台阶收敛 ─────────────────────────
+
+
+def _chroma_edge_energy(image: np.ndarray, box) -> tuple[float, float]:
+    x0, y0, x1, y1 = box
+    patch = cv2.cvtColor(image[y0:y1, x0:x1], cv2.COLOR_BGR2YCrCb).astype(np.float32)
+    rms = lambda plane: float((cv2.Laplacian(plane, cv2.CV_32F) ** 2).mean()) ** 0.5
+    return rms(patch[..., 0]), rms(patch[..., 2])
+
+
+def test_chroma_lowpass_is_identity_when_nothing_changed():
+    rng = np.random.default_rng(61)
+    image = rng.integers(0, 256, (48, 64, 3), dtype=np.uint8)
+    assert np.array_equal(chroma_lowpass(image, image), image)
+
+
+def test_chroma_lowpass_keeps_luma_and_softens_chroma_edges():
+    # 均匀 GT：色度边缘只来自重打光那一块，指标才量得到低通本身。
+    gt = np.full((64, 96, 3), 120, np.uint8)
+    relit = np.full((64, 96, 3), 128, np.uint8)
+    relit[16:40, 24:60] = np.array([90, 90, 170], np.uint8)      # 硬色度边界
+    out = chroma_lowpass(relit, gt)
+    assert out.min() > 0 and out.max() < 255      # 没有撞到 0/255，亮度比较才有意义
+
+    def luma(image: np.ndarray) -> np.ndarray:
+        return (0.114 * image[..., 0].astype(np.float32)
+                + 0.587 * image[..., 1].astype(np.float32)
+                + 0.299 * image[..., 2].astype(np.float32))
+
+    assert np.abs(luma(out) - luma(relit)).max() <= 1.0
+    before = _chroma_edge_energy(relit, (16, 8, 72, 48))
+    after = _chroma_edge_energy(out, (16, 8, 72, 48))
+    assert after[1] < before[1], (before, after)
+
+
+def test_banded_chroma_lowpass_is_bit_identical():
+    rng = np.random.default_rng(63)
+    gt = rng.integers(30, 190, (97, 128, 3), dtype=np.uint8)
+    relit = np.clip(gt.astype(np.int16) + 15, 0, 255).astype(np.uint8)
+    relit[30:60, 40:90] = np.array([50, 50, 170], np.uint8)
+
+    want = chroma_lowpass(relit, gt)
+    for workers in (2, 3, 7):
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            got = chroma_lowpass(relit, gt, pool=pool, workers=workers)
+        assert np.array_equal(got, want), f"workers={workers}"
+
+
+def test_chroma_sigma_is_a_fixed_constant():
+    """σ 由 4:2:0 的色度采样率决定，不开参数。"""
+    assert CHROMA_SIGMA == 2.0
+
+
 # ── 行带并行：切带不改变任何像素 ───────────────────────────────────────────
-
-
 def test_banded_apply_is_bit_identical():
     rng = np.random.default_rng(21)
     gt = rng.integers(0, 256, (97, 128, 3), dtype=np.uint8)
@@ -294,7 +398,8 @@ def test_cli_strength_zero_matches_gt(tmp_path):
     assert np.array_equal(produced, gt)
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    assert set(report) == {"gt", "atmo", "size", "params", "align", "clip", "light", "seconds"}
+    assert set(report) == {"gt", "atmo", "size", "params", "align", "clip", "light",
+                           "chroma", "seconds"}
     assert set(report["params"]) == {"scene", "strength", "local_shading",
                                      "highlight_clip", "clip_knee", "clip_max"}
     assert set(report["align"]) == {
@@ -561,7 +666,7 @@ def test_video_strength_zero_keeps_gt_pixels(tmp_path):
     assert set(report) == {
         "gt", "atmo", "size", "frames", "fps", "kind", "started_at",
         "finished_at", "cache", "timing", "ref_frame", "ref_matched",
-        "params", "align", "clip", "light", "seconds",
+        "params", "align", "clip", "light", "chroma", "seconds",
         "atmo_kind", "fields_mode"}
     assert report["atmo_kind"] == "image" and report["fields_mode"] == "fixed"
     assert report["size"] == [VW, VH] and report["frames"] == VN
