@@ -64,6 +64,7 @@ let moved = false
 let cursor: Vec2 | null = null
 let raf = 0
 let observer: ResizeObserver | null = null
+let videoFrameHandle = 0
 
 function resetView(): void {
   pose.yaw = 0
@@ -466,6 +467,25 @@ function onVideoTime(): void {
   dirty = true
 }
 
+/**
+ * 按视频帧驱动重绘。
+ *
+ * 只用 ``timeupdate`` 时它大约每 250ms 触发一次，画布只有 4fps；而视频实际解码
+ * 30fps。``requestVideoFrameCallback`` 每来一帧回调一次，纹理与视频同节拍。
+ */
+function watchVideoFrames(): void {
+  const element = video.value
+  if (!element || typeof element.requestVideoFrameCallback !== 'function') return
+  if (videoFrameHandle && typeof element.cancelVideoFrameCallback === 'function') {
+    element.cancelVideoFrameCallback(videoFrameHandle)
+  }
+  const onFrame = (): void => {
+    dirty = true
+    videoFrameHandle = element.requestVideoFrameCallback(onFrame)
+  }
+  videoFrameHandle = element.requestVideoFrameCallback(onFrame)
+}
+
 function onScrub(event: Event): void {
   seek(Number((event.target as HTMLInputElement).value))
 }
@@ -522,6 +542,7 @@ onMounted(() => {
   }
   // immediate 的 watch 在 setup 阶段就跑了，那时 <video> 还没挂载；这里补一次。
   applySource(props.sourceUrl)
+  watchVideoFrames()
   raf = requestAnimationFrame(frame)
 })
 
@@ -535,6 +556,10 @@ onBeforeUnmount(() => {
     element.removeEventListener('play', onPlayState)
     element.removeEventListener('pause', onPlayState)
     element.removeEventListener('loadedmetadata', onVideoTime)
+    if (videoFrameHandle && typeof element.cancelVideoFrameCallback === 'function') {
+      element.cancelVideoFrameCallback(videoFrameHandle)
+      videoFrameHandle = 0
+    }
   }
   for (const item of [texture]) {
     if (item && gl) gl.deleteTexture(item)
