@@ -218,7 +218,8 @@ onMounted(() => {
   void loadSampleReport()
 })
 
-watch(draft, applyDraft)
+// 草稿只在进入页面时回填一次：之后的 payload 刷新（区域保存触发的重取、任务完成后的
+// 刷新）不能把用户正在改的默认参数冲掉，否则刚点的数值会瞬间弹回旧值。
 watch(current, () => void loadReport())
 watch(
   () => payload.value?.sample_report?.open_url,
@@ -305,7 +306,6 @@ const percent = (value: number | undefined): string =>
           :source-url="gtUrl"
           :defaults="localDefaults"
           @update:defaults="onDefaults"
-          @updated="(info) => emit('updated', info)"
           @busy="regionBusy = $event"
         />
 

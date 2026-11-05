@@ -7,7 +7,7 @@ import { PARAMS, emptyRegionParams } from '@/constants/relightParams'
 import type { DefaultParams, ParamDesc } from '@/constants/relightParams'
 import { saveRelightRegions } from '@/api/relight'
 import { saveRelightDraft } from '@/api/case'
-import type { CaseInfo, RelightPayload, RelightRegion } from '@/types/case-info'
+import type { RelightPayload, RelightRegion } from '@/types/case-info'
 import type { LonLat } from '@/utils/erpMath'
 
 /**
@@ -22,7 +22,6 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  updated: [info: CaseInfo]
   'update:defaults': [value: DefaultParams]
   busy: [value: boolean]
 }>()
@@ -41,6 +40,9 @@ const saveState = ref<'idle' | 'pending' | 'saved' | 'error'>('idle')
 const error = ref<string | null>(props.payload.regions_error)
 let regionTimer: number | null = null
 let draftTimer: number | null = null
+/** 本地改动序号：响应回来时用它判断期间是否又改过，避免旧快照盖掉新值。 */
+let changeSeq = 0
+let draftChain: Promise<unknown> = Promise.resolve()
 
 const selected = computed(
   () => regions.value.find((region) => region.id === selectedId.value) ?? null,
@@ -93,44 +95,45 @@ function setDefault(desc: ParamDesc, value: number | { knee: number; max: number
 }
 
 function scheduleRegionSave(): void {
+  changeSeq += 1
   saveState.value = 'pending'
   if (regionTimer) window.clearTimeout(regionTimer)
   regionTimer = window.setTimeout(() => void saveRegions(), 700)
 }
 
 async function saveRegions(): Promise<void> {
-  if (saving.value) {
-    scheduleRegionSave()
-    return
-  }
+  if (saving.value) return          // 在 finally 里补排一次
+  const seq = changeSeq
+  const snapshot = regions.value.map((region) => ({ ...region, ranges: null }))
   saving.value = true
   try {
-    const info = await saveRelightRegions(props.caseName, {
-      version: 1,
-      regions: regions.value.map((region) => ({ ...region, ranges: null })),
-    })
-    saveState.value = 'saved'
+    await saveRelightRegions(props.caseName, { version: 1, regions: snapshot })
     error.value = null
-    emit('updated', info)
   } catch (err) {
     saveState.value = 'error'
     error.value = err instanceof Error ? err.message : '区域保存失败'
     ElMessage.error(error.value)
-  } finally {
     saving.value = false
+    return
   }
+  saving.value = false
+  if (changeSeq !== seq) scheduleRegionSave()
+  else saveState.value = 'saved'
 }
 
 function scheduleDraftSave(next: DefaultParams): void {
   if (draftTimer) window.clearTimeout(draftTimer)
   draftTimer = window.setTimeout(() => {
-    void saveRelightDraft(props.caseName, {
-      strength: next.strength,
-      local_shading: next.local_shading,
-      highlight_clip: next.clip !== null,
-      clip_knee: next.clip?.knee ?? 0.72,
-      clip_max: next.clip?.max ?? 0.98,
-    }).catch(() => undefined)
+    // 串行化：后一次一定排在前一次之后，最后一次的值才是落盘值。
+    draftChain = draftChain.then(() =>
+      saveRelightDraft(props.caseName, {
+        strength: next.strength,
+        local_shading: next.local_shading,
+        highlight_clip: next.clip !== null,
+        clip_knee: next.clip?.knee ?? 0.72,
+        clip_max: next.clip?.max ?? 0.98,
+      }).catch(() => undefined),
+    )
   }, 700)
 }
 
@@ -243,6 +246,8 @@ function toggleEnabled(id: string): void {
 watch(
   () => props.payload.regions,
   (doc) => {
+    // 本地有未落盘的改动时，服务端返回的旧快照不能覆盖正在编辑的值。
+    if (busy.value) return
     const next = doc?.regions ?? []
     if (JSON.stringify(next) === JSON.stringify(regions.value)) return
     regions.value = next.slice()
