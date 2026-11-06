@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -319,6 +320,72 @@ def _log_geometry(request, name: str, event: str, old: dict, new: dict) -> None:
         "rid": getattr(request.state, "rid", None),
         "old": old, "new": new,
     }})
+
+
+# ── 选区范围的剪贴板负载（决策 92）──────────────────────────────────────
+
+REGION_KIND = "vrstudio.patch.region"
+REGION_VERSION = 1
+
+
+def _region_payload(store: PreviewStore) -> dict:
+    """导出当前 case 已保存的选区三段；前端直接序列化进剪贴板。"""
+    case = store.case
+    if not (case.viewport and case.inner and case.frames):
+        raise ValueError("选区还没保存完整（viewport/inner/frames 缺一段）")
+    return {
+        "kind": REGION_KIND,
+        "version": REGION_VERSION,
+        "case": case.name,
+        # 只给人和日志看：导入忽略来源 case 与导出时间，跨 case 粘贴是正常用法。
+        "exported_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "viewport": dict(case.viewport),
+        "inner": dict(case.inner),
+        "frames": dict(case.frames),
+    }
+
+
+def _region_fields(data) -> dict:
+    """校验剪贴板负载，抽出 import_region() 需要的值；不合法抛 ValueError。"""
+    if not isinstance(data, dict):
+        raise ValueError("选区数据必须是 JSON 对象")
+    if data.get("kind") != REGION_KIND:
+        raise ValueError("剪贴板内容不是 vrstudio 选区范围")
+    if data.get("version") != REGION_VERSION:
+        raise ValueError(f"不支持的选区数据版本：{data.get('version')!r}")
+    viewport = data.get("viewport")
+    inner = data.get("inner")
+    frames = data.get("frames")
+    for label, value in (("viewport", viewport), ("inner", inner), ("frames", frames)):
+        if not isinstance(value, dict):
+            raise ValueError(f"选区数据缺少 {label}，或 {label} 不是对象")
+
+    def number(obj: dict, key: str, label: str, *, integer: bool = False):
+        raw = obj.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise ValueError(f"{label}.{key} 必须是数字")
+        if not math.isfinite(raw):
+            raise ValueError(f"{label}.{key} 必须是有限数字")
+        if integer:
+            if float(raw) != int(raw):
+                raise ValueError(f"{label}.{key} 必须是整数")
+            return int(raw)
+        return float(raw)
+
+    width = number(viewport, "width", "viewport", integer=True)
+    height = number(viewport, "height", "viewport", integer=True)
+    if width <= 0 or height <= 0:
+        raise ValueError(f"viewport 尺寸必须为正：{width}×{height}")
+    return {
+        "yaw_deg": number(viewport, "yaw_deg", "viewport"),
+        "pitch_deg": number(viewport, "pitch_deg", "viewport"),
+        "fov_h_deg": number(viewport, "fov_h_deg", "viewport"),
+        "viewport_size": (width, height),
+        "inner": {key: number(inner, key, "inner", integer=True)
+                  for key in ("x", "y", "width", "height")},
+        "frames": {key: number(frames, key, "frames", integer=True)
+                   for key in ("start", "end")},
+    }
 
 
 # ── 页面 ─────────────────────────────────────────────────────────────────
@@ -3643,6 +3710,60 @@ async def api_reset_draft(request):
     return JSONResponse(_geometry_payload(store, name))
 
 
+async def api_region_export(request):
+    """导出选区范围：读 case.toml 的已保存值，不读前端可能未落盘的状态。"""
+    name = request.path_params["name"]
+    store, bad = _selection_store(name)
+    if bad is not None:
+        return bad
+    if store.case.flow != "patch":
+        return JSONResponse(
+            {"error": "只有视频 patch 支持选区范围导出；patchimg 没有 fov 与抽取范围"},
+            status_code=400)
+    try:
+        payload = _region_payload(store)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(payload)
+
+
+async def api_region_import(request):
+    """导入选区范围：一次校验后写入 viewport/inner/frames，并返回轻量几何应答。"""
+    name = request.path_params["name"]
+    store, bad = _selection_store(name)
+    if bad is not None:
+        return bad
+    if store.case.flow != "patch":
+        return JSONResponse(
+            {"error": "只有视频 patch 支持选区范围导入；patchimg 没有 fov 与抽取范围"},
+            status_code=400)
+    try:
+        data = await request.json()
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "请求体不是合法 JSON"}, status_code=400)
+    try:
+        values = _region_fields(data)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    old = {
+        "viewport": dict(store.case.viewport or {}),
+        "inner": dict(store.case.inner or {}),
+        "frames": dict(store.case.frames or {}),
+    }
+    try:
+        scaled = await asyncio.to_thread(store.import_region, **values)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    _remember_store(name, store)
+    _log_geometry(request, name, "region_import", old, {
+        "viewport": dict(store.case.viewport or {}),
+        "inner": dict(store.case.inner or {}),
+        "frames": dict(store.case.frames or {}),
+    })
+    return JSONResponse(_geometry_payload(
+        store, name, frames=dict(store.case.frames or {}), scaled=scaled))
+
+
 # ── 流水线：统一入口 submit(op) → 单通道队列跑 CLI ───────────────────────
 
 
@@ -4069,6 +4190,8 @@ routes = [
     Route("/api/case/{name}/inner", api_inner, methods=["POST"]),
     Route("/api/case/{name}/nudge", api_nudge, methods=["POST"]),
     Route("/api/case/{name}/reset-draft", api_reset_draft, methods=["POST"]),
+    Route("/api/case/{name}/region/export", api_region_export),
+    Route("/api/case/{name}/region/import", api_region_import, methods=["POST"]),
     Route("/api/case/{name}/run", api_run, methods=["POST"]),
     Route("/api/case/{name}/proxy", api_proxy, methods=["GET", "POST"]),
     Route("/api/task", api_task),
@@ -4107,7 +4230,7 @@ class NoStoreMiddleware:
 #: 否则每次拖框都会让另一页的提示词保存撞 409。
 _REVISION_WRITES = re.compile(
     r"^/api/case/(?P<name>[^/]+)/"
-    r"(?:draft|prompt|params|assets|submit|reset-draft|owner|keyframe/(?:prompt|refs|pick|handoff))$"
+    r"(?:draft|prompt|params|assets|submit|reset-draft|owner|region/import|keyframe/(?:prompt|refs|pick|handoff))$"
 )
 
 #: 几何高频写端点：拖动帧不带 revision 头，照旧放行不推进 revision；

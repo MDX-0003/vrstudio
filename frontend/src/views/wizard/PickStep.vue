@@ -1,10 +1,19 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { CaretLeft, CaretRight, Refresh, VideoPlay } from '@element-plus/icons-vue'
+import {
+  CaretLeft,
+  CaretRight,
+  CopyDocument,
+  Download,
+  Refresh,
+  VideoPlay,
+} from '@element-plus/icons-vue'
 import {
   ensureProxy,
+  exportRegion,
   fetchProxy,
+  importRegion,
   nudgeViewport,
   resetDraft,
   saveDraft,
@@ -22,9 +31,11 @@ import type {
   Footprint,
   FrameRange,
   Inner,
+  RegionPayload,
   Viewport,
   ViewportOption,
 } from '@/types/case-info'
+import { ClipboardUnavailableError, readClipboard, writeClipboard } from '@/utils/clipboard'
 
 const props = defineProps<{ caseName: string; info: CaseInfo }>()
 const emit = defineEmits<{
@@ -53,6 +64,11 @@ const playing = ref(false)
 const proxyState = ref(props.info.proxy?.state ?? 'missing')
 const proxyBusy = ref(false)
 const frameSaving = ref(false)
+const regionExporting = ref(false)
+const regionImporting = ref(false)
+const manualDialog = ref(false)
+const manualMode = ref<'copy' | 'paste'>('paste')
+const manualText = ref('')
 const vpVersion = ref(Date.now())
 let proxyTimer: ReturnType<typeof setInterval> | null = null
 let joystickTimer: ReturnType<typeof setInterval> | null = null
@@ -60,6 +76,8 @@ let joystickInFlight = false
 
 /** patchimg 的源是单张 2:1 ERP 图：没有时间轴、代理由源图直出。 */
 const isImage = computed(() => props.info.flow === 'patchimg')
+/** 选区范围的导入导出只属于视频 patch：patchimg 没有 fov 与抽取范围。 */
+const isPatch = computed(() => props.info.flow === 'patch')
 
 const frameCount = computed(() => {
   if (props.info.frame_count) return props.info.frame_count
@@ -131,6 +149,11 @@ function applyGeometry(payload: GeometryPayload): void {
   if (payload.coverage !== undefined) coverage.value = payload.coverage
   if (payload.fov_range) fovRange.value = payload.fov_range
   fov.value = payload.viewport.fov_h_deg
+  if (payload.frames) {
+    frames.value = payload.frames
+    startFrame.value = payload.frames.start
+    endFrame.value = payload.frames.end
+  }
   vpVersion.value = Date.now()
   emit('geometry', payload)
 }
@@ -284,6 +307,96 @@ async function resetToExtract(): Promise<void> {
   }
 }
 
+function messageOf(err: unknown, fallback: string): string {
+  return err instanceof Error && err.message ? err.message : fallback
+}
+
+/** 导出已保存的选区到剪贴板；写不进去时弹手动复制框。 */
+async function exportRange(): Promise<void> {
+  if (regionExporting.value) return
+  regionExporting.value = true
+  try {
+    const payload = await exportRegion(props.caseName)
+    const text = JSON.stringify(payload, null, 2)
+    if (await writeClipboard(text)) {
+      ElMessage.success(
+        `已复制选区范围（${payload.viewport.width}×${payload.viewport.height}，` +
+          `帧 ${payload.frames.start}–${payload.frames.end}）`,
+      )
+      return
+    }
+    manualMode.value = 'copy'
+    manualText.value = text
+    manualDialog.value = true
+  } catch (err) {
+    ElMessage.error(messageOf(err, '导出选区范围失败'))
+  } finally {
+    regionExporting.value = false
+  }
+}
+
+/** 解析并写入一段剪贴板文本；成功返回 true，错误已经用消息提示过。 */
+async function applyRegionText(text: string): Promise<boolean> {
+  if (!text.trim()) {
+    ElMessage.warning('剪贴板是空的，先复制一个选区范围')
+    return false
+  }
+  let data: unknown
+  try {
+    data = JSON.parse(text)
+  } catch {
+    ElMessage.error('剪贴板内容不是选区范围（不是合法 JSON）')
+    return false
+  }
+  try {
+    const payload = await importRegion(props.caseName, data as RegionPayload)
+    applyGeometry(payload)
+    const size = `${payload.viewport.width}×${payload.viewport.height}`
+    ElMessage.success(
+      payload.scaled ? `已导入选区范围；inner 已按当前视口 ${size} 缩放` : '已导入选区范围',
+    )
+    return true
+  } catch (err) {
+    ElMessage.error(messageOf(err, '导入选区范围失败'))
+    return false
+  }
+}
+
+/** 读剪贴板并导入；读不到时转为手动粘贴对话框。 */
+async function importRange(): Promise<void> {
+  if (regionImporting.value) return
+  regionImporting.value = true
+  try {
+    let text: string
+    try {
+      text = await readClipboard()
+    } catch (err) {
+      if (err instanceof ClipboardUnavailableError) {
+        manualMode.value = 'paste'
+        manualText.value = ''
+        manualDialog.value = true
+        return
+      }
+      throw err
+    }
+    await applyRegionText(text)
+  } catch (err) {
+    ElMessage.error(messageOf(err, '读取剪贴板失败'))
+  } finally {
+    regionImporting.value = false
+  }
+}
+
+async function confirmManualImport(): Promise<void> {
+  if (regionImporting.value) return
+  regionImporting.value = true
+  try {
+    if (await applyRegionText(manualText.value)) manualDialog.value = false
+  } finally {
+    regionImporting.value = false
+  }
+}
+
 async function buildProxy(): Promise<void> {
   if (proxyBusy.value || proxyReady.value) return
   proxyBusy.value = true
@@ -433,6 +546,15 @@ onUnmounted(() => {
         <el-button link type="primary" :icon="Refresh" @click="resetToExtract">重置选区</el-button>
       </div>
       <div class="panel-body">
+        <div v-if="isPatch" class="region-actions">
+          <el-button :icon="CopyDocument" :loading="regionExporting" @click="exportRange">
+            导出范围
+          </el-button>
+          <el-button :icon="Download" :loading="regionImporting" @click="importRange">
+            导入范围
+          </el-button>
+        </div>
+
         <div class="vp-toolbar">
           <label class="ctl">
             <span>视口尺寸</span>
@@ -581,6 +703,34 @@ onUnmounted(() => {
         </div>
       </div>
     </aside>
+
+    <el-dialog
+      v-model="manualDialog"
+      :title="manualMode === 'copy' ? '手动复制选区范围' : '手动粘贴选区范围'"
+      width="560px"
+    >
+      <p class="manual-hint muted">
+        {{
+          manualMode === 'copy'
+            ? '浏览器拒绝了剪贴板写入。下面是选区 JSON，按 Ctrl+C 复制。'
+            : '浏览器拒绝了剪贴板读取。把选区 JSON 粘贴到下面，再点「导入」。'
+        }}
+      </p>
+      <el-input v-model="manualText" type="textarea" :rows="12" :readonly="manualMode === 'copy'" />
+      <template #footer>
+        <el-button @click="manualDialog = false">
+          {{ manualMode === 'copy' ? '关闭' : '取消' }}
+        </el-button>
+        <el-button
+          v-if="manualMode === 'paste'"
+          type="primary"
+          :loading="regionImporting"
+          @click="confirmManualImport"
+        >
+          导入
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -644,6 +794,18 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
+}
+
+.region-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.manual-hint {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-sm);
 }
 
 .vp-toolbar {

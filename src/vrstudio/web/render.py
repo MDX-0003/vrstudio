@@ -50,6 +50,24 @@ def _read_frame(video: str, index: int) -> np.ndarray:
     return frame
 
 
+def _scale_inner(inner: dict, from_w: int, from_h: int,
+                 to_w: int, to_h: int) -> dict:
+    """把 inner 从一套视口像素缩放到另一套，四舍五入并钳进目标视口。
+
+    切换视口尺寸与跨 case 导入选区共用这一份规则：inner 是视口像素坐标，
+    换到不同尺寸时只保留相对位置与相对大小。
+    """
+    x = round(int(inner.get("x", 0)) * to_w / from_w)
+    y = round(int(inner.get("y", 0)) * to_h / from_h)
+    w = round(int(inner.get("width", 0)) * to_w / from_w)
+    h = round(int(inner.get("height", 0)) * to_h / from_h)
+    w = max(1, min(int(w), to_w))
+    h = max(1, min(int(h), to_h))
+    x = max(0, min(int(x), to_w - w))
+    y = max(0, min(int(y), to_h - h))
+    return {"x": x, "y": y, "width": w, "height": h}
+
+
 class PreviewStore:
     """一个 case 一个实例；case.toml 变更（mtime 变化）时由 app 层重建。"""
 
@@ -130,13 +148,7 @@ class PreviewStore:
         old_h = int(vp.get("height") or 0)
         inner = dict(self.case.inner or {})
         if old_w > 0 and old_h > 0 and inner:
-            inner = {
-                "x": round(int(inner.get("x", 0)) * width / old_w),
-                "y": round(int(inner.get("y", 0)) * height / old_h),
-                "width": round(int(inner.get("width", 0)) * width / old_w),
-                "height": round(int(inner.get("height", 0)) * height / old_h),
-            }
-            self.case.inner = inner
+            self.case.inner = _scale_inner(inner, old_w, old_h, width, height)
         vp["width"] = width
         vp["height"] = height
         self.case.viewport = vp
@@ -168,6 +180,61 @@ class PreviewStore:
         self.save_geometry()
         # inner 由页面的 #innerBox 单独绘制，图片内容与它无关：不刷新 preview
         # 标识，拖框就不会触发一次 8K 解码 + 重投影。
+
+    def import_region(self, *, yaw_deg: float, pitch_deg: float, fov_h_deg: float,
+                      viewport_size: tuple[int, int], inner: dict,
+                      frames: dict) -> bool:
+        """把另一个 case 的选区写进本 case；目标视口尺寸不变。
+
+        ``viewport_size`` 是来源视口的像素尺寸，只参与 inner 换算。所有校验
+        都在写盘之前完成，任一字段不合法就抛 ValueError，case.toml 保持原样。
+        返回 inner 是否因为尺寸不同被缩放。
+        """
+        vp = self._vp()
+        try:
+            target_w = int(vp["width"])
+            target_h = int(vp["height"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("当前 case 还没有视口，无法导入选区") from None
+        if not FOV_MIN_DEG <= fov_h_deg <= FOV_MAX_DEG:
+            raise ValueError(
+                f"fov 必须在 {FOV_MIN_DEG:g}–{FOV_MAX_DEG:g}° 之间，收到 {fov_h_deg:g}")
+        if not -89.0 <= pitch_deg <= 89.0:
+            raise ValueError(f"pitch 必须在 ±89° 之间，收到 {pitch_deg:g}")
+        if not -180.0 <= yaw_deg <= 180.0:
+            raise ValueError(f"yaw 必须在 ±180° 之间，收到 {yaw_deg:g}")
+        source_w, source_h = viewport_size
+        if source_w <= 0 or source_h <= 0:
+            raise ValueError(f"来源视口尺寸不合法：{source_w}×{source_h}")
+        x, y, w, h = (int(inner.get(k, 0)) for k in ("x", "y", "width", "height"))
+        if x < 0 or y < 0 or w <= 0 or h <= 0:
+            raise ValueError(f"inner 不合法：x={x} y={y} {w}×{h}")
+        if x + w > source_w or y + h > source_h:
+            raise ValueError(
+                f"inner 超出视口：x+w={x + w}（上限 {source_w}），"
+                f"y+h={y + h}（上限 {source_h}）")
+        if self.frame_count <= 0:
+            raise ValueError("读不到当前 case 的帧数，无法校验导入的帧范围")
+        start = int(frames.get("start", -1))
+        end = int(frames.get("end", -1))
+        if not 0 <= start < end <= self.frame_count - 1:
+            raise ValueError(
+                f"帧范围 {start}–{end} 超出当前 case 的 0–{self.frame_count - 1}，"
+                "且开始必须小于结束")
+        scaled = (target_w, target_h) != (source_w, source_h)
+        inner = (_scale_inner(inner, source_w, source_h, target_w, target_h)
+                 if scaled else {"x": x, "y": y, "width": w, "height": h})
+        vp["yaw_deg"] = round(float(yaw_deg), 2)
+        vp["pitch_deg"] = round(float(pitch_deg), 2)
+        vp["fov_h_deg"] = round(float(fov_h_deg), 1)
+        new_frames = {"start": start, "end": end}
+        self.case.viewport = vp
+        self.case.inner = inner
+        self.case.frames = new_frames
+        case_mod.set_draft(self.name, viewport=vp, inner=inner,
+                           frames=new_frames, root=self.root)
+        self.key = self._new_key()
+        return scaled
 
     def nudge(self, dyaw: float, dpitch: float) -> tuple[float, float]:
         """摇杆微调；服务端做算术并写回，case.toml 里永远是合法值

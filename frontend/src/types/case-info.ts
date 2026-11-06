@@ -149,6 +149,17 @@ export interface FrameRange {
   end: number
 }
 
+/** 选区范围的剪贴板负载（决策 92）：patch 选区页的导出/导入共用这一份格式。 */
+export interface RegionPayload {
+  kind: string
+  version: number
+  case: string
+  exported_at: string
+  viewport: Viewport
+  inner: Inner
+  frames: FrameRange
+}
+
 export interface ViewportOption {
   label: string
   width: number

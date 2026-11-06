@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
 
+import cv2
+import numpy as np
 import pytest
 from starlette.testclient import TestClient
 
@@ -2410,3 +2412,180 @@ def test_tasks_api_returns_owner_and_positions(client, monkeypatch):
     filtered = client.get("/api/tasks?scope=all&case=p2")
     assert filtered.status_code == 200
     assert [task["kind"] for task in filtered.json()["tasks"]] == ["merge"]
+
+
+# ── 选区范围的导出与导入（决策 92）──────────────────────────────────────
+
+
+def _write_erp_video(path: Path, frames: int = 8) -> Path:
+    """写一段足够让 cv2 读出帧数的真视频；导入要按帧数校验 frames。"""
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (64, 32))
+    assert writer.isOpened(), f"cannot open VideoWriter for {path}"
+    frame = np.zeros((32, 64, 3), dtype=np.uint8)
+    for index in range(frames):
+        frame[:] = index * 20
+        writer.write(frame)
+    writer.release()
+    return path
+
+
+def _video_patch_case(tmp_path: Path, name: str = "p1", frames: int = 8) -> str:
+    src = _write_erp_video(tmp_path / f"{name}.mp4", frames)
+    case_mod.create(name, "patch", src, root=tmp_path)
+    case_mod.set_draft(name, viewport=VIEWPORT, inner=INNER,
+                       frames={"start": 0, "end": frames - 1}, root=tmp_path)
+    return name
+
+
+def _region_body(**overrides) -> dict:
+    body = {
+        "kind": "vrstudio.patch.region",
+        "version": 1,
+        "case": "other",
+        "exported_at": "2026-11-06T16:20:00+08:00",
+        "viewport": dict(VIEWPORT),
+        "inner": dict(INNER),
+        "frames": {"start": 1, "end": 6},
+    }
+    body.update(overrides)
+    return body
+
+
+def test_region_export_returns_saved_selection(client, patch_case):
+    r = client.get("/api/case/p1/region/export")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["kind"] == "vrstudio.patch.region" and body["version"] == 1
+    assert body["case"] == "p1"
+    assert body["viewport"] == VIEWPORT
+    assert body["inner"] == INNER
+    assert body["frames"] == FRAMES
+    assert "assets" not in body and "prompt" not in body
+
+
+def test_region_export_rejects_other_flows(client, tmp_path):
+    src = tmp_path / "f.mp4"
+    src.write_bytes(b"fake fullredraw bytes")
+    case_mod.create("f1", "fullredraw", src, root=tmp_path)
+    r = client.get("/api/case/f1/region/export")
+    assert r.status_code == 400 and "没有选区草稿" in r.json()["error"]
+
+    img = tmp_path / "erp.png"
+    cv2.imwrite(str(img), np.zeros((32, 64, 3), dtype=np.uint8))
+    case_mod.create("i1", "patchimg", img, root=tmp_path)
+    case_mod.set_draft("i1", viewport=VIEWPORT, inner=INNER, root=tmp_path)
+    r = client.get("/api/case/i1/region/export")
+    assert r.status_code == 400 and "视频 patch" in r.json()["error"]
+
+    assert client.get("/api/case/nope/region/export").status_code == 404
+
+
+def test_region_import_writes_geometry_frames_and_bumps_revision(client, tmp_path):
+    _video_patch_case(tmp_path)
+    body = _region_body(
+        viewport={"yaw_deg": 45.55, "pitch_deg": -12.3, "fov_h_deg": 75.5,
+                  "width": 320, "height": 180},
+        inner={"x": 20, "y": 30, "width": 100, "height": 60},
+        frames={"start": 2, "end": 6},
+    )
+    r = client.post("/api/case/p1/region/import", json=body)
+    assert r.status_code == 200, r.text
+    assert r.headers["x-case-revision"] == "1"
+    payload = r.json()
+    assert payload["scaled"] is False
+    assert payload["frames"] == {"start": 2, "end": 6}
+    assert payload["viewport"]["yaw_deg"] == 45.55
+    assert payload["inner"] == {"x": 20, "y": 30, "width": 100, "height": 60}
+    assert "previews" in payload
+
+    saved = case_mod.load("p1", tmp_path)
+    assert saved.viewport["yaw_deg"] == 45.55
+    assert saved.viewport["pitch_deg"] == -12.3
+    assert saved.viewport["fov_h_deg"] == 75.5
+    assert saved.inner == {"x": 20, "y": 30, "width": 100, "height": 60}
+    assert saved.frames == {"start": 2, "end": 6}
+
+
+def test_region_import_scales_inner_but_keeps_target_viewport_size(client, tmp_path):
+    _video_patch_case(tmp_path)
+    body = _region_body(
+        viewport={"yaw_deg": -30.0, "pitch_deg": 5.0, "fov_h_deg": 60.0,
+                  "width": 1920, "height": 1080},
+        inner={"x": 480, "y": 270, "width": 960, "height": 540},
+    )
+    r = client.post("/api/case/p1/region/import", json=body)
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload["scaled"] is True
+    assert (payload["viewport"]["width"], payload["viewport"]["height"]) == (320, 180)
+    assert payload["inner"] == {"x": 80, "y": 45, "width": 160, "height": 90}
+    saved = case_mod.load("p1", tmp_path)
+    assert (saved.viewport["width"], saved.viewport["height"]) == (320, 180)
+    assert saved.inner == {"x": 80, "y": 45, "width": 160, "height": 90}
+
+
+def test_region_export_import_roundtrip_is_exact(client, tmp_path):
+    _video_patch_case(tmp_path)
+    exported = client.get("/api/case/p1/region/export").json()
+    body = _region_body(viewport=exported["viewport"], inner=exported["inner"],
+                        frames={"start": 1, "end": 3})
+    r = client.post("/api/case/p1/region/import", json=body)
+    assert r.status_code == 200, r.text
+    assert r.json()["inner"] == exported["inner"]
+    assert r.json()["frames"] == {"start": 1, "end": 3}
+
+
+def test_region_import_rejects_bad_payload_without_writing(client, tmp_path):
+    _video_patch_case(tmp_path)
+    before = case_mod.load("p1", tmp_path)
+    cases = [
+        ("kind", _region_body(kind="nope")),
+        ("version", _region_body(version=2)),
+        ("fov", _region_body(viewport={**VIEWPORT, "fov_h_deg": 10.0})),
+        ("pitch", _region_body(viewport={**VIEWPORT, "pitch_deg": 100.0})),
+        ("yaw", _region_body(viewport={**VIEWPORT, "yaw_deg": 200.0})),
+        ("inner out of bounds",
+         _region_body(inner={"x": 200, "y": 40, "width": 200, "height": 100})),
+        ("frames out of bounds", _region_body(frames={"start": 0, "end": 99})),
+        ("frames empty", _region_body(frames={"start": 3, "end": 3})),
+        ("bool width", _region_body(viewport={**VIEWPORT, "width": True})),
+        ("string yaw", _region_body(viewport={**VIEWPORT, "yaw_deg": "10"})),
+    ]
+    missing_width = _region_body()
+    missing_width["viewport"].pop("width")
+    cases.append(("missing width", missing_width))
+    no_frames = _region_body()
+    no_frames.pop("frames")
+    cases.append(("no frames", no_frames))
+
+    for label, body in cases:
+        r = client.post("/api/case/p1/region/import", json=body)
+        assert r.status_code == 400, (label, r.text)
+        assert r.json()["error"], label
+
+    after = case_mod.load("p1", tmp_path)
+    assert after.viewport == before.viewport
+    assert after.inner == before.inner
+    assert after.frames == before.frames
+
+
+def test_region_import_rejects_malformed_json(client, tmp_path):
+    _video_patch_case(tmp_path)
+    r = client.post("/api/case/p1/region/import", content=b"{oops",
+                    headers={"Content-Type": "application/json"})
+    assert r.status_code == 400 and "JSON" in r.json()["error"]
+
+
+def test_region_import_respects_revision(client, tmp_path):
+    _video_patch_case(tmp_path)
+    body = _region_body()
+    first = client.post("/api/case/p1/region/import", json=body)
+    assert first.status_code == 200
+    assert first.headers["x-case-revision"] == "1"
+    stale = client.post("/api/case/p1/region/import", json=body,
+                        headers={"X-Case-Revision": "0"})
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "revision_conflict"
+    again = client.post("/api/case/p1/region/import", json=body)
+    assert again.status_code == 200
+    assert again.headers["x-case-revision"] == "2"

@@ -137,6 +137,8 @@ function applyGeometry(payload: GeometryPayload): void {
     inner: payload.inner,
     viewport_footprint: payload.viewport_footprint,
     previews: payload.previews,
+    // 选区范围导入会一并写 frames；其他几何动作不带，保持原值。
+    ...(payload.frames ? { frames: payload.frames } : {}),
   }
 }
 
