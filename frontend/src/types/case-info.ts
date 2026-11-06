@@ -157,7 +157,11 @@ export interface RegionPayload {
   exported_at: string
   viewport: Viewport
   inner: Inner
+  /** 来源 fps 下的绝对帧号；导入时按 fps 换成秒再落到目标时间轴。 */
   frames: FrameRange
+  /** 来源视频的帧率与总帧数，用来把 frames 换算到目标 case 的时间轴。 */
+  fps: number
+  frame_count: number
 }
 
 export interface ViewportOption {

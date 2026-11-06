@@ -333,6 +333,8 @@ def _region_payload(store: PreviewStore) -> dict:
     case = store.case
     if not (case.viewport and case.inner and case.frames):
         raise ValueError("选区还没保存完整（viewport/inner/frames 缺一段）")
+    if store.frame_count <= 0 or store.fps <= 0:
+        raise ValueError("读不到源片的帧率或帧数，无法导出抽取范围")
     return {
         "kind": REGION_KIND,
         "version": REGION_VERSION,
@@ -342,6 +344,9 @@ def _region_payload(store: PreviewStore) -> dict:
         "viewport": dict(case.viewport),
         "inner": dict(case.inner),
         "frames": dict(case.frames),
+        # 帧号是来源 fps 下的绝对帧；导入按时间换算到目标 fps，避免帧号直接搬运。
+        "fps": float(store.fps),
+        "frame_count": int(store.frame_count),
     }
 
 
@@ -376,6 +381,12 @@ def _region_fields(data) -> dict:
     height = number(viewport, "height", "viewport", integer=True)
     if width <= 0 or height <= 0:
         raise ValueError(f"viewport 尺寸必须为正：{width}×{height}")
+    fps = number(data, "fps", "选区数据")
+    frame_count = number(data, "frame_count", "选区数据", integer=True)
+    if fps <= 0:
+        raise ValueError(f"fps 必须为正：{fps:g}")
+    if frame_count <= 0:
+        raise ValueError(f"来源总帧数必须为正：{frame_count}")
     return {
         "yaw_deg": number(viewport, "yaw_deg", "viewport"),
         "pitch_deg": number(viewport, "pitch_deg", "viewport"),
@@ -385,6 +396,8 @@ def _region_fields(data) -> dict:
                   for key in ("x", "y", "width", "height")},
         "frames": {key: number(frames, key, "frames", integer=True)
                    for key in ("start", "end")},
+        "source_fps": fps,
+        "source_frame_count": frame_count,
     }
 
 
@@ -3751,7 +3764,7 @@ async def api_region_import(request):
         "frames": dict(store.case.frames or {}),
     }
     try:
-        scaled = await asyncio.to_thread(store.import_region, **values)
+        scaled, frames_clamped = await asyncio.to_thread(store.import_region, **values)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     _remember_store(name, store)
@@ -3761,7 +3774,8 @@ async def api_region_import(request):
         "frames": dict(store.case.frames or {}),
     })
     return JSONResponse(_geometry_payload(
-        store, name, frames=dict(store.case.frames or {}), scaled=scaled))
+        store, name, frames=dict(store.case.frames or {}),
+        scaled=scaled, frames_clamped=frames_clamped))
 
 
 # ── 流水线：统一入口 submit(op) → 单通道队列跑 CLI ───────────────────────

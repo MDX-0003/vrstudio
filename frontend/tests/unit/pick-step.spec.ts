@@ -133,6 +133,8 @@ function regionPayload(): RegionPayload {
     viewport: { yaw_deg: 12.5, pitch_deg: -3, fov_h_deg: 59, width: 320, height: 180 },
     inner: { x: 100, y: 50, width: 200, height: 100 },
     frames: { start: 1, end: 6 },
+    fps: 30,
+    frame_count: 8,
   }
 }
 
@@ -286,6 +288,24 @@ describe('PickStep 选区范围的剪贴板导入导出（决策 92）', () => {
     expect(ElMessage.success).toHaveBeenCalledWith(
       '已导入选区范围；inner 已按当前视口 320×180 缩放',
     )
+    wrapper.unmount()
+  })
+
+  it('reports a frame range clamped to a shorter target', async () => {
+    vi.mocked(readClipboard).mockResolvedValue(JSON.stringify(regionPayload()))
+    vi.mocked(importRegion).mockResolvedValue({
+      ...importedGeometry(),
+      frames: { start: 0, end: 7 },
+      frames_clamped: true,
+      scaled: false,
+    })
+    const wrapper = await mountStep()
+
+    await wrapper.findAll('.region-actions button')[1].trigger('click')
+    await flushPromises()
+
+    expect(ElMessage.success).toHaveBeenCalledWith('已导入选区范围；帧范围已按目标时长截到 0–7')
+    expect(wrapper.text()).toContain('inner x100 y50 200×100')
     wrapper.unmount()
   })
 

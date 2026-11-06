@@ -2417,20 +2417,22 @@ def test_tasks_api_returns_owner_and_positions(client, monkeypatch):
 # ── 选区范围的导出与导入（决策 92）──────────────────────────────────────
 
 
-def _write_erp_video(path: Path, frames: int = 8) -> Path:
-    """写一段足够让 cv2 读出帧数的真视频；导入要按帧数校验 frames。"""
-    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (64, 32))
+def _write_erp_video(path: Path, frames: int = 8, fps: float = 30.0) -> Path:
+    """写一段足够让 cv2 读出帧数与帧率的真视频；导入要按时间换算 frames。"""
+    writer = cv2.VideoWriter(
+        str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (64, 32))
     assert writer.isOpened(), f"cannot open VideoWriter for {path}"
     frame = np.zeros((32, 64, 3), dtype=np.uint8)
     for index in range(frames):
-        frame[:] = index * 20
+        frame[:] = (index * 20) % 256
         writer.write(frame)
     writer.release()
     return path
 
 
-def _video_patch_case(tmp_path: Path, name: str = "p1", frames: int = 8) -> str:
-    src = _write_erp_video(tmp_path / f"{name}.mp4", frames)
+def _video_patch_case(tmp_path: Path, name: str = "p1", frames: int = 8,
+                      fps: float = 30.0) -> str:
+    src = _write_erp_video(tmp_path / f"{name}.mp4", frames, fps)
     case_mod.create(name, "patch", src, root=tmp_path)
     case_mod.set_draft(name, viewport=VIEWPORT, inner=INNER,
                        frames={"start": 0, "end": frames - 1}, root=tmp_path)
@@ -2446,12 +2448,15 @@ def _region_body(**overrides) -> dict:
         "viewport": dict(VIEWPORT),
         "inner": dict(INNER),
         "frames": {"start": 1, "end": 6},
+        "fps": 30.0,
+        "frame_count": 8,
     }
     body.update(overrides)
     return body
 
 
-def test_region_export_returns_saved_selection(client, patch_case):
+def test_region_export_returns_saved_selection(client, tmp_path):
+    _video_patch_case(tmp_path)
     r = client.get("/api/case/p1/region/export")
     assert r.status_code == 200, r.text
     body = r.json()
@@ -2459,7 +2464,8 @@ def test_region_export_returns_saved_selection(client, patch_case):
     assert body["case"] == "p1"
     assert body["viewport"] == VIEWPORT
     assert body["inner"] == INNER
-    assert body["frames"] == FRAMES
+    assert body["frames"] == {"start": 0, "end": 7}
+    assert body["fps"] == 30.0 and body["frame_count"] == 8
     assert "assets" not in body and "prompt" not in body
 
 
@@ -2524,6 +2530,51 @@ def test_region_import_scales_inner_but_keeps_target_viewport_size(client, tmp_p
     assert saved.inner == {"x": 80, "y": 45, "width": 160, "height": 90}
 
 
+def test_region_import_maps_frames_by_time_across_fps(client, tmp_path):
+    """来源 30 fps 的 0.5–1.5 秒，落到 24 fps 的目标应变成 12–35 帧。"""
+    _video_patch_case(tmp_path, frames=48, fps=24.0)
+    body = _region_body(
+        frames={"start": 15, "end": 44},
+        fps=30.0,
+        frame_count=60,
+    )
+    r = client.post("/api/case/p1/region/import", json=body)
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload["frames"] == {"start": 12, "end": 35}
+    assert payload["frames_clamped"] is False
+    saved = case_mod.load("p1", tmp_path)
+    assert saved.frames == {"start": 12, "end": 35}
+
+
+def test_region_import_clamps_frames_to_a_shorter_target(client, tmp_path):
+    _video_patch_case(tmp_path, frames=8, fps=30.0)
+    body = _region_body(
+        frames={"start": 0, "end": 299},
+        fps=30.0,
+        frame_count=300,
+    )
+    r = client.post("/api/case/p1/region/import", json=body)
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload["frames"] == {"start": 0, "end": 7}
+    assert payload["frames_clamped"] is True
+    assert case_mod.load("p1", tmp_path).frames == {"start": 0, "end": 7}
+
+
+def test_region_import_rejects_frames_starting_after_target_duration(client, tmp_path):
+    _video_patch_case(tmp_path, frames=8, fps=30.0)
+    body = _region_body(
+        frames={"start": 150, "end": 179},
+        fps=30.0,
+        frame_count=300,
+    )
+    r = client.post("/api/case/p1/region/import", json=body)
+    assert r.status_code == 400
+    assert "超过目标" in r.json()["error"]
+    assert case_mod.load("p1", tmp_path).frames == {"start": 0, "end": 7}
+
+
 def test_region_export_import_roundtrip_is_exact(client, tmp_path):
     _video_patch_case(tmp_path)
     exported = client.get("/api/case/p1/region/export").json()
@@ -2550,6 +2601,7 @@ def test_region_import_rejects_bad_payload_without_writing(client, tmp_path):
         ("frames empty", _region_body(frames={"start": 3, "end": 3})),
         ("bool width", _region_body(viewport={**VIEWPORT, "width": True})),
         ("string yaw", _region_body(viewport={**VIEWPORT, "yaw_deg": "10"})),
+        ("zero fps", _region_body(fps=0)),
     ]
     missing_width = _region_body()
     missing_width["viewport"].pop("width")
@@ -2557,6 +2609,12 @@ def test_region_import_rejects_bad_payload_without_writing(client, tmp_path):
     no_frames = _region_body()
     no_frames.pop("frames")
     cases.append(("no frames", no_frames))
+    no_fps = _region_body()
+    no_fps.pop("fps")
+    cases.append(("no fps", no_fps))
+    no_count = _region_body()
+    no_count.pop("frame_count")
+    cases.append(("no frame_count", no_count))
 
     for label, body in cases:
         r = client.post("/api/case/p1/region/import", json=body)

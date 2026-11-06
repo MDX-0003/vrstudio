@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import shutil
 import threading
 import time
@@ -183,12 +184,17 @@ class PreviewStore:
 
     def import_region(self, *, yaw_deg: float, pitch_deg: float, fov_h_deg: float,
                       viewport_size: tuple[int, int], inner: dict,
-                      frames: dict) -> bool:
+                      frames: dict, source_fps: float,
+                      source_frame_count: int) -> tuple[bool, bool]:
         """把另一个 case 的选区写进本 case；目标视口尺寸不变。
 
-        ``viewport_size`` 是来源视口的像素尺寸，只参与 inner 换算。所有校验
-        都在写盘之前完成，任一字段不合法就抛 ValueError，case.toml 保持原样。
-        返回 inner 是否因为尺寸不同被缩放。
+        ``viewport_size`` 是来源视口的像素尺寸，只参与 inner 换算。
+        ``frames`` 是来源 fps 下的绝对帧号，先换成秒再按目标 fps 还原：同一段
+        时间窗口在不同 fps、不同总帧数的 case 之间仍然对得上。换算后结束帧超出
+        目标末尾就截到最后一帧（返回 frames_clamped），起点都已超过目标时长才
+        拒绝。所有校验都在写盘之前完成，任一字段不合法就抛 ValueError。
+
+        返回 ``(inner 是否被缩放, 帧范围是否被目标时长截断)``。
         """
         vp = self._vp()
         try:
@@ -213,28 +219,51 @@ class PreviewStore:
             raise ValueError(
                 f"inner 超出视口：x+w={x + w}（上限 {source_w}），"
                 f"y+h={y + h}（上限 {source_h}）")
-        if self.frame_count <= 0:
-            raise ValueError("读不到当前 case 的帧数，无法校验导入的帧范围")
+        if source_fps <= 0 or source_frame_count <= 0:
+            raise ValueError(
+                f"来源帧率/帧数不合法：{source_fps:g} fps，{source_frame_count} 帧")
         start = int(frames.get("start", -1))
         end = int(frames.get("end", -1))
-        if not 0 <= start < end <= self.frame_count - 1:
+        if not 0 <= start < end <= source_frame_count - 1:
             raise ValueError(
-                f"帧范围 {start}–{end} 超出当前 case 的 0–{self.frame_count - 1}，"
+                f"帧范围 {start}–{end} 超出来源 case 的 0–{source_frame_count - 1}，"
                 "且开始必须小于结束")
+        if self.frame_count <= 0 or self.fps <= 0:
+            raise ValueError("读不到当前 case 的帧率或帧数，无法换算帧范围")
+        target_count = self.frame_count
+        if math.isclose(source_fps, self.fps, rel_tol=1e-3, abs_tol=1e-6):
+            new_start, new_end = start, end
+        else:
+            # 帧号是半开区间 [start, end+1) 的起点；换成秒再乘目标 fps，
+            # 同一段 10 秒素材在 30 fps 与 24 fps 下得到各自的总帧数。
+            new_start = round(start / source_fps * self.fps)
+            new_end = round((end + 1) / source_fps * self.fps) - 1
+        if new_start >= target_count:
+            raise ValueError(
+                f"帧范围换算后起点 {new_start} 超过目标 case 的最后一帧 "
+                f"{target_count - 1}（目标 {target_count / self.fps:.2f} 秒，"
+                f"来源区间 {start / source_fps:.2f}–{(end + 1) / source_fps:.2f} 秒）；"
+                "请先在目标 case 上调整抽取范围")
+        frames_clamped = new_end > target_count - 1
+        new_end = min(new_end, target_count - 1)
+        if new_end <= new_start:
+            raise ValueError(
+                f"帧范围换算后只剩 {new_end - new_start + 1} 帧，无法形成区间"
+                f"（目标 0–{target_count - 1}）；请先在目标 case 上调整抽取范围")
         scaled = (target_w, target_h) != (source_w, source_h)
         inner = (_scale_inner(inner, source_w, source_h, target_w, target_h)
                  if scaled else {"x": x, "y": y, "width": w, "height": h})
         vp["yaw_deg"] = round(float(yaw_deg), 2)
         vp["pitch_deg"] = round(float(pitch_deg), 2)
         vp["fov_h_deg"] = round(float(fov_h_deg), 1)
-        new_frames = {"start": start, "end": end}
+        new_frames = {"start": new_start, "end": new_end}
         self.case.viewport = vp
         self.case.inner = inner
         self.case.frames = new_frames
         case_mod.set_draft(self.name, viewport=vp, inner=inner,
                            frames=new_frames, root=self.root)
         self.key = self._new_key()
-        return scaled
+        return scaled, frames_clamped
 
     def nudge(self, dyaw: float, dpitch: float) -> tuple[float, float]:
         """摇杆微调；服务端做算术并写回，case.toml 里永远是合法值

@@ -351,10 +351,14 @@ async function applyRegionText(text: string): Promise<boolean> {
   try {
     const payload = await importRegion(props.caseName, data as RegionPayload)
     applyGeometry(payload)
-    const size = `${payload.viewport.width}×${payload.viewport.height}`
-    ElMessage.success(
-      payload.scaled ? `已导入选区范围；inner 已按当前视口 ${size} 缩放` : '已导入选区范围',
-    )
+    const notes: string[] = []
+    if (payload.scaled) {
+      notes.push(`inner 已按当前视口 ${payload.viewport.width}×${payload.viewport.height} 缩放`)
+    }
+    if (payload.frames_clamped && payload.frames) {
+      notes.push(`帧范围已按目标时长截到 ${payload.frames.start}–${payload.frames.end}`)
+    }
+    ElMessage.success(notes.length ? `已导入选区范围；${notes.join('；')}` : '已导入选区范围')
     return true
   } catch (err) {
     ElMessage.error(messageOf(err, '导入选区范围失败'))

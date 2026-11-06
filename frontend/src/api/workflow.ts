@@ -22,6 +22,8 @@ export interface GeometryPayload {
   frames?: FrameRange
   /** 导入时 inner 是否因视口尺寸不同被缩放。 */
   scaled?: boolean
+  /** 导入时帧范围是否因目标更短而被截到最后一帧。 */
+  frames_clamped?: boolean
 }
 
 export function setViewport(name: string, fx: number, fy: number): Promise<GeometryPayload> {
