@@ -234,6 +234,14 @@ export interface FullRedrawImageReport {
 
 export type ImageReport = PatchImageReport | FullRedrawImageReport
 
+/** 素材的只读媒体元数据；读不到时为 null。 */
+export interface MediaMeta {
+  width: number | null
+  height: number | null
+  duration: number | null
+  fps: number | null
+}
+
 /** relight 的一个槽位：没填时为 null。 */
 export interface RelightSlot {
   asset: string
@@ -241,6 +249,7 @@ export interface RelightSlot {
   path: string
   sha256: string | null
   size: number | null
+  meta: MediaMeta | null
   entry: FileInfo
 }
 
@@ -270,6 +279,12 @@ export interface RelightPayload {
   regions_error: string | null
 }
 
+/** 一个生效区间，单位秒，左闭右开（决策 91）。 */
+export interface TimeRange {
+  start: number
+  end: number
+}
+
 /** 区域覆盖的一个区域（决策 88）。`params` 里 null 表示沿用默认值。 */
 export interface RelightRegion {
   id: string
@@ -285,7 +300,8 @@ export interface RelightRegion {
     local_shading: number | null
     clip: { knee: number; max: number } | null
   }
-  ranges: null
+  /** null = 整段生效；非空为解析端并集后的区间列表（决策 91）。 */
+  ranges: TimeRange[] | null
 }
 
 export interface RelightRegionDoc {

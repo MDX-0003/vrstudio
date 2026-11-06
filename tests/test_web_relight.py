@@ -8,6 +8,8 @@ CLI 由 ``test_relight.py`` / ``test_relight_video.py`` 守护，case 模型由
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 from starlette.testclient import TestClient
@@ -196,6 +198,9 @@ def test_case_payload_carries_slots_and_no_generation(tmp_path, client):
     assert info["relight"]["atmo"] is None
     assert info["relight"]["media"] == "image"
     assert info["relight"]["current"] is None
+    meta = info["relight"]["gt"]["meta"]
+    assert meta["width"] == W and meta["height"] == H
+    assert meta["duration"] is None and meta["fps"] is None
     # 不碰 vrgen：没有提示词与生成参数。
     assert info["prompt"] == {}
     assert info["generation_params"] == {}
@@ -369,6 +374,45 @@ def test_relight_regions_round_trip(tmp_path, client):
     assert rsp.json()["regions"]["regions"][0]["name"] == "窗边高光"
 
 
+def test_relight_regions_normalize_ranges_on_write_and_read(tmp_path, client):
+    client.post("/api/cases", json={"flow": "relight", "name": "rl1"})
+    doc = dict(REGION_DOC)
+    doc["regions"] = [dict(REGION_DOC["regions"][0], ranges=[
+        {"start": 22.5, "end": 30.0},
+        {"start": 8.0, "end": 15.0},
+        {"start": 14.0, "end": 16.0},
+    ])]
+    rsp = client.post("/api/case/rl1/relight/regions", json=doc)
+    assert rsp.status_code == 200, rsp.text
+    canonical = [{"start": 8.0, "end": 16.0}, {"start": 22.5, "end": 30.0}]
+    assert rsp.json()["relight"]["regions"]["regions"][0]["ranges"] == canonical
+
+    stored = json.loads(
+        (tmp_path / "rl1" / "relight" / "regions.json").read_text(encoding="utf-8"))
+    assert stored["regions"][0]["ranges"] == canonical
+
+    rsp = client.get("/api/case/rl1/relight/regions")
+    assert rsp.json()["regions"]["regions"][0]["ranges"] == canonical
+
+
+def test_relight_regions_drop_ranges_on_image_gt(tmp_path, client):
+    client.post("/api/cases", json={"flow": "relight", "name": "rl1"})
+    for role, name in (("relight_gt", "gt.png"), ("relight_atmo", "atmo.png")):
+        rsp = client.post("/api/case/rl1/assets",
+                          json={"op": "slot", "role": role,
+                                "path": str(_png(tmp_path, name))})
+        assert rsp.status_code == 200, rsp.text
+    doc = dict(REGION_DOC)
+    doc["regions"] = [dict(REGION_DOC["regions"][0],
+                           ranges=[{"start": 1.0, "end": 2.0}])]
+    rsp = client.post("/api/case/rl1/relight/regions", json=doc)
+    assert rsp.status_code == 200, rsp.text
+    assert rsp.json()["relight"]["regions"]["regions"][0]["ranges"] is None
+    stored = json.loads(
+        (tmp_path / "rl1" / "relight" / "regions.json").read_text(encoding="utf-8"))
+    assert stored["regions"][0]["ranges"] is None
+
+
 def test_relight_regions_reject_bad_document(tmp_path, client):
     client.post("/api/cases", json={"flow": "relight", "name": "rl1"})
     bad = dict(REGION_DOC, version=2)
@@ -378,7 +422,8 @@ def test_relight_regions_reject_bad_document(tmp_path, client):
     assert not (tmp_path / "rl1" / "relight" / "regions.json").exists()
 
     broken = dict(REGION_DOC)
-    broken["regions"] = [dict(REGION_DOC["regions"][0], ranges=[{"start": 1, "end": 2}])]
+    broken["regions"] = [dict(REGION_DOC["regions"][0],
+                              ranges=[{"start": 2.0, "end": 1.0}])]
     rsp = client.post("/api/case/rl1/relight/regions", json=broken)
     assert rsp.status_code == 400
-    assert "ranges" in rsp.json()["error"]
+    assert "end 必须大于 start" in rsp.json()["error"]

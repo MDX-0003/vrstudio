@@ -1897,10 +1897,26 @@ def _relight_regions_payload(case: case_mod.Case,
         return None, None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        regions_mod.parse_regions(data)
+        parsed = regions_mod.parse_regions(data)
     except (OSError, json.JSONDecodeError, regions_mod.RegionError) as exc:
         return None, str(exc)
-    return data, None
+    return _canonical_ranges(data, parsed), None
+
+
+def _canonical_ranges(data: dict, parsed: list,
+                      *, drop: bool = False) -> dict:
+    """把 ``ranges`` 换成并集后的对象数组；其余字段原样保留。
+
+    前端不做并集，读与写都经过这一处，页面看到的永远是规范形式（决策 91）。
+    ``drop`` 为真时（图片底版）一律写 ``null``。
+    """
+    for raw, region in zip(data["regions"], parsed, strict=True):
+        if drop or region.ranges is None:
+            raw["ranges"] = None
+        else:
+            raw["ranges"] = [{"start": item.start, "end": item.end}
+                             for item in region.ranges]
+    return data
 
 
 def _relight_payload(case: case_mod.Case) -> dict | None:
@@ -1937,6 +1953,7 @@ def _slot_payload(case: case_mod.Case, asset) -> dict | None:
     path = asset.resolved(case, _ctx["cases_root"])
     return {"asset": asset.id, "kind": asset.kind, "path": asset.path,
             "sha256": asset.sha256, "size": _file_info(path).get("size"),
+            "meta": _media_meta(path, asset.kind),
             "entry": file_entry(path)}
 
 
@@ -2376,9 +2393,13 @@ async def api_relight_regions(request):
 
     body = await request.json()
     try:
-        regions_mod.parse_regions(body)
+        parsed = regions_mod.parse_regions(body)
     except regions_mod.RegionError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    # 图片底版没有时间维度：落盘前一律清空，与前端保存规则一致。
+    gt, _ = case.relight_slots()
+    body = _canonical_ranges(
+        body, parsed, drop=gt is not None and gt.kind == "image")
     path = cdir / RELIGHT_REGIONS_FILE
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
