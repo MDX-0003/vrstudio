@@ -587,3 +587,116 @@ def test_video_sample_at_with_regions(tmp_path):
         decoded = next(iter(reader)).copy()
     # 区域中心（lon −40 → x≈100，lat 0 → y=64），离开边界足够远。
     assert np.array_equal(produced[64, 100], decoded[64, 100])
+
+
+def _read_video(path: Path) -> list[np.ndarray]:
+    conf = _video_conf()
+    with FrameReader(probe(path, conf), conf) as reader:
+        return [frame.copy() for frame in reader]
+
+
+def test_cli_rejects_ranges_on_image_gt(tmp_path):
+    gt_path, atmo_path = _write_case(tmp_path)
+    regions_path = tmp_path / "regions.json"
+    regions_path.write_text(json.dumps(region_doc(
+        [[-60, -15], [-20, -15], [-20, 15], [-60, 15]],
+        ranges=[{"start": 0.0, "end": 1.0}])), encoding="utf-8")
+    result = runner.invoke(app, [
+        "relight", "--gt", str(gt_path), "--atmo", str(atmo_path),
+        "--out", str(tmp_path / "out.png"), "--regions", str(regions_path),
+    ])
+    assert result.exit_code == 2
+    assert "图片底版没有时间维度" in result.output
+
+
+@requires_ffmpeg
+def test_video_ranges_apply_only_inside_the_interval(tmp_path):
+    frame = textured_erp(256, 128, seed=61)
+    frames = [frame.copy() for _ in range(6)]
+    gt_path = _write_video(tmp_path / "gt.mp4", frames)
+    atmo_path = write_png(tmp_path / "atmo.png",
+                          np.clip(frame.astype(np.float32) * 0.7, 0, 255).astype(np.uint8))
+    regions_path = tmp_path / "regions.json"
+    regions_path.write_text(json.dumps(region_doc(
+        [[-60, -15], [-20, -15], [-20, 15], [-60, 15]], strengths=0.0,
+        ranges=[{"start": 0.2, "end": 0.4}, {"start": 0.3, "end": 0.5}])),
+        encoding="utf-8")
+    out_dir = tmp_path / "samples"
+    plain_dir = tmp_path / "plain"
+    report_path = tmp_path / "report.json"
+
+    result = runner.invoke(app, [
+        "relight", "--gt", str(gt_path), "--atmo", str(atmo_path),
+        "--out", str(out_dir), "--sample-at", "0,2,3,4,5",
+        "--regions", str(regions_path), "--report", str(report_path),
+        "--set", "video.preset=ultrafast",
+    ])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, [
+        "relight", "--gt", str(gt_path), "--atmo", str(atmo_path),
+        "--out", str(plain_dir), "--sample-at", "0,2,3,4,5",
+        "--set", "video.preset=ultrafast",
+    ])
+    assert result.exit_code == 0, result.output
+
+    decoded = _read_video(gt_path)
+    for index in (2, 3, 4):
+        produced = cv2.imread(str(out_dir / f"sample_{index:06d}.png"),
+                              cv2.IMREAD_COLOR)
+        plain = cv2.imread(str(plain_dir / f"sample_{index:06d}.png"),
+                           cv2.IMREAD_COLOR)
+        # 区域中心（lon −40 → x≈100，lat 0 → y=64）：strength 0 回到 GT。
+        assert np.array_equal(produced[64, 100], decoded[index][64, 100]), index
+        assert not np.array_equal(produced, plain), index
+    for index in (0, 5):
+        produced = cv2.imread(str(out_dir / f"sample_{index:06d}.png"),
+                              cv2.IMREAD_COLOR)
+        plain = cv2.imread(str(plain_dir / f"sample_{index:06d}.png"),
+                           cv2.IMREAD_COLOR)
+        assert np.array_equal(produced, plain), index
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    region = report["regions"]["regions"][0]
+    # 两条重叠区间在解析端合并成一条，报告与分段都用规范形式。
+    assert region["ranges"] == [{"start": 0.2, "end": 0.5}]
+    assert region["active_frames"] == 3
+    assert report["regions"]["segments"] == [
+        {"start": 0, "end": 2, "regions": []},
+        {"start": 2, "end": 5, "regions": ["r1"]},
+        {"start": 5, "end": 6, "regions": []},
+    ]
+    assert report["timing"]["region_switches"] == 2
+    assert report["timing"]["region_build"] > 0
+
+
+@requires_ffmpeg
+def test_video_ranges_leave_outside_frames_bit_identical(tmp_path):
+    frame = textured_erp(256, 128, seed=62)
+    frames = [frame.copy() for _ in range(6)]
+    gt_path = _write_video(tmp_path / "gt.mp4", frames)
+    atmo_path = write_png(tmp_path / "atmo.png",
+                          np.clip(frame.astype(np.float32) * 0.7, 0, 255).astype(np.uint8))
+    regions_path = tmp_path / "regions.json"
+    regions_path.write_text(json.dumps(region_doc(
+        [[-60, -15], [-20, -15], [-20, 15], [-60, 15]], strengths=0.0,
+        ranges=[{"start": 0.2, "end": 0.5}])), encoding="utf-8")
+    out_regions = tmp_path / "regions.mp4"
+    out_plain = tmp_path / "plain.mp4"
+
+    for out_path, extra in ((out_regions, ["--regions", str(regions_path)]),
+                            (out_plain, [])):
+        result = runner.invoke(app, [
+            "relight", "--gt", str(gt_path), "--atmo", str(atmo_path),
+            "--out", str(out_path), "--crf", "0", *extra,
+            "--set", "video.preset=ultrafast",
+        ])
+        assert result.exit_code == 0, result.output
+
+    got = _read_video(out_regions)
+    plain = _read_video(out_plain)
+    assert len(got) == len(plain) == 6
+    for index in (0, 1, 5):
+        assert np.array_equal(got[index], plain[index]), index
+    for index in (2, 3, 4):
+        assert not np.array_equal(got[index], plain[index]), index
+

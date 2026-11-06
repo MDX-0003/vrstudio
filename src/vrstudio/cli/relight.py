@@ -39,6 +39,7 @@ from ..media.videoio import FrameReader, FrameWriter, VideoIOError, probe
 from ..progress import Log, RateMeter
 from ..relight import cache as relight_cache
 from ..relight import regions as regions_mod
+from ..relight import timeaxis
 from ..relight.align import (
     MAX_REFERENCE_SCAN,
     MIN_REFERENCE_STRUCTURE,
@@ -259,6 +260,88 @@ def _region_maps(region_list: list[regions_mod.Region], params: Params,
         local_shading=params.local_shading, clip=clip)
 
 
+class _SegmentRenderer:
+    """按段构造区域场、放大场与（可选的）``LightCompose``（决策 91）。
+
+    只保留当前段：切段时先释放上一段的全尺寸场再构造下一段，峰值不随段数增长。
+    ``fixed_fields`` 非空时（视频 + 图片氛围）顺带构造 ``LightCompose``；视频氛围路径
+    的光场逐帧估，只需要 ``maps`` 与裁切场，``light`` 留给调用方按帧合成。
+    """
+
+    def __init__(self, region_list: list[regions_mod.Region], params: Params,
+                 work: tuple[int, int], size: tuple[int, int],
+                 segments: list[timeaxis.Segment], *,
+                 fixed_fields: LightFields | None = None):
+        self._regions = region_list
+        self._params = params
+        self._work = work
+        self._size = size
+        self._segments = segments
+        self._fixed_fields = fixed_fields
+        self._ids: frozenset[str] | None = None
+        self.maps: regions_mod.RegionMaps | None = None
+        self.light = None
+        self.clip_full = None
+        self.coverage: dict[str, float] = {}
+        self.has_clip = False
+        self.clip_possible = params.highlight_clip or any(
+            region.enabled and region.params.clip is not None
+            for region in region_list)
+        self.build_seconds = 0.0
+        self.switches = 0
+
+    def at(self, index: int):
+        segment = timeaxis.segment_at(self._segments, index)
+        ids = frozenset() if segment is None else segment.regions
+        if ids != self._ids:
+            if self._ids is not None:
+                self.switches += 1
+            self._build(ids)
+        return self.maps, self.clip_full, self.light
+
+    def _build(self, ids: frozenset[str]) -> None:
+        started = time.perf_counter()
+        # 先释放上一段的全尺寸场，避免与新段同时驻留两份。
+        self.light = None
+        self.clip_full = None
+        self.maps = None
+        active = [region for region in self._regions if region.id in ids]
+        maps = _region_maps(active, self._params, self._work)
+        if maps is not None:
+            self.maps = maps
+            self.coverage.update(maps.coverage)
+            self.has_clip = self.has_clip or maps.has_clip
+            self.clip_full = regions_mod.upscale_clip(maps, self._size)
+        if self._fixed_fields is not None:
+            self.light = _compose_light(
+                self._fixed_fields, self._size, self._params, maps)
+        self._ids = ids
+        self.build_seconds += time.perf_counter() - started
+
+
+def _segments_for(region_list: list[regions_mod.Region], fps: float,
+                  frames: int | None) -> list[timeaxis.Segment]:
+    try:
+        return timeaxis.segments(region_list, fps, frames)
+    except timeaxis.TimeAxisError as exc:
+        _param_error(str(exc))
+
+
+def _log_time_plan(region_list: list[regions_mod.Region],
+                   segments: list[timeaxis.Segment], log: Log) -> None:
+    """记录分段数与每个区域的区间，便于从日志核对。"""
+    log.info(f"time: {len(segments)} segments")
+    if len(segments) > 16:
+        log.warn(f"时间区间把整段切成 {len(segments)} 段，段构造开销会上升")
+    for region in region_list:
+        if not region.enabled or region.ranges is None:
+            continue
+        spans = ", ".join(f"{item.start:g}-{item.end:g}s"
+                          for item in region.ranges)
+        log.info(f"ranges {region.id}: {spans}")
+
+
+
 def _parse_sample_at(value: str | None) -> list[int] | None:
     """``--sample-at 12,240,600``：去重排序后的帧号表。"""
     if value is None:
@@ -313,20 +396,47 @@ def _regions_summary_line(region_list: list[regions_mod.Region],
     return f"regions: {len(region_list)} defined, {enabled} enabled, from {source}"
 
 
-def _regions_report(region_list: list[regions_mod.Region],
-                    maps: regions_mod.RegionMaps | None,
-                    source: Path | None = None) -> dict | None:
-    """报告里的区域摘要：文件身份、数量、逐区域的参数与像素占比。
+def _active_frames(region: regions_mod.Region, fps: float | None,
+                   frames: int | None) -> int | None:
+    """该区域真正参与的帧数；整段且帧数未知时为 ``None``。"""
+    if not region.enabled:
+        return 0
+    if region.ranges is None:
+        return frames
+    if not fps or fps <= 0:
+        return None
+    return sum(item.end - item.start
+               for item in timeaxis.frame_ranges(region.ranges, fps, frames))
 
-    把完整的顶点与参数写进报告，是为了事后验收不依赖 regions.json 是否被改过：
-    报告自己就能说明这次运行用的是哪一组区域。
+
+def _regions_report(region_list: list[regions_mod.Region],
+                    coverage: dict[str, float],
+                    source: Path | None = None, *,
+                    fps: float | None = None,
+                    frames: int | None = None,
+                    segments: list[timeaxis.Segment] | None = None,
+                    has_clip: bool = False,
+                    work: tuple[int, int] | None = None) -> dict | None:
+    """报告里的区域摘要：文件身份、数量、逐区域的参数、区间与生效帧数。
+
+    把完整的顶点、参数与区间写进报告，是为了事后验收不依赖 regions.json 是否被改过：
+    报告自己就能说明这次运行用的是哪一组区域、每一段由哪些区域生效。``coverage`` 里
+    缺的区域（小样没采到、整段里从未生效）按 2K 掩码现算一次。
     """
     if not region_list:
         return None
+
+    def coverage_of(region: regions_mod.Region) -> float:
+        if region.id in coverage:
+            return coverage[region.id]
+        if work is None or not region.enabled:
+            return 0.0
+        return regions_mod.region_coverage(region, work[0], work[1])
+
     report: dict = {
         "count": len(region_list),
         "enabled": sum(1 for region in region_list if region.enabled),
-        "clip": bool(maps is not None and maps.has_clip),
+        "clip": has_clip,
         "regions": [
             {
                 "id": region.id,
@@ -343,12 +453,22 @@ def _regions_report(region_list: list[regions_mod.Region],
                         "max": region.params.clip[1],
                     },
                 },
-                "coverage": round(maps.coverage.get(region.id, 0.0), 5)
-                if maps is not None else 0.0,
+                "ranges": None if region.ranges is None else [
+                    {"start": item.start, "end": item.end}
+                    for item in region.ranges
+                ],
+                "active_frames": _active_frames(region, fps, frames),
+                "coverage": round(coverage_of(region), 5),
             }
             for region in region_list
         ],
     }
+    if segments is not None:
+        report["segments"] = [
+            {"start": item.start, "end": item.end,
+             "regions": sorted(item.regions)}
+            for item in segments
+        ]
     if source is not None:
         report["file"] = str(source)
         try:
@@ -704,7 +824,8 @@ def _relight_image(gt: Path, atmo: Path, out: Path, params: Params, *,
         _runtime_error(str(exc))
     check_inputs(gt_image, atmo_image)
     height, width = gt_image.shape[:2]
-    maps = _region_maps(region_list or [], params, work_size(width, height))
+    work = work_size(width, height)
+    maps = _region_maps(region_list or [], params, work)
     if region_list:
         typer.echo(_regions_summary_line(region_list, regions_source))
     typer.echo(f"relight: {width}x{height} scene={params.scene} "
@@ -766,7 +887,10 @@ def _relight_image(gt: Path, atmo: Path, out: Path, params: Params, *,
         align=align_report(alignment, width),
         clip=clip_stats, light=light_stats,
         chroma={"sigma": CHROMA_SIGMA},
-        regions=_regions_report(region_list or [], maps, regions_source),
+        regions=_regions_report(
+            region_list or [], maps.coverage if maps is not None else {},
+            regions_source, frames=1,
+            has_clip=maps is not None and maps.has_clip, work=work),
         seconds=time.perf_counter() - started,
     )
     typer.echo(f"wrote {out} ({summary['seconds']}s)")
@@ -795,9 +919,8 @@ class SampleOutput:
     match: dict | None = None
 
 
-def _write_samples(out_dir: Path, info, conf, light, indices: list[int],
-                   params: Params, log: Log,
-                   clip_full: tuple[np.ndarray, np.ndarray] | None = None) -> SampleOutput:
+def _write_samples(out_dir: Path, info, conf, renderer: _SegmentRenderer,
+                   indices: list[int], params: Params, log: Log) -> SampleOutput:
     """按时间点 seek 逐帧取图：只解码被采样的那几帧，不整段解码。"""
     if out_dir.exists() and not out_dir.is_dir():
         _param_error(f"--sample 要求 --out 是目录，但它是文件：{out_dir}")
@@ -816,6 +939,7 @@ def _write_samples(out_dir: Path, info, conf, light, indices: list[int],
                 log.warn(f"第 {index} 帧取不到（seek {seek:.3f}s），跳过")
                 continue
             compose_start = time.perf_counter()
+            _, clip_full, light = renderer.at(index)
             relit = light.apply(np.ascontiguousarray(frame), pool=pool, workers=workers)
             relit = _apply_clip(relit, params, clip_full, pool=pool, workers=workers)
             relit = chroma_lowpass(relit, frame, pool=pool, workers=workers)
@@ -869,9 +993,11 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
         _runtime_error(str(exc))
     _check_video(info.size)
     width, height = info.size
-    maps = _region_maps(region_list or [], params, work_size(width, height))
+    work = work_size(width, height)
+    segments = _segments_for(region_list or [], info.fps_float, info.frames)
     if region_list:
         log.info(_regions_summary_line(region_list, regions_source))
+    _log_time_plan(region_list or [], segments, log)
     atmo_h, atmo_w = atmo_image.shape[:2]
     if (atmo_w, atmo_h) != (width, height):
         _param_error(f"尺寸不一致：GT 视频 {width}x{height}，氛围图 {atmo_w}x{atmo_h}")
@@ -930,9 +1056,9 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
         "fields": round(resolved.timing.fields, 3),
     }
 
-    light = _compose_light(fixed.fields, (width, height), params, maps)
-    clip_full = regions_mod.upscale_clip(maps, (width, height)) if maps else None
-    clip_active = clip_full is not None or params.highlight_clip
+    renderer = _SegmentRenderer(
+        region_list or [], params, work, (width, height), segments,
+        fixed_fields=fixed.fields)
 
     if sample is not None or sample_at is not None:
         if sample_at is not None:
@@ -941,8 +1067,8 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
             indices = _sample_indices(info.frames, sample)
             if not info.frames:
                 log.warn("ffprobe 未报告帧数：小样从片头连续取，不是全片均匀采样")
-        samples = _write_samples(inputs.out, info, conf, light, indices, params, log,
-                                 clip_full)
+        samples = _write_samples(inputs.out, info, conf, renderer, indices,
+                                 params, log)
         written = samples.paths
         if not written:
             _runtime_error("小样一帧都没写出来：GT 视频解码不出任何帧")
@@ -952,12 +1078,17 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
             params=params.as_dict(), align=align_report(fixed.alignment, width),
             clip=None, light=light_report(fixed.fields),
             chroma={"sigma": CHROMA_SIGMA},
-            regions=_regions_report(region_list or [], maps, regions_source),
+            regions=_regions_report(
+                region_list or [], renderer.coverage, regions_source,
+                fps=info.fps_float, frames=info.frames, segments=segments,
+                has_clip=renderer.has_clip, work=work),
             seconds=total,
         )
         timing = {
             "cache_load": round(cache_load, 3),
             **setup_timing,
+            "region_build": round(renderer.build_seconds, 3),
+            "region_switches": renderer.switches,
             "sample_decode": round(samples.decode, 3),
             "sample_compose": round(samples.compose, 3),
             "sample_write": round(samples.write, 3),
@@ -996,10 +1127,11 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
                         break
                     render_decode += time.perf_counter() - decode_start
                     compose_start = time.perf_counter()
+                    _, clip_full, light = renderer.at(writer.frames_written)
                     relit = light.apply(np.ascontiguousarray(frame),
                                         pool=pool, workers=workers)
                     # 小样统计在参考帧那一刻算完，只留一个浮点数，不跨整段持有 8K 帧。
-                    if clip_active and writer.frames_written == fixed.ref_frame:
+                    if renderer.clip_possible and writer.frames_written == fixed.ref_frame:
                         clip_before = clipped_fraction(relit)
                     relit = _apply_clip(relit, params, clip_full,
                                         pool=pool, workers=workers)
@@ -1025,12 +1157,13 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
         Path(inputs.out).unlink(missing_ok=True)
         _runtime_error("GT 视频解码不出任何帧")
 
+    clip_active = params.highlight_clip or renderer.has_clip
     clip_stats = None
     if clip_active:
         clip_stats = {"knee": params.clip_knee, "max": params.clip_max,
                       "clipped_before": round(clip_before, 5)
                       if clip_before is not None else None}
-        if clip_full is not None:
+        if renderer.has_clip:
             clip_stats["regional"] = True
         log.info(f"clip: over-exposure of the reference frame "
                  f"{clip_stats['clipped_before']}")
@@ -1041,12 +1174,17 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
         params=params.as_dict(), align=align_report(fixed.alignment, width),
         clip=clip_stats, light=light_report(fixed.fields),
         chroma={"sigma": CHROMA_SIGMA},
-        regions=_regions_report(region_list or [], maps, regions_source),
+        regions=_regions_report(
+            region_list or [], renderer.coverage, regions_source,
+            fps=info.fps_float, frames=info.frames, segments=segments,
+            has_clip=renderer.has_clip, work=work),
         seconds=total,
     )
     timing = {
         "cache_load": round(cache_load, 3),
         **setup_timing,
+        "region_build": round(renderer.build_seconds, 3),
+        "region_switches": renderer.switches,
         "render_decode": round(render_decode, 3),
         "render_compose": round(render_compose, 3),
         "render_chroma": round(render_chroma, 3),
@@ -1112,9 +1250,7 @@ def _write_samples_pair(out_dir: Path, gt_info, atmo_info, conf,
                         fixed: FixedGeometry, mapping: AtmoMapping,
                         params: Params, indices: list[int], log: Log,
                         work: tuple[int, int],
-                        maps: regions_mod.RegionMaps | None = None,
-                        clip_full: tuple[np.ndarray, np.ndarray] | None = None,
-                        ) -> SampleOutput:
+                        renderer: _SegmentRenderer) -> SampleOutput:
     """视频氛围的小样：每个采样点同时取 GT 帧与映射到的氛围帧。"""
     if out_dir.exists() and not out_dir.is_dir():
         _param_error(f"--sample 要求 --out 是目录，但它是文件：{out_dir}")
@@ -1140,6 +1276,7 @@ def _write_samples_pair(out_dir: Path, gt_info, atmo_info, conf,
                 continue
             atmo_small = work_frame(atmo_frame, work)
             compose_start = time.perf_counter()
+            maps, clip_full, _ = renderer.at(index)
             relit, match = _compose_pair(frame, atmo_small, fixed.alignment,
                                          params, work, gt_info.size,
                                          pool=pool, workers=workers, maps=maps)
@@ -1164,9 +1301,7 @@ def _render_pair(inputs: RelightInputs, gt_info, atmo_info,
                  fixed: FixedGeometry, mapping: AtmoMapping, params: Params,
                  conf, log: Log, video_cfg: dict,
                  work: tuple[int, int],
-                 maps: regions_mod.RegionMaps | None = None,
-                 clip_full: tuple[np.ndarray, np.ndarray] | None = None
-                 ) -> PairRender:
+                 renderer: _SegmentRenderer) -> PairRender:
     """整段渲染：两路顺序读，每帧取对应氛围帧、估光场、乘算、编码。"""
     meter = RateMeter(gt_info.frames or None, log)
     log.step("render pass")
@@ -1175,7 +1310,7 @@ def _render_pair(inputs: RelightInputs, gt_info, atmo_info,
     matches: list[float] = []
     clip_before: float | None = None
     track = _AtmoTrack(mapping, work)
-    clip_active = clip_full is not None or params.highlight_clip
+    clip_possible = renderer.clip_possible
     workers = workers_for()
     pool = executor(workers)
     render_start = time.perf_counter()
@@ -1202,13 +1337,14 @@ def _render_pair(inputs: RelightInputs, gt_info, atmo_info,
                     if atmo_small is None:
                         raise VideoIOError("氛围视频解码不出任何帧")
                     compose_start = time.perf_counter()
+                    maps, clip_full, _ = renderer.at(index)
                     relit, match = _compose_pair(frame, atmo_small,
                                                  fixed.alignment, params,
                                                  work, gt_info.size,
                                                  pool=pool, workers=workers,
                                                  maps=maps)
                     matches.append(match)
-                    if clip_active and index == fixed.ref_frame:
+                    if clip_possible and index == fixed.ref_frame:
                         clip_before = clipped_fraction(relit)
                     relit = _apply_clip(relit, params, clip_full,
                                         pool=pool, workers=workers)
@@ -1234,12 +1370,13 @@ def _render_pair(inputs: RelightInputs, gt_info, atmo_info,
         Path(inputs.out).unlink(missing_ok=True)
         _runtime_error("GT 视频解码不出任何帧")
 
+    clip_active = params.highlight_clip or renderer.has_clip
     clip_stats = None
     if clip_active:
         clip_stats = {"knee": params.clip_knee, "max": params.clip_max,
                       "clipped_before": round(clip_before, 5)
                       if clip_before is not None else None}
-        if clip_full is not None:
+        if renderer.has_clip:
             clip_stats["regional"] = True
         log.info(f"clip: over-exposure of the reference frame "
                  f"{clip_stats['clipped_before']}")
@@ -1277,9 +1414,10 @@ def _relight_video_atmo(inputs: RelightInputs, params: Params, conf,
     mapping = mapping_for(gt_info.frames, gt_info.fps_float,
                           atmo_info.frames, atmo_info.fps_float)
     work = work_size_for(width, height)
-    maps = _region_maps(region_list or [], params, work)
+    segments = _segments_for(region_list or [], gt_info.fps_float, gt_info.frames)
     if region_list:
         log.info(_regions_summary_line(region_list, regions_source))
+    _log_time_plan(region_list or [], segments, log)
     if not gt_info.frames:
         log.info("GT ffprobe 未报告帧数：进度条只有速率，没有 ETA")
     mode = (f"sample-at={sample_at}" if sample_at is not None
@@ -1350,6 +1488,9 @@ def _relight_video_atmo(inputs: RelightInputs, params: Params, conf,
         "atmo_ref_frame": mapping.index_for(fixed.ref_frame),
     }
 
+    renderer = _SegmentRenderer(
+        region_list or [], params, work, (width, height), segments)
+
     if sample is not None or sample_at is not None:
         if sample_at is not None:
             indices = _check_sample_at(sample_at, gt_info.frames)
@@ -1357,10 +1498,9 @@ def _relight_video_atmo(inputs: RelightInputs, params: Params, conf,
             indices = _sample_indices(gt_info.frames, sample)
             if not gt_info.frames:
                 log.warn("GT ffprobe 未报告帧数：小样从片头连续取，不是全片均匀采样")
-        clip_full = regions_mod.upscale_clip(maps, (width, height)) if maps else None
         samples = _write_samples_pair(
             inputs.out, gt_info, atmo_info, conf, fixed, mapping, params,
-            indices, log, work, maps, clip_full)
+            indices, log, work, renderer)
         written = samples.paths
         if not written:
             _runtime_error("小样一帧都没写出来：GT 或氛围视频解码不出任何帧")
@@ -1370,11 +1510,16 @@ def _relight_video_atmo(inputs: RelightInputs, params: Params, conf,
             params=params.as_dict(), align=align_report(fixed.alignment, width),
             clip=None, light=None,
             chroma={"sigma": CHROMA_SIGMA}, seconds=total,
-            regions=_regions_report(region_list or [], maps, regions_source),
+            regions=_regions_report(
+                region_list or [], renderer.coverage, regions_source,
+                fps=gt_info.fps_float, frames=gt_info.frames, segments=segments,
+                has_clip=renderer.has_clip, work=work),
         )
         timing = {
             "cache_load": round(cache_load, 3),
             **setup_timing,
+            "region_build": round(renderer.build_seconds, 3),
+            "region_switches": renderer.switches,
             "sample_decode": round(samples.decode, 3),
             "sample_decode_atmo": round(samples.atmo_decode, 3),
             "sample_compose": round(samples.compose, 3),
@@ -1393,20 +1538,24 @@ def _relight_video_atmo(inputs: RelightInputs, params: Params, conf,
             atmo_source={**atmo_source, "atmo_match": samples.match}))
         return
 
-    clip_full = regions_mod.upscale_clip(maps, (width, height)) if maps else None
     render = _render_pair(inputs, gt_info, atmo_info, fixed, mapping, params,
-                          conf, log, video_cfg, work, maps, clip_full)
+                          conf, log, video_cfg, work, renderer)
     total = time.perf_counter() - started
     base = build_report(
         gt=str(inputs.gt), atmo=str(inputs.atmo), size=(width, height),
         params=params.as_dict(), align=align_report(fixed.alignment, width),
         clip=render.clip, light=None,
         chroma={"sigma": CHROMA_SIGMA}, seconds=total,
-        regions=_regions_report(region_list or [], maps, regions_source),
+        regions=_regions_report(
+            region_list or [], renderer.coverage, regions_source,
+            fps=gt_info.fps_float, frames=gt_info.frames, segments=segments,
+            has_clip=renderer.has_clip, work=work),
     )
     timing = {
         "cache_load": round(cache_load, 3),
         **setup_timing,
+        "region_build": round(renderer.build_seconds, 3),
+        "region_switches": renderer.switches,
         **render.timing,
         "total": base["seconds"],
     }
@@ -1514,6 +1663,9 @@ def relight(
                     clip_max=clip_max)
     regions_source = regions or inputs.regions
     region_list = _load_region_list(regions_source)
+    if kind == "image" and any(
+            region.enabled and region.ranges is not None for region in region_list):
+        _param_error("图片底版没有时间维度：删掉 ranges 或改用视频底版")
     if kind == "image":
         _relight_image(inputs.gt, inputs.atmo, inputs.out, params,
                        dump_light=dump_light, report=inputs.report, started=started,

@@ -155,6 +155,56 @@ def test_video_atmo_light_follows_the_moving_blob(tmp_path):
 
 
 @requires_ffmpeg
+def test_video_atmo_ranges_apply_only_inside_the_interval(tmp_path):
+    """视频氛围路径同样按段换区域场：区间外帧与无区域运行逐位相同。"""
+    frames = [video_erp_without_edges() for _ in range(VN)]
+    src = write_video(tmp_path / "gt.mp4", frames)
+    atmo = write_video(tmp_path / "atmo.mp4", moving_light_frames())
+    regions_path = tmp_path / "regions.json"
+    regions_path.write_text(json.dumps({
+        "version": 1,
+        "regions": [{
+            "id": "r1", "name": "r1", "color": "#f59e0b", "enabled": True,
+            "verts": [[-60, -15], [-20, -15], [-20, 15], [-60, 15]],
+            "pole": None, "feather_deg": 0.0,
+            "params": {"strength": 0.0},
+            "ranges": [{"start": 0.2, "end": 0.5}],
+        }],
+    }), encoding="utf-8")
+    out_regions = tmp_path / "regions.mp4"
+    out_plain = tmp_path / "plain.mp4"
+    report_path = tmp_path / "report.json"
+
+    result = run_cli("--gt", str(src), "--atmo", str(atmo),
+                     "--out", str(out_regions), "--ref-frame", "0", "--crf", "0",
+                     "--regions", str(regions_path), "--report", str(report_path),
+                     "--set", "video.preset=ultrafast")
+    assert result.exit_code == 0, result.output
+    result = run_cli("--gt", str(src), "--atmo", str(atmo),
+                     "--out", str(out_plain), "--ref-frame", "0", "--crf", "0",
+                     "--set", "video.preset=ultrafast")
+    assert result.exit_code == 0, result.output
+
+    got = read_video(out_regions)
+    plain = read_video(out_plain)
+    assert len(got) == len(plain) == VN
+    for index in (0, 1, 5):
+        assert np.array_equal(got[index], plain[index]), index
+    for index in (2, 3, 4):
+        assert not np.array_equal(got[index], plain[index]), index
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["regions"]["regions"][0]["ranges"] == [
+        {"start": 0.2, "end": 0.5}]
+    assert report["regions"]["regions"][0]["active_frames"] == 3
+    assert report["regions"]["segments"] == [
+        {"start": 0, "end": 2, "regions": []},
+        {"start": 2, "end": 5, "regions": ["r1"]},
+        {"start": 5, "end": 6, "regions": []},
+    ]
+
+
+@requires_ffmpeg
 def test_full_render_leaves_no_threads(tmp_path):
     """线程池随渲染结束关闭：一次渲染不能留下存活的 ThreadPoolExecutor 线程。"""
     frames = [video_erp_without_edges() for _ in range(VN)]

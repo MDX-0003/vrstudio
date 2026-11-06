@@ -343,6 +343,12 @@ def build_maps(regions: list[Region], work: tuple[int, int], *,
     )
 
 
+def region_coverage(region: Region, width: int, height: int) -> float:
+    """区域在给定网格上的空间占比；掩码为空时为 0。"""
+    alpha = _alpha(region, width, height)
+    return 0.0 if alpha is None else float((alpha > 0.5).mean())
+
+
 def upscale_clip(maps: RegionMaps,
                  size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray] | None:
     """把 2K 的裁切场放大到输出尺寸；没有区域裁切时返回 ``None``。
