@@ -79,6 +79,25 @@ def _reused_marker(path: Path | None) -> dict | None:
     return None
 
 
+#: 任务报错里需要页面另给出口的类别：左边是 CLI 报错原文里的稳定片段，右边是对外
+#: 暴露的类别名（任务视图的 ``error_kind`` 字段）。目前只有一条：recompose 的几何
+#: 前提闸门拒绝的是渲染本身，用户仍可能想先看一眼画面（CLI 的 ``--force``）。
+#: 这里是这段字符串在 web 侧的唯一定义处，前端只认类别名、不认报错原文。
+ERROR_KINDS: tuple[tuple[str, str], ...] = (
+    ("geometry premise failed", "geometry"),
+)
+
+
+def error_kind(error: str | None) -> str | None:
+    """把一条任务报错归到 :data:`ERROR_KINDS` 的类别；未登记的报错返回 ``None``。"""
+    if not error:
+        return None
+    for needle, kind in ERROR_KINDS:
+        if needle in error:
+            return kind
+    return None
+
+
 class Task:
     def __init__(self, kind: str, case: str, argv: list[str],
                  follow_up: list[tuple[str, str, list[str]]] | None = None,
@@ -168,6 +187,7 @@ class Task:
             "progress": self.progress,
             "log_path": str(self.out_path) if self.out_path else None,
             "error": self.error,
+            "error_kind": error_kind(self.error),
             "reused": self.reused,
             "request_id": self.request_id,
             "tail": self.tail(8),

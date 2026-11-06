@@ -24,6 +24,8 @@ export interface TaskView {
   progress: unknown
   log_path: string | null
   error: string | null
+  /** 服务端对可识别报错的归类；目前只有 `geometry`（裁回的几何前提闸门）。 */
+  error_kind: string | null
   reused: ReusedRound | null
   request_id: string | null
   tail: string[]

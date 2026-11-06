@@ -3866,6 +3866,10 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
                              "--quiet")
         if body.get("output_mode") == "input":
             argv += ["--follow-input"]
+        # 几何前提闸门拒绝出片时，用户仍可能想先看一眼画面；``--force`` 是 CLI 的
+        # 诊断开关，是否给这个入口由页面按 error_kind 决定，web 不做第二套判定。
+        if body.get("force"):
+            argv += ["--force"]
         return argv
     if op == "relight":
         # 槽位解析、产物命名与 [relight] current 的回写都在 CLI 一处（唯一权威点），

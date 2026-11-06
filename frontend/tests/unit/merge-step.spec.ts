@@ -14,7 +14,10 @@ vi.mock('@/api/case', () => ({
 import MergeStep from '@/views/wizard/MergeStep.vue'
 import OutputModeSelect from '@/components/assets/OutputModeSelect.vue'
 import { runOperation, setMergeInput } from '@/api/case'
+import { fetchTasks } from '@/api/tasks'
+import { ElMessageBox } from 'element-plus'
 import type { CaseInfo } from '@/types/case-info'
+import type { TaskView } from '@/types/task'
 
 const ButtonStub = defineComponent({
   props: { disabled: Boolean, loading: Boolean },
@@ -547,6 +550,103 @@ describe('MergeStep 按步骤拆分的扩充页（fullredraw 视频）', () => {
     expect(wrapper.text()).toContain('model 37 · videoEdit · scale auto')
     expect(wrapper.text()).toContain('上限 8,295,044 像素')
     expect(wrapper.text()).not.toContain('当前生成参数已变')
+    wrapper.unmount()
+  })
+})
+
+describe('MergeStep 强制出片（几何闸门失败）', () => {
+  const GEOMETRY_ERROR =
+    'ERROR geometry premise failed: the two redundant bands no longer correspond'
+
+  function failedTask(error: string, kind: string | null): TaskView {
+    return {
+      id: 't1',
+      kind: 'recompose',
+      case: 'p1',
+      owner_id: null,
+      owner_name: null,
+      project_id: null,
+      episode_id: null,
+      session_id: null,
+      status: 'failed',
+      queue_position: null,
+      created_at: '2026-11-06T10:00:00+08:00',
+      started_at: null,
+      finished_at: null,
+      progress: null,
+      log_path: null,
+      error,
+      error_kind: kind,
+      reused: null,
+      request_id: null,
+      tail: [],
+    }
+  }
+
+  async function mountWithTask(error: string, kind: string | null) {
+    vi.mocked(fetchTasks).mockResolvedValueOnce({ tasks: [failedTask(error, kind)] })
+    const wrapper = mount(MergeStep, {
+      props: {
+        caseName: 'p1',
+        step: 'recompose',
+        info: {
+          flow: 'fullredraw',
+          gates: { pad: { ok: true, ready: true }, recompose: { ok: false, ready: true } },
+          outputs: [],
+          output_options: [{ mode: 'case', width: 8192, height: 4096 }],
+          step_files: {
+            pad: { inputs: [], outputs: [] },
+            recompose: { inputs: [], outputs: [] },
+          },
+        } as unknown as CaseInfo,
+      },
+      global: { stubs },
+    })
+    await flushPromises()
+    return wrapper
+  }
+
+  it('offers the diagnostic button only for the geometry failure', async () => {
+    const wrapper = await mountWithTask(GEOMETRY_ERROR, 'geometry')
+    expect(wrapper.text()).toContain('还是出片（诊断）')
+    expect(wrapper.text()).toContain('接缝出现重复或错位的内容')
+    expect(wrapper.text()).toContain('只能用来先看画面，不能交付')
+    expect(wrapper.text()).toContain('文件缺失、参数错、编码失败')
+    wrapper.unmount()
+  })
+
+  it('hides the diagnostic button for other failures', async () => {
+    const wrapper = await mountWithTask('ERROR 打不开文件：no such file', null)
+    expect(wrapper.text()).not.toContain('还是出片（诊断）')
+    wrapper.unmount()
+  })
+
+  it('re-runs recompose with force only after the confirm', async () => {
+    vi.mocked(runOperation).mockClear()
+    const wrapper = await mountWithTask(GEOMETRY_ERROR, 'geometry')
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValueOnce('confirm' as never)
+
+    await button(wrapper, '还是出片（诊断）').trigger('click')
+    await flushPromises()
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(runOperation).toHaveBeenCalledWith('p1', 'recompose', {
+      force: true,
+      output_mode: 'case',
+    })
+    confirm.mockRestore()
+    wrapper.unmount()
+  })
+
+  it('does not run when the confirm is cancelled', async () => {
+    vi.mocked(runOperation).mockClear()
+    const wrapper = await mountWithTask(GEOMETRY_ERROR, 'geometry')
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce(new Error('cancel'))
+
+    await button(wrapper, '还是出片（诊断）').trigger('click')
+    await flushPromises()
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(runOperation).not.toHaveBeenCalled()
+    confirm.mockRestore()
     wrapper.unmount()
   })
 })

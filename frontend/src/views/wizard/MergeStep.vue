@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download, Refresh, VideoPlay } from '@element-plus/icons-vue'
 import { fetchCase, runOperation } from '@/api/case'
 import MergeInputControls from '@/components/assets/MergeInputControls.vue'
@@ -45,6 +45,19 @@ watch(outputOptions, (options) => {
 const mergeGate = computed(() => props.info.gates.merge)
 const padGate = computed(() => props.info.gates.pad)
 const recomposeGate = computed(() => props.info.gates.recompose)
+// 几何前提闸门拒绝出片后，页面才给「还是出片（诊断）」这个出口：它只对裁回
+// （fullredraw 视频）的 geometry 类别成立，别的报错点它没有意义（服务端只按
+// 报错原文归类，见 web/tasks.py 的 ERROR_KINDS）。
+const canForce = computed(
+  () =>
+    props.info.flow === 'fullredraw' &&
+    latest.value?.status === 'failed' &&
+    latest.value?.error_kind === 'geometry',
+)
+const FORCE_CONFIRM =
+  '只在「几何前提校验失败」（两条冗余带对不上）时才值得点：' +
+  '出片的全景几何是错的，接缝会有重复或错位的内容、绕一圈接不上；' +
+  '它只能用来先看画面，不能交付，并且会覆盖同名成片。'
 const patchFiles = computed(() => props.info.step_files.merge)
 const padFiles = computed(() => props.info.step_files.pad)
 const recomposeFiles = computed(() => props.info.step_files.recompose)
@@ -97,12 +110,15 @@ function verdictType(value: string | undefined): 'success' | 'warning' | 'danger
 
 onMounted(() => start())
 
-async function runOp(op: 'merge' | 'pad' | 'recompose' | 'export_upload'): Promise<void> {
+async function runOp(
+  op: 'merge' | 'pad' | 'recompose' | 'export_upload',
+  extra: Record<string, unknown> = {},
+): Promise<void> {
   if (running.value) return
   running.value = op
   startedAt = Date.now()
   try {
-    const payload: Record<string, unknown> = {}
+    const payload: Record<string, unknown> = { ...extra }
     if (op === 'merge' && !isImageFlow.value) payload.allow_crop = allowCrop.value
     if (op === 'recompose' || (op === 'merge' && isFullRedrawImg.value)) {
       payload.output_mode = outputMode.value
@@ -113,6 +129,22 @@ async function runOp(op: 'merge' | 'pad' | 'recompose' | 'export_upload'): Promi
     running.value = ''
     ElMessage.error(err instanceof Error ? err.message : '启动任务失败')
   }
+}
+
+// 用户明确要求「先看一眼」时才带 force；确认框把利害与适用范围说在前面，
+// 不把它做成常驻开关，避免有人在正常流程里勾上后拿到一张接不上的全景。
+async function forceRender(): Promise<void> {
+  if (running.value) return
+  try {
+    await ElMessageBox.confirm(FORCE_CONFIRM, '还是出片（诊断）', {
+      type: 'warning',
+      confirmButtonText: '还是出片',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+  await runOp('recompose', { force: true })
 }
 
 watch(latest, async (task) => {
@@ -470,6 +502,22 @@ watch(latest, async (task) => {
             :title="latest.error"
             class="gate-alert"
           />
+          <div v-if="canForce" class="force-row">
+            <p class="force-note">
+              这条报错说明两条冗余带已经不是同一内容，按固定列切出来的区域错了。强制出片会用错的边界混合：接缝出现重复或错位的内容，最后一段接回开头时接不上；它只能用来先看画面，不能交付，并且会覆盖同名成片。
+            </p>
+            <p class="force-note muted">
+              只有「几何前提校验失败」这一类值得点；文件缺失、参数错、编码失败之类的报错点它没有意义。
+            </p>
+            <el-button
+              size="small"
+              type="warning"
+              :loading="running === 'recompose'"
+              @click="forceRender"
+            >
+              还是出片（诊断）
+            </el-button>
+          </div>
           <pre v-if="latest.tail.length" class="task-tail">{{ latest.tail.join('\n') }}</pre>
         </template>
       </div>
@@ -523,6 +571,23 @@ watch(latest, async (task) => {
 .crop-hint {
   margin: var(--space-1) 0 0;
   font-size: var(--text-xs);
+}
+
+.force-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  padding: var(--space-3);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-md);
+}
+
+.force-note {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: 1.55;
 }
 
 .file-groups {
