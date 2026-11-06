@@ -49,7 +49,8 @@ def textured_erp(width: int = 480, height: int | None = None, seed: int = 3) -> 
 
 
 def region_doc(verts, *, strengths=None, shading=None, clip=None,
-               feather=0.0, enabled=True, name="r1", pole=None) -> dict:
+               feather=0.0, enabled=True, name="r1", pole=None,
+               ranges=None) -> dict:
     params: dict = {}
     if strengths is not None:
         params["strength"] = strengths
@@ -63,7 +64,7 @@ def region_doc(verts, *, strengths=None, shading=None, clip=None,
             "id": name, "name": name, "color": "#f59e0b", "enabled": enabled,
             "verts": [list(point) for point in verts],
             "pole": pole,
-            "feather_deg": feather, "params": params, "ranges": None,
+            "feather_deg": feather, "params": params, "ranges": ranges,
         }],
     }
 
@@ -98,12 +99,51 @@ def test_parse_rejects_unknown_keys_and_bad_version():
         parse_regions(doc)
 
 
-def test_parse_rejects_ranges_clip_and_geometry_limits():
-    doc = region_doc([[-30, -20], [30, -20], [0, 20]])
-    doc["regions"][0]["ranges"] = [{"start": 1.0, "end": 2.0}]
-    with pytest.raises(RegionError, match="ranges"):
+def test_parse_merges_ranges_into_a_union():
+    doc = region_doc(
+        [[-30, -20], [30, -20], [0, 20]],
+        ranges=[
+            {"start": 8.0, "end": 15.0},
+            {"start": 22.5, "end": 30.0},
+            {"start": 14.0, "end": 16.0},     # 与第一条重叠，合并成 8..16
+        ])
+    region = parse_regions(doc)[0]
+    assert [(item.start, item.end) for item in region.ranges] == [
+        (8.0, 16.0), (22.5, 30.0)]
+
+
+def test_parse_merges_touching_ranges():
+    doc = region_doc(
+        [[-30, -20], [30, -20], [0, 20]],
+        ranges=[{"start": 0.0, "end": 1.0}, {"start": 1.0, "end": 2.0}])
+    region = parse_regions(doc)[0]
+    assert [(item.start, item.end) for item in region.ranges] == [(0.0, 2.0)]
+
+
+@pytest.mark.parametrize("bad, match", [
+    ([], "空数组"),
+    ([{"start": -1, "end": 2}], "不能为负"),
+    ([{"start": 2, "end": 2}], "end 必须大于 start"),
+    ([{"start": True, "end": 2}], "非负秒数"),
+    ([{"start": "1", "end": 2}], "非负秒数"),
+    ([{"start": 0, "end": 1, "x": 2}], "不认识的键"),
+    ([{"start": 0, "end": 1}] * 65, "最多 64"),
+])
+def test_parse_rejects_bad_ranges(bad, match):
+    doc = region_doc([[-30, -20], [30, -20], [0, 20]], ranges=bad)
+    with pytest.raises(RegionError, match=match):
         parse_regions(doc)
 
+
+def test_parse_rejects_more_than_eight_merged_ranges():
+    ranges = [{"start": index * 2.0, "end": index * 2.0 + 1.0}
+              for index in range(9)]
+    doc = region_doc([[-30, -20], [30, -20], [0, 20]], ranges=ranges)
+    with pytest.raises(RegionError, match="并集后最多 8 段"):
+        parse_regions(doc)
+
+
+def test_parse_rejects_clip_and_geometry_limits():
     doc = region_doc([[-30, -20], [30, -20], [0, 20]], clip=(0.9, 0.5))
     with pytest.raises(RegionError, match="knee"):
         parse_regions(doc)

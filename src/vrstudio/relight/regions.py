@@ -11,6 +11,8 @@
   闭环，光栅化时把首个顶点按 ±360 复制成接缝短边，再沿纬度 ±90 补极点边。
   盖帽只表示极点所在的一侧，不表示环带、洞或极点的补集。
 - 参数是稀疏表：``None`` 表示沿用默认值，该通道不参与叠加。
+- ``ranges`` 为 ``None`` 表示整段生效；非空是秒区间列表，解析时排序并合并重叠或相接的
+  区间（决策 91）。帧号换算不在本模块，见 ``relight.timeaxis``。
 - 叠加按数组顺序，后一个盖在前一个上面；羽化只在该区域边界与下方值之间过渡。
 - 没有区域或全部 ``enabled = false`` 时返回 ``None``，调用方走原来的标量路径，
   成片与改动前逐位一致。
@@ -19,6 +21,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +31,8 @@ import numpy as np
 FORMAT_VERSION = 1
 MAX_REGIONS = 16
 MAX_VERTICES = 64
+MAX_RANGES_RAW = 64
+MAX_RANGES_PER_REGION = 8
 LAT_LIMIT = 89.5
 MAX_ABS_LON = 720.0
 """经度绝对值上限：允许绕一两圈，但拒绝明显的单位错误（例如把像素当度数）。"""
@@ -51,6 +56,14 @@ class RegionParams:
 
 
 @dataclass(frozen=True)
+class TimeRange:
+    """一个生效区间，单位秒，左闭右开。"""
+
+    start: float
+    end: float
+
+
+@dataclass(frozen=True)
 class Region:
     id: str
     name: str
@@ -60,6 +73,7 @@ class Region:
     pole: str | None
     feather_deg: float
     params: RegionParams
+    ranges: tuple[TimeRange, ...] | None
 
 
 @dataclass(frozen=True)
@@ -211,16 +225,73 @@ def _parse_region(raw, index: int, *, validate_geometry: bool = False) -> Region
                 f"收到 knee={knee}，max={max_out}")
         clip = (knee, max_out)
 
-    ranges = raw.get("ranges")
-    if ranges is not None:
-        raise RegionError(
-            f"{where}（{rid}）的 ranges 当前版本必须为 null：时间区间在第二阶段")
+    ranges = _parse_ranges(raw.get("ranges"), f"{where}（{rid}）的 ranges")
 
     return Region(
         id=rid, name=name, color=color, enabled=enabled,
         verts=tuple(points), pole=pole, feather_deg=float(feather),
         params=RegionParams(strength=strength, local_shading=shading, clip=clip),
+        ranges=ranges,
     )
+
+
+def _parse_ranges(value, where: str) -> tuple[TimeRange, ...] | None:
+    """``ranges``：``null`` 整段，非空数组按并集规范化；空数组拒绝。"""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise RegionError(f"{where} 必须是数组或 null")
+    if not value:
+        raise RegionError(
+            f"{where} 不能是空数组：整段请写 null，不生效请用 enabled = false")
+    if len(value) > MAX_RANGES_RAW:
+        raise RegionError(f"{where} 最多 {MAX_RANGES_RAW} 条区间，收到 {len(value)}")
+    items: list[TimeRange] = []
+    for index, raw in enumerate(value):
+        item_where = f"{where} 第 {index + 1} 条"
+        if not isinstance(raw, dict):
+            raise RegionError(f"{item_where} 必须是对象")
+        unknown = sorted(set(raw) - {"start", "end"})
+        if unknown:
+            raise RegionError(f"{item_where} 不认识的键 {unknown}；可用：start、end")
+        start = _seconds_value(raw.get("start"), f"{item_where} 的 start")
+        end = _seconds_value(raw.get("end"), f"{item_where} 的 end")
+        if end <= start:
+            raise RegionError(
+                f"{item_where} 的 end 必须大于 start，收到 {start}..{end}")
+        items.append(TimeRange(start, end))
+    merged = _merge_ranges(items)
+    if len(merged) > MAX_RANGES_PER_REGION:
+        raise RegionError(
+            f"{where} 并集后最多 {MAX_RANGES_PER_REGION} 段，收到 {len(merged)}")
+    return tuple(merged)
+
+
+def _seconds_value(value, where: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RegionError(f"{where} 必须是非负秒数")
+    value = float(value)
+    if not math.isfinite(value):
+        raise RegionError(f"{where} 必须是有限数，收到 {value}")
+    if value < 0:
+        raise RegionError(f"{where} 不能为负，收到 {value}")
+    return value
+
+
+def _merge_ranges(items: list[TimeRange]) -> list[TimeRange]:
+    """排序并合并重叠或相接的区间；相接算合并，因为结果没有任何不同。"""
+    if not items:
+        return []
+    ordered = sorted(items, key=lambda item: item.start)
+    merged = [ordered[0]]
+    for item in ordered[1:]:
+        last = merged[-1]
+        if item.start <= last.end + 1e-9:
+            if item.end > last.end:
+                merged[-1] = TimeRange(last.start, item.end)
+        else:
+            merged.append(item)
+    return merged
 
 
 def _unit_value(value, where: str) -> float | None:
