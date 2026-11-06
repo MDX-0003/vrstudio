@@ -3,18 +3,21 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import ErpRegionViewer from './ErpRegionViewer.vue'
 import ParamRow from './ParamRow.vue'
+import RegionTimeline from './RegionTimeline.vue'
 import { PARAMS, emptyRegionParams } from '@/constants/relightParams'
 import type { DefaultParams, ParamDesc } from '@/constants/relightParams'
 import { saveRelightRegions } from '@/api/relight'
 import { saveRelightDraft } from '@/api/case'
-import type { RelightPayload, RelightRegion } from '@/types/case-info'
+import type { RelightPayload, RelightRegion, TimeRange } from '@/types/case-info'
 import type { LonLat, Pole } from '@/utils/erpMath'
 import { MAX_REGION_LAT, isPoleCapShape, regionShapeIssue } from '@/utils/erpMath'
 import type { RegionShapeIssue } from '@/utils/erpMath'
+import { rangeSummary } from '@/utils/relightTime'
 
 /**
  * 区域工作台（决策 88，方案 A）：视图占主位，右侧是区域列表与选中区域的参数组，
- * 默认参数折叠在下面。时间轴是第二阶段，这里只放整段占位。
+ * 默认参数折叠在下面。视频底版在视图下方接时间轴（决策 91），图片底版不显示；
+ * 图片 case 的遗留区间在载入时清除，运行时没有时间参数。
  */
 const props = defineProps<{
   caseName: string
@@ -32,6 +35,13 @@ const emit = defineEmits<{
 const COLORS = ['#f59e0b', '#38bdf8', '#a3e635', '#f472b6', '#c084fc']
 const MAX_REGIONS = 16
 const MAX_VERTICES = 64
+
+const media = computed(() => props.payload.media)
+const duration = computed(() => props.payload.gt?.meta?.duration ?? 0)
+const fps = computed(() => props.payload.gt?.meta?.fps ?? null)
+const timelineReadonly = computed(() => !(duration.value > 0) || !fps.value)
+const playhead = ref(0)
+const viewer = ref<{ seek: (seconds: number) => void } | null>(null)
 
 const regions = ref<RelightRegion[]>(props.payload.regions?.regions.slice() ?? [])
 const selectedId = ref<string | null>(regions.value[0]?.id ?? null)
@@ -117,7 +127,10 @@ function scheduleRegionSave(): void {
 async function saveRegions(): Promise<void> {
   if (saving.value) return          // 在 finally 里补排一次
   const seq = changeSeq
-  const snapshot = regions.value.map((region) => ({ ...region, ranges: null }))
+  const snapshot = regions.value.map((region) => ({
+    ...region,
+    ranges: media.value === 'image' ? null : region.ranges,
+  }))
   saving.value = true
   try {
     await saveRelightRegions(props.caseName, { version: 1, regions: snapshot })
@@ -321,6 +334,29 @@ function toggleEnabled(id: string): void {
   scheduleRegionSave()
 }
 
+/** 时间轴改区间：只改这一条区域，走同一条防抖保存队列。 */
+function setRegionRanges(id: string, ranges: TimeRange[] | null): void {
+  const region = regions.value.find((item) => item.id === id)
+  if (!region) return
+  region.ranges = ranges
+  scheduleRegionSave()
+}
+
+function seekViewer(seconds: number): void {
+  playhead.value = seconds
+  viewer.value?.seek(seconds)
+}
+
+/** 图片底版没有时间维度：遗留区间提示一次并立即清空，运行时不带任何时间概念。 */
+function clearRangesOnImage(): void {
+  if (media.value !== 'image') return
+  const affected = regions.value.filter((region) => region.ranges?.length)
+  if (!affected.length) return
+  for (const region of regions.value) region.ranges = null
+  ElMessage.info(`底版是图片，已清除 ${affected.length} 个区域的时间区间`)
+  scheduleRegionSave()
+}
+
 watch(
   () => props.payload.regions,
   (doc) => {
@@ -355,7 +391,12 @@ function onKey(event: KeyboardEvent): void {
   }
 }
 
-onMounted(() => window.addEventListener('keydown', onKey))
+onMounted(() => {
+  window.addEventListener('keydown', onKey)
+  clearRangesOnImage()
+})
+
+watch(media, clearRangesOnImage)
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKey)
@@ -390,6 +431,7 @@ onBeforeUnmount(() => {
       </div>
 
       <ErpRegionViewer
+        ref="viewer"
         :source-url="sourceUrl"
         :media="payload.media ?? 'image'"
         :regions="regions"
@@ -403,22 +445,21 @@ onBeforeUnmount(() => {
         @move-vertex="moveVertex"
         @insert-vertex="insertVertex"
         @delete-vertex="deleteVertex"
+        @time="playhead = $event"
       />
 
-      <section class="panel timeline">
-        <div class="tl-head">
-          <b>时间轴</b>
-          <span class="chip plan">第二阶段</span>
-          <span class="muted">首版所有区域整段生效；这一块先占位，不接线。</span>
-        </div>
-        <div class="tl-rows">
-          <div v-for="region in regions" :key="region.id" class="tl-row">
-            <span class="tl-label">{{ region.name }}</span>
-            <div class="tl-track"><div class="tl-bar" :style="{ background: region.color }"></div></div>
-          </div>
-          <p v-if="!regions.length" class="muted empty">还没有区域。</p>
-        </div>
-      </section>
+      <RegionTimeline
+        v-if="payload.media === 'video'"
+        :regions="regions"
+        :selected-id="selectedId"
+        :duration="duration"
+        :fps="fps"
+        :playhead="playhead"
+        :readonly="timelineReadonly"
+        @select="select"
+        @seek="seekViewer"
+        @update="setRegionRanges"
+      />
     </div>
 
     <div class="sidebar">
@@ -448,7 +489,7 @@ onBeforeUnmount(() => {
             <span v-else class="name" @dblclick.stop="startRename(region.id)">{{ region.name }}</span>
             <span v-if="regionInvalid(region)" class="chip warn" title="这个区域绕极点转圈、经度跨度超过一整圈或边自交，单个闭合多边形表示不了">⚠</span>
             <span v-if="region.pole" class="chip small">{{ region.pole === 'north' ? '包含上方' : '包含下方' }}</span>
-            <span class="chip small">整段</span>
+            <span class="chip small">{{ rangeSummary(region.ranges) }}</span>
             <button class="icon" type="button" :title="region.enabled ? '停用（不参与合成）' : '启用'" @click.stop="toggleEnabled(region.id)">
               {{ region.enabled ? '◉' : '○' }}
             </button>
@@ -490,8 +531,7 @@ onBeforeUnmount(() => {
               <div class="hr"></div>
               <div class="row-meta">
                 <span>时间</span>
-                <span class="chip small">整段</span>
-                <span class="chip plan small">区间 · 第二阶段</span>
+                <span class="chip small">{{ rangeSummary(selected.ranges) }}</span>
               </div>
               <p class="muted tip">＋ 参数组可扩展：白平衡 / 色温 / 局部压缩……</p>
             </div>
@@ -766,52 +806,6 @@ onBeforeUnmount(() => {
 .empty {
   margin: 8px;
   font-size: var(--text-xs);
-}
-
-.timeline {
-  padding: var(--space-3) var(--space-4);
-}
-
-.tl-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-size: var(--text-xs);
-  color: var(--color-text-muted);
-}
-
-.tl-rows {
-  margin-top: var(--space-2);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.tl-row {
-  display: grid;
-  grid-template-columns: 70px 1fr;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.tl-label {
-  overflow: hidden;
-  font-size: 11px;
-  color: var(--color-text-muted);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tl-track {
-  height: 14px;
-  overflow: hidden;
-  border-radius: 4px;
-  background: #eef2f7;
-}
-
-.tl-bar {
-  height: 100%;
-  opacity: 0.55;
 }
 
 .mono {
