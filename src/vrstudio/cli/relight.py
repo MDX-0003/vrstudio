@@ -390,6 +390,15 @@ def _compose_light(fields: LightFields, size: tuple[int, int], params: Params,
                          pool=pool, workers=workers)
 
 
+def _log_timing(timing: dict, log: Log) -> None:
+    """计时行：秒数保留两位，计数按下标原样打印。"""
+    parts = [
+        f"{key}={value:.2f}s" if isinstance(value, float) else f"{key}={value}"
+        for key, value in timing.items()
+    ]
+    log.info("timing: " + ", ".join(parts))
+
+
 def _regions_summary_line(region_list: list[regions_mod.Region],
                           source: Path | None) -> str:
     enabled = sum(1 for region in region_list if region.enabled)
@@ -1094,8 +1103,7 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
             "sample_write": round(samples.write, 3),
             "total": base["seconds"],
         }
-        log.info("timing: " + ", ".join(f"{key}={value:.2f}s"
-                                        for key, value in timing.items()))
+        _log_timing(timing, log)
         typer.echo(f"wrote {len(written)} sample frames -> {inputs.out}")
         _write_report(inputs.report, _video_report(
             fixed, base, info.frames, info.fps,
@@ -1193,8 +1201,7 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
         "render_total": round(render_total, 3),
         "total": base["seconds"],
     }
-    log.info("timing: " + ", ".join(f"{key}={value:.2f}s"
-                                    for key, value in timing.items()))
+    _log_timing(timing, log)
     typer.echo(f"wrote {inputs.out}  ({meter.summary()})")
     _write_report(inputs.report, _video_report(
         fixed, base, written, info.fps,
@@ -1526,8 +1533,7 @@ def _relight_video_atmo(inputs: RelightInputs, params: Params, conf,
             "sample_write": round(samples.write, 3),
             "total": base["seconds"],
         }
-        log.info("timing: " + ", ".join(f"{key}={value:.2f}s"
-                                        for key, value in timing.items()))
+        _log_timing(timing, log)
         typer.echo(f"wrote {len(written)} sample frames -> {inputs.out}")
         _write_report(inputs.report, _video_report(
             fixed, base, gt_info.frames, gt_info.fps,
@@ -1559,8 +1565,7 @@ def _relight_video_atmo(inputs: RelightInputs, params: Params, conf,
         **render.timing,
         "total": base["seconds"],
     }
-    log.info("timing: " + ", ".join(f"{key}={value:.2f}s"
-                                    for key, value in timing.items()))
+    _log_timing(timing, log)
     typer.echo(f"wrote {inputs.out}  ({render.frames} frames)")
     _write_report(inputs.report, _video_report(
         fixed, base, render.frames, gt_info.fps,
