@@ -61,6 +61,7 @@ class RecomposeSpec:
     d_star: int = 0
     weight: str = "smoothstep"
     endpoint_lock_px: int = 0
+    shift_ramp_px: int = 0      # decay the shift to zero over this many right-end columns
     repair: str = "off"
     repair_px: int = 0
 
@@ -128,7 +129,8 @@ def _repair(out: np.ndarray, spec: RecomposeSpec) -> np.ndarray:
 def recompose(canvas: np.ndarray, spec: RecomposeSpec) -> np.ndarray:
     """Canvas -> final frame of width ``W``, in float64."""
     G, R, B = slice_regions(canvas, spec)
-    block = blend_block(G, B, spec.d_star, spec.weight, spec.endpoint_lock_px)
+    block = blend_block(G, B, spec.d_star, spec.weight, spec.endpoint_lock_px,
+                        spec.shift_ramp_px)
     out = np.concatenate([R.astype(np.float64), block], axis=1)
     if out.shape[1] != spec.W:
         raise ValueError(f"recomposed width {out.shape[1]} != W {spec.W}")
@@ -166,9 +168,10 @@ def recompose_u8(
     buf = buffers if buffers is not None else ComposeBuffers()
     band = buf.take("band", B.shape, np.float64)
     temp = buf.take("temp", B.shape, np.float64)
-    shifted = buf.take("shifted", B.shape, G.dtype) if spec.d_star else None
+    shifted_dtype = np.float64 if spec.shift_ramp_px > 0 else G.dtype
+    shifted = buf.take("shifted", B.shape, shifted_dtype) if spec.d_star else None
     blend_into(G, B, spec.d_star, spec.weight, spec.endpoint_lock_px,
-               band, temp, shifted)
+               band, temp, shifted, ramp_px=spec.shift_ramp_px)
 
     np.rint(band, out=band)
     np.clip(band, 0, 255, out=band)

@@ -34,14 +34,16 @@ class RegistrationReport:
     mae_second: float
     quality: float                 # mae_second / mae_min; ~1 means a flat, untrustworthy curve
     correlation: float             # Pearson r between the aligned bands -- the gate's input
-    interior_baseline: float       # the canvas's own adjacent-column mean, for context
-    verdict: str                   # ok | warn | fail
+    correlation_zero: float = 0.0  # the same r without any shift, for the flat-curve arbitration
+    interior_baseline: float = 0.0  # the canvas's own adjacent-column mean, for context
+    verdict: str = "ok"            # ok | warn | fail
 
 
 @dataclass(frozen=True)
 class BlendReport:
     weight: str
     endpoint_lock_px: int
+    shift_ramp_px: int = 0
 
 
 @dataclass(frozen=True)

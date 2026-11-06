@@ -59,6 +59,35 @@ def _shift_into(a: np.ndarray, shift: int, out: np.ndarray) -> np.ndarray:
     return out
 
 
+def _ramped_shift_into(a: np.ndarray, shift: int, ramp_px: int, out: np.ndarray,
+                       end: int | None = None) -> np.ndarray:
+    """Resample ``a`` so column ``x`` is shifted by ``shift * ramp(x)``.
+
+    ``ramp`` is 1 across the band and decays linearly to 0 at column ``end``
+    (default: the last column), so the columns beyond ``end`` are the *unshifted*
+    image and the closure pair still lands on adjacent canvas columns. The shift
+    must be zero before the endpoint lock starts, otherwise the lock tears the
+    content by whatever shift is still active at its left edge.
+    """
+    n = a.shape[1]
+    if n == 0:
+        return out
+    stop = n - 1 if end is None else min(max(int(end), 0), n - 1)
+    x = np.arange(n, dtype=np.float64)
+    ramp = np.clip((stop - x) / max(int(ramp_px), 1), 0.0, 1.0)
+    idx = x - shift * ramp
+    i0 = np.floor(idx).astype(np.int64) % n
+    frac = (idx - np.floor(idx))
+    i1 = (i0 + 1) % n
+    if a.ndim == 3:
+        frac = frac[None, :, None]
+    else:
+        frac = frac[None, :]
+    np.multiply(a[:, i0], 1.0 - frac, out=out)
+    out += a[:, i1] * frac
+    return out
+
+
 def blend_into(
     G: np.ndarray,
     B: np.ndarray,
@@ -68,6 +97,7 @@ def blend_into(
     out: np.ndarray,
     temp: np.ndarray,
     shifted: np.ndarray | None = None,
+    ramp_px: int = 0,
 ) -> np.ndarray:
     """Blend ``B`` into ``roll(G, d*)`` into caller-owned buffers.
 
@@ -82,7 +112,16 @@ def blend_into(
         raise ValueError(f"G {G.shape} and B {B.shape} must match")
     L = B.shape[1]
     w = _broadcast(weights(L, kind), B.ndim)
-    if d_star:
+    E = int(endpoint_lock_px)
+    if E > 0 and L:
+        E = min(E, L // 2)              # never let the two locks collide
+    if d_star and ramp_px > 0:
+        if shifted is None:
+            shifted = np.empty_like(G, dtype=np.float64)
+        # the ramp must be flat (shift 0) before the right-hand lock starts
+        _ramped_shift_into(G, int(d_star), int(ramp_px), shifted, end=L - 1 - E)
+        src = shifted
+    elif d_star:
         src = shifted if shifted is not None else np.roll(G, d_star, axis=1)
         if shifted is not None:
             _shift_into(G, d_star, shifted)
@@ -92,12 +131,9 @@ def blend_into(
     np.multiply(src, w, out=temp)
     np.add(out, temp, out=out)
 
-    E = int(endpoint_lock_px)
     if E > 0 and L:
-        E = min(E, L // 2)              # never let the two locks collide
-        if E > 0:
-            out[:, :E] = B[:, :E]
-            out[:, L - E :] = G[:, L - E :]
+        out[:, :E] = B[:, :E]
+        out[:, L - E :] = G[:, L - E :]
     return out
 
 
@@ -107,17 +143,22 @@ def blend_block(
     d_star: int = 0,
     kind: BlendWeight = "smoothstep",
     endpoint_lock_px: int = 0,
+    ramp_px: int = 0,
 ) -> np.ndarray:
     """Blend ``B`` into ``roll(G, d*)`` across the band, in float64.
 
     Left end is 100% ``B``, right end 100% ``roll(G, d*)``; the endpoint lock
-    then overwrites the outer ``E`` columns with raw ``B`` / raw ``G``.
+    then overwrites the outer ``E`` columns with raw ``B`` / raw ``G``. With
+    ``ramp_px > 0`` the shift decays to zero over the last ``ramp_px`` columns
+    instead of being applied right up to the lock.
     """
     if G.shape != B.shape:
         raise ValueError(f"G {G.shape} and B {B.shape} must match")
     out = np.empty(B.shape, np.float64)
     temp = np.empty(B.shape, np.float64)
-    return blend_into(G, B, d_star, kind, endpoint_lock_px, out, temp)
+    shifted = np.empty_like(G, dtype=np.float64) if (d_star and ramp_px > 0) else None
+    return blend_into(G, B, d_star, kind, endpoint_lock_px, out, temp,
+                      shifted=shifted, ramp_px=ramp_px)
 
 
 def endpoint_lock_px(L: int, pct: float) -> int:

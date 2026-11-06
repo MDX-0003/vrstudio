@@ -123,6 +123,37 @@ def test_endpoint_lock_never_lets_the_two_locks_collide():
     assert np.array_equal(block[:, 5:], G[:, 5:])
 
 
+def test_shift_ramp_is_a_no_op_without_a_shift():
+    rng = np.random.default_rng(7)
+    G = rng.integers(0, 255, (4, 32, 3)).astype(np.float64)
+    B = rng.integers(0, 255, (4, 32, 3)).astype(np.float64)
+    assert np.array_equal(blend_block(G, B, d_star=0, endpoint_lock_px=2, ramp_px=8),
+                          blend_block(G, B, d_star=0, endpoint_lock_px=2))
+    # and a zero ramp must keep the old hard-shift behaviour bit for bit
+    assert np.array_equal(blend_block(G, B, d_star=7, endpoint_lock_px=3, ramp_px=0),
+                          blend_block(G, B, d_star=7, endpoint_lock_px=3))
+
+
+def test_shift_ramp_aligns_the_interior_and_pins_the_ends():
+    """With B = roll(G, 5) the band must show one copy, not two offset by 5 px."""
+    L = 64
+    x = np.arange(L)[None, :]
+    G = np.broadcast_to((x * 4 % 256).astype(np.float64)[..., None], (3, L, 1)).copy()
+    G = np.repeat(G, 3, axis=2)
+    B = np.roll(G, 5, axis=1)
+    block = blend_block(G, B, d_star=5, endpoint_lock_px=0, ramp_px=16)
+    # ends: left is B, right is the unshifted G (closure pair stays adjacent)
+    assert np.allclose(block[:, 0], B[:, 0], atol=1.0)
+    assert np.allclose(block[:, -1], G[:, -1], atol=1.0)
+    # interior (before the ramp): the shifted G, i.e. B's content -- a 50/50 mix
+    # of G and B here would sit exactly between the two ramps and double the edge
+    mid = L // 2
+    assert np.allclose(block[:, mid], np.roll(G, 5, axis=1)[:, mid], atol=6.0)
+    plain = blend_block(G, B, d_star=0, endpoint_lock_px=0)
+    assert abs(block[:, mid] - np.roll(G, 5, axis=1)[:, mid]).mean() < \
+        abs(plain[:, mid] - np.roll(G, 5, axis=1)[:, mid]).mean()
+
+
 def test_endpoint_lock_px_from_percentage():
     assert endpoint_lock_px(600, 2.0) == 12
     assert endpoint_lock_px(640, 0.0) == 0

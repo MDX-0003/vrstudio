@@ -64,14 +64,36 @@ def gate_registration(reg, min_band_correlation: float = 0.60,
 
 
 def applied_shift(reg, gate: str) -> int:
-    """The shift the blend may use, given the canvas-premise gate.
+    """The shift the still-stitch path may use, given the canvas-premise gate.
 
     ``warn`` means the cost curve is flat (``quality`` near 1): ``d*`` is a
     coincidental match, and rolling the band by it duplicates ``|d*|`` columns
-    inside the blend instead of aligning anything. The detected value stays out
-    of the render -- the caller records 0 in the report and logs the detection.
+    inside the blend instead of aligning anything. The video recompose path no
+    longer uses this rule -- it arbitrates with :func:`band_correlation` and
+    keeps a shift whose correlation peak is decisive (decision 94); this one is
+    still the image path's behaviour until it gets the same arbitration.
     """
     return 0 if gate == "warn" else int(reg.d_star)
+
+
+def band_correlation(G: np.ndarray, B: np.ndarray, d: int = 0) -> float:
+    """Pearson r between ``B`` and ``G`` rolled by ``d`` (both mean-removed).
+
+    Scale-free, so it can arbitrate a shift the MAE curve calls "flat": the cost
+    curve of a smooth band barely moves with ``d``, while the correlation peak
+    can still be decisive (measured on a real 1080p return: 0.869 at 0 vs 0.927
+    at the true 10 px). Used only to accept or reject a detected ``d*``; the
+    gate itself stays on the registration correlation.
+    """
+    if G.shape != B.shape:
+        raise ValueError(f"G {G.shape} and B {B.shape} must match")
+    g = _mean_removed(to_gray(G))
+    b = _mean_removed(to_gray(B))
+    if d:
+        g = np.roll(g, int(d), axis=1)
+    if g.std() < 1e-6 or b.std() < 1e-6:
+        return 1.0 if (g.std() < 1e-6 and b.std() < 1e-6) else 0.0
+    return float(np.corrcoef(g.ravel(), b.ravel())[0, 1])
 
 
 def to_gray(frame: np.ndarray) -> np.ndarray:

@@ -30,8 +30,8 @@ from ..redraw.manifest import Manifest
 from ..progress import Log, RateMeter
 from ..redraw.recompose_core import (ComposeBuffers, RecomposeSpec, recompose_u8,
                                      restore_canvas, slice_regions)
-from ..redraw.registration import (RegistrationResult, applied_shift,
-                                   circular_translate, gate_registration, to_gray)
+from ..redraw.registration import (band_correlation, circular_translate,
+                                   gate_registration, to_gray)
 from ..redraw.report import (BlendReport, RecomposeReport, RegistrationReport, RepairReport)
 from ..redraw.verify_core import SeamAccumulator, verdict
 from ..media.videoio import FrameReader, FrameWriter, probe
@@ -71,6 +71,39 @@ def _summarise_registration(ds: list[int], maes: list[float], quals: list[float]
         interior_baseline=float(np.mean(baseline)) if baseline else 0.0,
         verdict="ok",
     )
+
+
+#: How much a shift must improve the band correlation before it is applied on a
+#: flat cost curve. A real offset moves the correlation by ~0.05 (measured 0.869
+#: -> 0.927 on a 1080p return), a coincidental one by noise. Kept below the
+#: decision-90 threshold's spirit: the MAE curve alone cannot arbitrate a smooth
+#: band, the correlation can.
+_NCC_GAIN_MIN = 0.02
+
+
+def _choose_shift(reg: RegistrationReport, band_px: int) -> int:
+    """The shift to blend with, given the gate verdict and the correlation peak.
+
+    ``ok`` keeps the registration's own choice. A ``warn`` (flat MAE curve) used
+    to force 0; now it keeps ``d*`` when the correlation says the shift really
+    aligns something -- otherwise a measured 10 px offset was thrown away and the
+    crossfade turned it into a double image across the whole band. A shift that
+    hit the search bound is never trusted (it is a bound, not a measurement), and
+    neither is one wider than a quarter of the band: absorbing it would squeeze
+    the band by that fraction and the squeeze itself becomes the defect
+    (measured: a 65 px shift in a 240 px band pushed the worst adjacent column
+    pair from 5.7 to 10.8 levels).
+    """
+    d = int(reg.d_star)
+    if d == 0:
+        return 0
+    if reg.search_px and abs(d) >= int(reg.search_px):
+        return 0
+    if band_px and abs(d) * 4 > int(band_px):
+        return 0
+    if reg.verdict != "warn":
+        return d
+    return d if (reg.correlation - reg.correlation_zero) >= _NCC_GAIN_MIN else 0
 
 
 def _gate(reg: RegistrationReport, conf) -> str:
@@ -221,6 +254,7 @@ def main(
         maes: list[float] = []
         quals: list[float] = []
         corrs: list[float] = []
+        corrs0: list[float] = []
         base: list[float] = []
         meter = RateMeter(info.frames or None, log)
         gate_max = int(conf.get("recompose.gate_max_frames", 48))
@@ -240,6 +274,7 @@ def main(
                 maes.append(res.mae_min)
                 quals.append(res.quality)
                 corrs.append(res.correlation)
+                corrs0.append(band_correlation(G, B, 0))
                 base.append(float(np.abs(np.diff(to_gray(R), axis=1)).mean()))
         if sample_set is not None:
             log.info(f"    gate analysed {len(ds)} of {gate_total} frames "
@@ -247,9 +282,12 @@ def main(
         if ds:
             reg = _summarise_registration(ds, maes, quals, corrs, base, mode)
             reg = replace(reg, search_px=search_px)
+            if corrs0:
+                reg = replace(reg, correlation_zero=float(np.median(corrs0)))
             reg = replace(reg, verdict=_gate(reg, conf))
             log.info(f"    d* = {reg.d_star} ({mode}), band correlation "
-                     f"{reg.correlation:.3f}, cost-curve quality {reg.quality:.2f}, "
+                     f"{reg.correlation:.3f} (unshifted {reg.correlation_zero:.3f}), "
+                     f"cost-curve quality {reg.quality:.2f}, "
                      f"structure residual {reg.mae_min:.3f} (canvas baseline "
                      f"{reg.interior_baseline:.3f})  -> {reg.verdict}")
 
@@ -257,11 +295,16 @@ def main(
         log.warn(f"--d-star {d_star} overrides the automatic choice ({reg.d_star})")
         reg = replace(reg, d_star=int(d_star))
     else:
-        shift = applied_shift(reg, reg.verdict)
+        shift = _choose_shift(reg, output_plan.L)
         if shift != reg.d_star:
-            log.warn(f"配准代价曲线平坦（quality {reg.quality:.2f}），d* = {reg.d_star} "
-                     f"是巧合匹配：按 0 混合，报告记 0")
-            reg = replace(reg, d_star=shift)
+            log.warn(f"d* = {reg.d_star} 不可用（撞到搜索上限或相关峰不够高），"
+                     f"按 0 混合，报告记 0")
+        reg = replace(reg, d_star=shift)
+    shift_ramp = max(8, output_plan.L // 8) if reg.d_star else 0
+    if reg.d_star:
+        log.info(f"    shift {reg.d_star:+d} px applied, decaying to 0 over the last "
+                 f"{shift_ramp} columns (band correlation {reg.correlation:.3f} "
+                 f"vs {reg.correlation_zero:.3f} unshifted)")
 
     if reg.verdict == "fail" and not force:
         log.error(
@@ -273,18 +316,20 @@ def main(
         )
         _write_report(report_path, out, man, manifest, info, canvas_size, interp, reg,
                       spec, repair_px, {}, 0, aspect_drift,
-                      output_mode=output_mode, output_size=(out_w, out_h))
+                      output_mode=output_mode, output_size=(out_w, out_h),
+                      shift_ramp_px=shift_ramp)
         raise typer.Exit(1)
     if reg.verdict == "warn":
         log.warn("registration is not decisive (flat cost curve); "
                  + ("using the forced --d-star" if d_star is not None
-                    else "blending without a shift"))
+                    else ("the correlation peak still justifies the shift"
+                          if reg.d_star else "blending without a shift")))
 
     if dry_run:
         raise typer.Exit(0)
 
     # ---- render -------------------------------------------------------
-    spec_render = replace(spec, d_star=reg.d_star)
+    spec_render = replace(spec, d_star=reg.d_star, shift_ramp_px=shift_ramp)
     alpha = float(conf.get("recompose.per_frame_ema_alpha", 0.05))
     ema = float(reg.d_star)
     acc = SeamAccumulator(out_w)
@@ -330,7 +375,8 @@ def main(
 
     _write_report(report_path, out, man, manifest, info, canvas_size, interp, reg,
                   spec, repair_px, metrics.as_dict(), written, aspect_drift,
-                  output_mode=output_mode, output_size=(out_w, out_h))
+                  output_mode=output_mode, output_size=(out_w, out_h),
+                  shift_ramp_px=shift_ramp)
 
     print()
     print(f"final    {out}   {out_w}x{canvas_h}   {written} frames")
@@ -347,7 +393,8 @@ def _write_report(report_path, out: Path, man: Manifest, manifest: Path, info,
                   canvas_size, interp, reg, spec, repair_px, verify: dict,
                   written: int, aspect_drift_pct: float = 0.0,
                   output_mode: str = "case",
-                  output_size: tuple[int, int] = (0, 0)) -> None:
+                  output_size: tuple[int, int] = (0, 0),
+                  shift_ramp_px: int = 0) -> None:
     path = report_path or out.with_name(out.stem + "_recompose.json")
     RecomposeReport(
         manifest_path=Path(manifest).name,
@@ -358,7 +405,8 @@ def _write_report(report_path, out: Path, man: Manifest, manifest: Path, info,
         restored_canvas=canvas_size,
         restore_interp=interp,
         registration=reg,
-        blend=BlendReport(weight=spec.weight, endpoint_lock_px=spec.endpoint_lock_px),
+        blend=BlendReport(weight=spec.weight, endpoint_lock_px=spec.endpoint_lock_px,
+                          shift_ramp_px=shift_ramp_px),
         repair=RepairReport(enabled=spec.repair == "feather", T=repair_px),
         aspect_drift_pct=aspect_drift_pct,
         verify=verify,

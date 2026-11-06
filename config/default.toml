@@ -58,7 +58,8 @@ min_band_correlation = 0.60   # 对齐后蓝绿带的相关系数低于此值 ->
                               # 可能重影。恢复原行为：改回 0.80，或在本机 vrstudio.toml
                               # 写 [recompose] min_band_correlation = 0.80。
 warn_quality         = 1.15   # 代价曲线过平（mae_second/mae_min 低于此值）-> WARN：
-                              # d* 可能是巧合匹配
+                              # d* 可能是巧合匹配。视频裁回现在还会用相关峰仲裁
+                              # （决策 94）：相关增益够大就仍然采纳 d*，而不是一律归零。
 
 # ── verify ─────────────────────────────────────────────────────────────
 [verify]
