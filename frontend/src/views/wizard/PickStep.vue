@@ -407,6 +407,7 @@ async function onFramesChange(): Promise<void> {
     startFrame.value = start
     endFrame.value = end
     if (payload.dirty !== undefined) dirty.value = payload.dirty
+    emit('geometry', payload)
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : '保存帧范围失败')
   }
