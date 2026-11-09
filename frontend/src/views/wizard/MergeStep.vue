@@ -6,13 +6,18 @@ import { fetchCase, runOperation } from '@/api/case'
 import MergeInputControls from '@/components/assets/MergeInputControls.vue'
 import OutputModeSelect from '@/components/assets/OutputModeSelect.vue'
 import FileRow from '@/components/common/FileRow.vue'
+import RangeRow from '@/components/range/RangeRow.vue'
+import type { RangeTag } from '@/components/range/types'
 import { useCaseTasks } from '@/composables/useCaseTasks'
 import { gateBlocked } from '@/utils/gates'
 import { downloadHref } from '@/utils/download'
+import { geometrySummary, formatRangeTime } from '@/utils/range'
 import { taskStatusMeta } from '@/constants/taskStatus'
 import type {
   FullRedrawImageReport,
   CaseInfo,
+  MergeRange,
+  MergeVersion,
   OutputMode,
   PatchImageReport,
 } from '@/types/case-info'
@@ -43,6 +48,52 @@ watch(outputOptions, (options) => {
   if (!options.some((item) => item.mode === outputMode.value)) outputMode.value = 'case'
 })
 const mergeGate = computed(() => props.info.gates.merge)
+const mergeRanges = computed<MergeRange[]>(() => props.info.merge_ranges ?? [])
+const selectedExtract = ref<string | null>(
+  props.info.extract_current ?? mergeRanges.value[0]?.versions[0]?.version ?? null,
+)
+const selectedVersion = computed<MergeVersion | null>(() => {
+  for (const group of mergeRanges.value) {
+    const match = group.versions.find((item) => item.version === selectedExtract.value)
+    if (match) return match
+  }
+  return null
+})
+const mergeReady = computed(
+  () =>
+    Boolean(selectedExtract.value) &&
+    Boolean(selectedVersion.value?.has_result || props.info.merge_input),
+)
+const mergeBlockReason = computed(() => {
+  if (!mergeRanges.value.length) return '还没有抽取记录；先去抽取页跑一次。'
+  if (!selectedExtract.value) return '先选一个抽取版本。'
+  if (!mergeReady.value) return '这个版本没有采用结果，先上传外部视口视频。'
+  return ''
+})
+
+function selectMergeVersion(version: string): void {
+  selectedExtract.value = version
+}
+
+function mergeTags(version: MergeVersion): RangeTag[] {
+  const tags: RangeTag[] = []
+  if (version.version === selectedExtract.value) tags.push({ text: '已选', kind: 'current' })
+  tags.push(version.has_result ? { text: '有结果', kind: 'ok' } : { text: '无结果', kind: 'warn' })
+  return tags
+}
+
+function groupGeometry(group: MergeRange): string {
+  return geometrySummary(group.viewport, group.inner, group.frames)
+}
+
+function groupPresetLabel(group: MergeRange): string {
+  if (!group.presets.length) return '仅抽取记录'
+  return `与 ${group.presets.map((item) => formatRangeTime(item.created_at)).join('、')} 的范围相同`
+}
+
+function versionMeta(version: MergeVersion): string {
+  return version.fps ? `${version.fps.toFixed(1)} fps` : ''
+}
 const padGate = computed(() => props.info.gates.pad)
 const recomposeGate = computed(() => props.info.gates.recompose)
 // 几何前提闸门拒绝出片后，页面才给「还是出片（诊断）」这个出口：它只对裁回
@@ -116,6 +167,15 @@ function verdictType(value: string | undefined): 'success' | 'warning' | 'danger
 
 onMounted(() => start())
 
+watch(
+  () => props.info.merge_ranges,
+  (ranges) => {
+    const versions = (ranges ?? []).flatMap((group) => group.versions.map((item) => item.version))
+    if (selectedExtract.value && versions.includes(selectedExtract.value)) return
+    selectedExtract.value = props.info.extract_current ?? versions[0] ?? null
+  },
+)
+
 async function runOp(
   op: 'merge' | 'pad' | 'recompose' | 'export_upload',
   extra: Record<string, unknown> = {},
@@ -126,6 +186,9 @@ async function runOp(
   try {
     const payload: Record<string, unknown> = { ...extra }
     if (op === 'merge' && !isImageFlow.value) payload.allow_crop = allowCrop.value
+    if (op === 'merge' && isPatch.value && selectedExtract.value) {
+      payload.extract = selectedExtract.value
+    }
     if (op === 'recompose' || (op === 'merge' && isFullRedrawImg.value)) {
       payload.output_mode = outputMode.value
     }
@@ -220,6 +283,7 @@ watch(latest, async (task) => {
             :case-name="caseName"
             :info="info"
             kind="image"
+            purpose="image"
             @updated="emit('updated', $event)"
           />
 
@@ -274,11 +338,44 @@ watch(latest, async (task) => {
             <span class="muted">→</span>
             <span class="node">时间拼接（成功后自动排队）</span>
           </div>
+
+          <section class="merge-ranges">
+            <h3>合并范围</h3>
+            <p class="muted merge-ranges-hint">
+              只列抽取记录；点击版本行选择本次合并用哪版，不改最新抽取版本。
+            </p>
+            <div v-if="!mergeRanges.length" class="muted">还没有抽取记录。</div>
+            <div v-for="group in mergeRanges" :key="groupGeometry(group)" class="range-group">
+              <div class="group-head">
+                <span class="mono">{{ groupGeometry(group) }}</span>
+                <span class="muted">{{ groupPresetLabel(group) }}</span>
+              </div>
+              <RangeRow
+                v-for="version in group.versions"
+                :key="version.version"
+                :time="version.version"
+                :geometry="versionMeta(version)"
+                :meta="version.has_result ? '有采用结果' : '无采用结果'"
+                :tags="mergeTags(version)"
+                :selected="version.version === selectedExtract"
+                selectable
+                @select="selectMergeVersion(version.version)"
+              />
+            </div>
+          </section>
+
+          <MergeInputControls
+            :case-name="caseName"
+            :info="info"
+            kind="video"
+            purpose="patch"
+            @updated="emit('updated', $event)"
+          />
           <el-alert
-            v-if="mergeGate && !mergeGate.ready"
+            v-if="!mergeReady"
             type="warning"
             :closable="false"
-            :title="mergeGate.reason || '先采用一次生成结果'"
+            :title="mergeBlockReason"
             class="gate-alert"
           />
           <div class="action-row">
@@ -288,7 +385,7 @@ watch(latest, async (task) => {
               size="small"
               :icon="VideoPlay"
               :loading="running === 'merge'"
-              :disabled="Boolean(mergeGate && !mergeGate.ready)"
+              :disabled="!mergeReady"
               @click="runOp('merge')"
             >
               开始合并
@@ -325,6 +422,7 @@ watch(latest, async (task) => {
               :case-name="caseName"
               :info="info"
               :kind="mergeInputKind"
+              purpose="recompose"
               @updated="emit('updated', $event)"
             />
             <div class="action-row step-action">
@@ -545,6 +643,39 @@ watch(latest, async (task) => {
   grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
   gap: var(--space-4);
   align-items: start;
+}
+
+.merge-ranges {
+  margin-top: var(--space-3);
+}
+
+.merge-ranges h3 {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.merge-ranges-hint {
+  margin: 2px 0 var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.range-group {
+  margin-top: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-muted);
+  font-size: var(--text-xs);
 }
 
 .flow-line {

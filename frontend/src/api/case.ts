@@ -83,6 +83,10 @@ export interface RunPayload {
   session_id?: number
   /** 图片流程 adopt：候选序号（从 1 开始）。 */
   index?: number
+  /** extract：使用哪条保存的 preset；缺省用 active。 */
+  preset?: string
+  /** merge：本次合并使用哪个抽取版本；缺省用最新。 */
+  extract?: string
   /** relight：打光参数（与 CLI 同名）。 */
   scene?: 'night' | 'day'
   strength?: number

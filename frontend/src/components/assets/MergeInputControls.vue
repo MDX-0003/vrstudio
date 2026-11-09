@@ -1,48 +1,46 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { FolderOpened, Upload } from '@element-plus/icons-vue'
+import { Upload } from '@element-plus/icons-vue'
 import { setMergeInput } from '@/api/case'
-import AssetPickerDialog from '@/components/assets/AssetPickerDialog.vue'
 import AssetUploadDialog from '@/components/upload/AssetUploadDialog.vue'
 import type { CaseInfo } from '@/types/case-info'
 
 const props = defineProps<{
   caseName: string
   info: CaseInfo
-  /** 图片流程收 21:9 画布图，视频流程收 21:9 画布视频。 */
+  /** 图片流程收 21:9 画布图，视频流程收 21:9 画布视频或 patch 的视口视频。 */
   kind: 'image' | 'video'
+  /** 提示文案的语境；缺省按视频/图片的旧拼接输入。 */
+  purpose?: 'patch' | 'recompose' | 'image'
 }>()
 const emit = defineEmits<{ updated: [data: CaseInfo] }>()
 
 const uploadOpen = ref(false)
-const pickerOpen = ref(false)
 const switching = ref(false)
 
-const candidates = computed(() =>
-  (props.info.assets ?? []).filter((asset) => asset.kind === props.kind),
-)
 const current = computed(
-  () => candidates.value.find((asset) => asset.id === props.info.merge_input) ?? null,
+  () => (props.info.assets ?? []).find((asset) => asset.id === props.info.merge_input) ?? null,
 )
 const hint = computed(() => {
+  if (props.purpose === 'patch') {
+    return (
+      '合并输入：外部重绘的视口视频。上传并选中后，合并会用所选抽取版本的 clip.json ' +
+      '重建投影；比例不一致会被合并拒绝，除非勾选允许裁切。'
+    )
+  }
   const source = current.value ? current.value.name : '生成步采用的结果'
   if (props.kind === 'image') {
     return (
-      `拼接输入：${source}。外部改完的 21:9 画布图可以直接上传并选中，` +
-      '也可以从素材库挑一张；2:1 源图或成片会被拼接拒绝。'
+      `拼接输入：${source}。外部改完的 21:9 画布图可以直接上传并选中；` +
+      '2:1 源图或成片会被拼接拒绝。'
     )
   }
   return (
-    `拼接输入：${source}。外部改完的 21:9 画布视频可以直接上传并选中，` +
-    '也可以从素材库挑一段；2:1 源片或成片会被裁回拒绝。'
+    `拼接输入：${source}。外部改完的 21:9 画布视频可以直接上传并选中；` +
+    '2:1 源片或成片会被裁回拒绝。'
   )
 })
-const pickerHint = computed(() =>
-  props.kind === 'image'
-    ? '从本 case 素材库里选一张 21:9 画布图（外部改完导回的结果）；2:1 源图或成片不能拼接。'
-    : '从本 case 素材库里选一段 21:9 画布视频（外部改完导回的结果）；2:1 源片或成片不能裁回。',
-)
 
 async function apply(assetId: string | null, message: string): Promise<void> {
   if (switching.value) return
@@ -58,16 +56,6 @@ async function apply(assetId: string | null, message: string): Promise<void> {
   }
 }
 
-function onPicked(ids: string[]): void {
-  pickerOpen.value = false
-  const id = ids[0]
-  if (id) void apply(id, '拼接输入已换成素材库里的这个文件')
-}
-
-function useAdoptedResult(): void {
-  void apply(null, '已用回生成结果')
-}
-
 function onUploaded(data: CaseInfo): void {
   uploadOpen.value = false
   emit('updated', data)
@@ -77,20 +65,20 @@ function onUploaded(data: CaseInfo): void {
 <template>
   <div class="merge-input">
     <div class="merge-input-actions">
+      <span class="merge-input-label mono">
+        {{ current ? current.name : '采用结果（该版本 result.mp4）' }}
+      </span>
       <el-button size="small" :icon="Upload" @click="uploadOpen = true">
         上传并用作拼接输入
       </el-button>
       <el-button
-        size="small"
-        :icon="FolderOpened"
+        v-if="info.merge_input"
+        link
+        type="primary"
         :loading="switching"
-        :disabled="!candidates.length"
-        @click="pickerOpen = true"
+        @click="apply(null, '已改用采用结果')"
       >
-        从素材库选择
-      </el-button>
-      <el-button v-if="info.merge_input" size="small" link @click="useAdoptedResult">
-        用回生成结果
+        改用采用结果
       </el-button>
     </div>
     <p class="merge-input-hint muted">{{ hint }}</p>
@@ -102,18 +90,6 @@ function onUploaded(data: CaseInfo): void {
       :merge-input-kind="kind"
       @added="onUploaded"
     />
-    <AssetPickerDialog
-      v-model="pickerOpen"
-      :case-name="caseName"
-      :info="info"
-      :mode="kind === 'video' ? 'video' : 'image'"
-      :only-kind="kind"
-      title="选择拼接输入"
-      :hint="pickerHint"
-      confirm-text="用作拼接输入"
-      @confirm="onPicked"
-      @updated="emit('updated', $event)"
-    />
   </div>
 </template>
 
@@ -122,7 +98,12 @@ function onUploaded(data: CaseInfo): void {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-3);
+  gap: var(--space-2);
+}
+
+.merge-input-label {
+  font-size: var(--text-sm);
+  color: var(--color-text);
 }
 
 .merge-input-hint {

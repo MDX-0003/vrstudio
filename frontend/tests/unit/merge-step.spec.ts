@@ -174,10 +174,12 @@ async function mountImage(
 }
 
 describe('MergeStep 拼接输入（fullRedrawImg）', () => {
-  it('keeps 上传并用作拼接输入 available even with an empty library', async () => {
+  it('keeps 上传并用作拼接输入 as the only source entry', async () => {
     const wrapper = await mountImage(null, false)
     expect(button(wrapper, '上传并用作拼接输入').attributes('disabled')).toBeUndefined()
-    expect(button(wrapper, '从素材库选择').attributes('disabled')).toBeDefined()
+    expect(wrapper.findAll('button').some((item) => item.text().includes('从素材库选择'))).toBe(
+      false,
+    )
     expect(wrapper.findAll('button').some((item) => item.text().includes('用回生成结果'))).toBe(
       false,
     )
@@ -194,22 +196,16 @@ describe('MergeStep 拼接输入（fullRedrawImg）', () => {
     wrapper.unmount()
   })
 
-  it('writes the picked library file as [merge] input', async () => {
-    vi.mocked(setMergeInput).mockClear()
+  it('no longer renders the library picker', async () => {
     const wrapper = await mountImage()
-    const picker = wrapper.findComponent(PickerStub)
-    expect(picker.props('mode')).toBe('image')
-    expect(picker.props('onlyKind')).toBe('image')
-    picker.vm.$emit('confirm', ['i1'])
-    await flushPromises()
-    expect(setMergeInput).toHaveBeenCalledWith('p1', 'i1')
+    expect(wrapper.findComponent(PickerStub).exists()).toBe(false)
     wrapper.unmount()
   })
 
   it('clears the pointer back to the generated result', async () => {
     vi.mocked(setMergeInput).mockClear()
     const wrapper = await mountImage('i1')
-    await button(wrapper, '用回生成结果').trigger('click')
+    await button(wrapper, '改用采用结果').trigger('click')
     await flushPromises()
     expect(setMergeInput).toHaveBeenCalledWith('p1', null)
     wrapper.unmount()
@@ -237,6 +233,95 @@ describe('MergeStep 拼接输入（fullRedrawImg）', () => {
   it('hides the output select when only the case size is available', async () => {
     const wrapper = await mountImage(null, true, false)
     expect(wrapper.findComponent(SelectStub).exists()).toBe(false)
+    wrapper.unmount()
+  })
+})
+
+function patchInfo(mergeInput: string | null = null): CaseInfo {
+  const viewport = {
+    yaw_deg: 10,
+    pitch_deg: -5,
+    fov_h_deg: 90,
+    width: 320,
+    height: 180,
+  }
+  const inner = { x: 80, y: 40, width: 160, height: 100 }
+  const frames = { start: 0, end: 5 }
+  return {
+    flow: 'patch',
+    gates: { merge: { ok: false, ready: false } },
+    outputs: [],
+    extract_current: 'v1',
+    merge_input: mergeInput,
+    assets: mergeInput
+      ? [
+          {
+            id: mergeInput,
+            kind: 'video',
+            role: 'merge_input',
+            name: 'external.mp4',
+          },
+        ]
+      : [],
+    merge_ranges: [
+      {
+        viewport,
+        inner,
+        frames,
+        presets: [
+          {
+            id: 'r1',
+            created_at: '2026-11-09T16:30:00+08:00',
+            updated_at: '2026-11-09T17:05:00+08:00',
+          },
+        ],
+        versions: [
+          { version: 'v1', fps: 30, has_result: true },
+          { version: 'v2', fps: 30, has_result: false },
+        ],
+      },
+    ],
+    step_files: { merge: { inputs: [], outputs: [] } },
+  } as unknown as CaseInfo
+}
+
+describe('MergeStep patch 局部选版', () => {
+  it('selects a version locally and sends it with merge', async () => {
+    vi.mocked(runOperation).mockClear()
+    const wrapper = mount(MergeStep, {
+      props: { caseName: 'p1', info: patchInfo(), step: 'merge' },
+      global: { stubs },
+    })
+    await flushPromises()
+    expect(wrapper.findAll('.range-row')).toHaveLength(2)
+    await wrapper.findAll('.range-row')[1].trigger('click')
+    expect(button(wrapper, '开始合并').attributes('disabled')).toBeDefined()
+    await wrapper.findAll('.range-row')[0].trigger('click')
+    await button(wrapper, '开始合并').trigger('click')
+    await flushPromises()
+    expect(runOperation).toHaveBeenCalledWith('p1', 'merge', {
+      allow_crop: false,
+      extract: 'v1',
+    })
+    wrapper.unmount()
+  })
+
+  it('accepts an external input for a version without an adopted result', async () => {
+    vi.mocked(runOperation).mockClear()
+    const wrapper = mount(MergeStep, {
+      props: { caseName: 'p1', info: patchInfo('v1'), step: 'merge' },
+      global: { stubs },
+    })
+    await flushPromises()
+    await wrapper.findAll('.range-row')[1].trigger('click')
+    expect(button(wrapper, '开始合并').attributes('disabled')).toBeUndefined()
+    expect(wrapper.text()).toContain('external.mp4')
+    await button(wrapper, '开始合并').trigger('click')
+    await flushPromises()
+    expect(runOperation).toHaveBeenCalledWith('p1', 'merge', {
+      allow_crop: false,
+      extract: 'v2',
+    })
     wrapper.unmount()
   })
 })
@@ -308,25 +393,20 @@ describe('MergeStep 拼接输入（fullredraw 视频）', () => {
 
     const dialog = wrapper.findComponent(UploadStub)
     expect(dialog.props('mergeInputKind')).toBe('video')
-    const picker = wrapper.findComponent(PickerStub)
-    expect(picker.props('mode')).toBe('video')
-    expect(picker.props('onlyKind')).toBe('video')
+    expect(wrapper.findComponent(PickerStub).exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('writes the picked video as [merge] input', async () => {
-    vi.mocked(setMergeInput).mockClear()
+  it('no longer renders the library picker', async () => {
     const wrapper = await mountVideo()
-    wrapper.findComponent(PickerStub).vm.$emit('confirm', ['v1'])
-    await flushPromises()
-    expect(setMergeInput).toHaveBeenCalledWith('p1', 'v1')
+    expect(wrapper.findComponent(PickerStub).exists()).toBe(false)
     wrapper.unmount()
   })
 
   it('clears the pointer back to the adopted result', async () => {
     vi.mocked(setMergeInput).mockClear()
     const wrapper = await mountVideo('v1')
-    await button(wrapper, '用回生成结果').trigger('click')
+    await button(wrapper, '改用采用结果').trigger('click')
     await flushPromises()
     expect(setMergeInput).toHaveBeenCalledWith('p1', null)
     wrapper.unmount()

@@ -1,13 +1,17 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, VideoPlay } from '@element-plus/icons-vue'
 import { fetchCase, runOperation } from '@/api/case'
+import { deleteRangePreset } from '@/api/workflow'
 import FileRow from '@/components/common/FileRow.vue'
+import RangeRow from '@/components/range/RangeRow.vue'
+import type { RangeTag } from '@/components/range/types'
 import { useCaseTasks } from '@/composables/useCaseTasks'
 import { taskStatusMeta } from '@/constants/taskStatus'
 import { formatSize } from '@/utils/format'
-import type { CaseInfo, FileInfo } from '@/types/case-info'
+import { formatRangeTime, geometrySummary, presetSummary, sameGeometry } from '@/utils/range'
+import type { CaseInfo, ExtractVersion, FileInfo, RangePreset } from '@/types/case-info'
 
 const props = defineProps<{ caseName: string; info: CaseInfo }>()
 const emit = defineEmits<{ updated: [data: CaseInfo] }>()
@@ -34,6 +38,69 @@ const pickGate = computed(() => props.info.gates.pick)
 const extractGate = computed(() => props.info.gates.extract)
 const outputs = computed<FileInfo[]>(() => props.info.step_files.extract?.outputs ?? [])
 const current = computed(() => props.info.extract_current)
+const presets = computed(() => props.info.pick?.presets ?? [])
+const selectedPresetId = ref<string | null>(
+  props.info.pick?.active ?? props.info.pick?.presets[0]?.id ?? null,
+)
+const selectedPreset = computed(
+  () => presets.value.find((item) => item.id === selectedPresetId.value) ?? null,
+)
+const selectedSummary = computed(() =>
+  selectedPreset.value ? presetSummary(selectedPreset.value) : '',
+)
+
+function presetTags(preset: RangePreset): RangeTag[] {
+  return preset.id === selectedPresetId.value ? [{ text: '本次抽取', kind: 'current' }] : []
+}
+
+function versionGeometry(item: ExtractVersion): string {
+  if (!item.viewport || !item.inner) return ''
+  return geometrySummary(item.viewport, item.inner, item.frames ?? null)
+}
+
+function versionPresetLabel(item: ExtractVersion): string {
+  if (!item.viewport || !item.inner) return '仅抽取记录'
+  const match = presets.value.find((preset) =>
+    sameGeometry(
+      preset.viewport,
+      preset.inner,
+      preset.frames,
+      item.viewport!,
+      item.inner!,
+      item.frames ?? null,
+    ),
+  )
+  return match ? `与 ${formatRangeTime(match.created_at)} 的范围相同` : '仅抽取记录'
+}
+
+function versionTags(item: ExtractVersion): RangeTag[] {
+  const tags: RangeTag[] = []
+  if (item.version === current.value) tags.push({ text: '最新', kind: 'current' })
+  tags.push(item.has_result ? { text: '有结果', kind: 'ok' } : { text: '无结果', kind: 'warn' })
+  return tags
+}
+
+async function onDeletePreset(preset: RangePreset): Promise<void> {
+  try {
+    await ElMessageBox.confirm('删除这条范围？已抽取的版本仍然保留，不受影响。', '删除范围', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+  try {
+    const data = await deleteRangePreset(props.caseName, preset.id)
+    const next = data.pick?.active ?? data.pick?.presets[0]?.id ?? null
+    selectedPresetId.value = next
+    emit('updated', data)
+    ElMessage.success('已删除范围')
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '删除范围失败')
+  }
+}
+
 /** 图片流程的抽取产物是 PNG 与 JSON：没有 clip.mp4 与首尾帧卡片。 */
 const isImageFlow = computed(
   () => props.info.flow === 'patchimg' || props.info.flow === 'fullRedrawImg',
@@ -56,13 +123,17 @@ function sizeText(file: FileInfo | undefined): string {
 
 async function runExtract(): Promise<void> {
   if (running.value) return
+  if (!selectedPresetId.value) {
+    ElMessage.warning('先选一条保存的范围')
+    return
+  }
   if (pickGate.value && !pickGate.value.ok) {
     ElMessage.warning(pickGate.value.reason || '先完成选区')
     return
   }
   submitting.value = true
   try {
-    await runOperation(props.caseName, 'extract')
+    await runOperation(props.caseName, 'extract', { preset: selectedPresetId.value })
     start()
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : '启动抽取失败')
@@ -88,15 +159,60 @@ watch(latest, async (task) => {
     ElMessage.error(task.error || '抽取失败，原因见下方任务日志')
   }
 })
+
+watch(
+  () => props.info.pick,
+  (pick) => {
+    if (!pick) {
+      selectedPresetId.value = null
+      return
+    }
+    const ids = pick.presets.map((item) => item.id)
+    if (selectedPresetId.value && ids.includes(selectedPresetId.value)) return
+    selectedPresetId.value = pick.active ?? ids[0] ?? null
+  },
+)
 </script>
 
 <template>
   <div class="ex-page">
     <section class="panel">
+      <div class="panel-head">
+        <h2 class="panel-title">保存的范围</h2>
+        <span class="muted">点击选择本次抽取的范围</span>
+      </div>
+      <div class="panel-body">
+        <div v-if="!presets.length" class="muted">先在选区页保存一条范围。</div>
+        <div v-else class="range-list">
+          <RangeRow
+            v-for="preset in presets"
+            :key="preset.id"
+            :time="formatRangeTime(preset.created_at)"
+            :geometry="presetSummary(preset)"
+            :meta="`最近保存 ${formatRangeTime(preset.updated_at)}`"
+            :tags="presetTags(preset)"
+            :selected="preset.id === selectedPresetId"
+            selectable
+            deletable
+            @select="selectedPresetId = preset.id"
+            @delete="onDeletePreset(preset)"
+          />
+        </div>
+        <p class="range-summary muted">本次抽取：{{ selectedSummary || '未选择' }}</p>
+        <el-alert
+          v-if="info.pick?.dirty"
+          type="warning"
+          :closable="false"
+          title="当前草稿有未保存改动；抽取只使用已保存的范围。"
+        />
+      </div>
+    </section>
+
+    <section class="panel">
       <div class="panel-body">
         <div class="ex-bar">
           <div>
-            <div class="ex-label">当前版本</div>
+            <div class="ex-label">最新版本</div>
             <div class="ex-value mono">{{ current || '还没有' }}</div>
           </div>
           <div class="ex-divider" />
@@ -239,17 +355,18 @@ watch(latest, async (task) => {
       <section class="panel">
         <div class="panel-head">
           <h2 class="panel-title">抽取版本</h2>
-          <span class="muted">{{ info.extracts.length }} 个版本</span>
+          <span class="muted">{{ info.extracts.length }} 个版本 · 只读</span>
         </div>
         <div class="panel-body version-list">
           <div v-if="!info.extracts.length" class="muted">还没有可用版本。</div>
-          <div v-for="item in info.extracts" :key="item.version" class="version-row">
-            <span class="mono">{{ item.version }}</span>
-            <el-tag v-if="item.version === current" size="small" type="success" effect="light"
-              >当前</el-tag
-            >
-            <span class="muted">{{ item.has_result ? '有生成结果' : '未生成' }}</span>
-          </div>
+          <RangeRow
+            v-for="item in info.extracts"
+            :key="item.version"
+            :time="item.version"
+            :geometry="versionGeometry(item)"
+            :meta="versionPresetLabel(item)"
+            :tags="versionTags(item)"
+          />
           <p class="muted ex-note">切换版本会同时切换首尾原始帧与后续步骤的输入；旧版本不清除。</p>
         </div>
       </section>
@@ -458,6 +575,19 @@ watch(latest, async (task) => {
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
   gap: var(--space-4);
   align-items: start;
+}
+
+.range-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.range-summary {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-xs);
 }
 
 .version-list {

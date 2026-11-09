@@ -30,7 +30,7 @@ vi.mock('@/composables/useCaseTasks', async () => {
   }
 })
 
-import { fetchCase } from '@/api/case'
+import { fetchCase, runOperation } from '@/api/case'
 import ExtractStep from '@/views/wizard/ExtractStep.vue'
 import type { CaseInfo } from '@/types/case-info'
 import type { TaskView } from '@/types/task'
@@ -62,6 +62,51 @@ function info(): CaseInfo {
     step_files: { extract: { inputs: [], outputs: [] } },
     extract_current: null,
     extracts: [],
+  } as unknown as CaseInfo
+}
+
+function pickInfo(): CaseInfo {
+  const base = info()
+  const viewport = {
+    yaw_deg: 10,
+    pitch_deg: -5,
+    fov_h_deg: 90,
+    width: 320,
+    height: 180,
+  }
+  const inner = { x: 80, y: 40, width: 160, height: 100 }
+  const frames = { start: 0, end: 5 }
+  return {
+    ...base,
+    viewport,
+    inner,
+    frames,
+    pick: {
+      draft: { viewport, inner, frames, updated_at: '2026-11-09T17:05:00+08:00' },
+      active: 'r1',
+      presets: [
+        {
+          id: 'r1',
+          created_at: '2026-11-09T16:30:00+08:00',
+          updated_at: '2026-11-09T17:05:00+08:00',
+          viewport,
+          inner,
+          frames,
+        },
+      ],
+      dirty: false,
+    },
+    extracts: [
+      {
+        version: 'v1',
+        extracted: true,
+        has_result: true,
+        viewport,
+        inner,
+        frames,
+        fps: 30,
+      },
+    ],
   } as unknown as CaseInfo
 }
 
@@ -201,6 +246,37 @@ describe('ExtractStep 完成刷新（2026-10-26 陈旧文件列表修复）', ()
     tasksState.setLatest(task('done'))
     await flushPromises()
     expect(runBtn().attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+})
+
+describe('ExtractStep 保存的范围与只读版本', () => {
+  it('runs extract with the selected preset', async () => {
+    vi.mocked(runOperation).mockClear()
+    const wrapper = mount(ExtractStep, {
+      props: { caseName: 'p1', info: pickInfo() },
+      global: { stubs },
+    })
+    await flushPromises()
+    expect(wrapper.findAll('.range-row')).toHaveLength(2)
+    await wrapper
+      .findAll('button')
+      .find((item) => item.text().includes('运行抽取'))!
+      .trigger('click')
+    await flushPromises()
+    expect(runOperation).toHaveBeenCalledWith('p1', 'extract', { preset: 'r1' })
+    wrapper.unmount()
+  })
+
+  it('marks the latest extract and does not make version rows selectable', async () => {
+    const wrapper = mount(ExtractStep, {
+      props: { caseName: 'p1', info: pickInfo() },
+      global: { stubs },
+    })
+    await flushPromises()
+    const text = wrapper.text()
+    expect(text).toContain('最新')
+    expect(wrapper.findAll('.version-row.selectable')).toHaveLength(0)
     wrapper.unmount()
   })
 })
