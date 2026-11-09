@@ -3888,7 +3888,7 @@ async def api_range_preset_load(request):
     if fresh is None:
         return JSONResponse({"error": "no such case"}, status_code=404)
     extra = {"frames": dict(preset.frames)} if preset.frames else {}
-    return JSONResponse(_geometry_payload(fresh, name, **extra))
+    return JSONResponse(_geometry_payload(fresh, name, active_range=preset.id, **extra))
 
 
 async def api_range_preset_delete(request):

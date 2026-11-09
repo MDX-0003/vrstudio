@@ -806,6 +806,7 @@ def test_range_preset_load_restores_draft(client, patch_case, tmp_path):
     assert _draft("p1", tmp_path).inner == INNER            # 回到 preset 的框
     payload = r.json()
     assert payload["inner"] == INNER
+    assert payload["active_range"] == "r1"
     assert "previews" in payload and "assets" not in payload
 
 

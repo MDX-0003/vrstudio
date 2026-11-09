@@ -141,6 +141,7 @@ function applyGeometry(payload: GeometryPayload): void {
           frames: payload.frames ?? pick.draft?.frames ?? null,
           updated_at: pick.draft?.updated_at ?? '',
         },
+        active: payload.active_range ?? pick.active,
         dirty: payload.dirty ?? pick.dirty,
       }
     : pick
@@ -152,6 +153,7 @@ function applyGeometry(payload: GeometryPayload): void {
     previews: payload.previews,
     // 选区范围导入会一并写 frames；其他几何动作不带，保持原值。
     ...(payload.frames ? { frames: payload.frames } : {}),
+    ...(payload.active_range ? { active_range: payload.active_range } : {}),
     ...(nextPick ? { pick: nextPick } : {}),
   }
 }

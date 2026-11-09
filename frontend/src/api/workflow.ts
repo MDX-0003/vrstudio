@@ -26,6 +26,8 @@ export interface GeometryPayload {
   frames_clamped?: boolean
   /** 当前 draft 与 active preset 是否不同。 */
   dirty?: boolean
+  /** 载入 preset 时一起返回新的 active，避免父级 info 里的旧 active 覆盖本地选择。 */
+  active_range?: string
 }
 
 export function setViewport(name: string, fx: number, fy: number): Promise<GeometryPayload> {

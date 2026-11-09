@@ -165,6 +165,10 @@ function applyGeometry(payload: GeometryPayload): void {
     endFrame.value = payload.frames.end
   }
   if (payload.dirty !== undefined) dirty.value = payload.dirty
+  if (payload.active_range) {
+    activeRange.value = payload.active_range
+    selectedRange.value = payload.active_range
+  }
   vpVersion.value = Date.now()
   emit('geometry', payload)
 }

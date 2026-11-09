@@ -397,8 +397,11 @@ watch(latest, async (task) => {
           </p>
           <div class="file-groups">
             <div class="file-group">
-              <h3>合并输入</h3>
-              <FileRow v-for="file in patchFiles?.inputs ?? []" :key="file.path" :entry="file" />
+              <h3>本次合并输入</h3>
+              <span class="muted">
+                版本 {{ selectedExtract ?? '未选' }} ·
+                {{ selectedVersion?.has_result ? 'result.mp4' : '需要外部视口视频' }}
+              </span>
             </div>
             <div class="file-group">
               <h3>合并输出</h3>
