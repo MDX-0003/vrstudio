@@ -143,26 +143,32 @@ def new(
 def draft(
     name: str = typer.Option(..., "--case", help="case 名"),
     file: Path = typer.Option(..., "--file", exists=True, dir_okay=False,
-                              help='JSON：{"viewport": {...}, "inner": {...}}'),
+                              help='JSON：{"viewport": {...}, "inner": {...}, '
+                                   '"frames": {...}}'),
+    new: bool = typer.Option(False, "--new",
+                             help="按当前时间新建一条 preset；缺省更新 active"),
     cases_dir: Path = typer.Option(None, "--cases-dir"),
 ) -> None:
-    """CLI 写 pick 草稿（与 web pick 共用 case_mod.set_draft）。"""
+    """CLI 写 pick 选区：缺省更新 active preset，``--new`` 新建一条。"""
     try:
         raw = json.loads(file.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             raise ValueError("顶层必须是对象")
-        case = case_mod.set_draft(name, viewport=raw.get("viewport"),
-                                  inner=raw.get("inner"), frames=raw.get("frames"),
-                                  root=cases_dir)
+        if new:
+            case = case_mod.add_range_preset(
+                name, viewport=raw.get("viewport"), inner=raw.get("inner"),
+                frames=raw.get("frames"), root=cases_dir)
+        else:
+            case = case_mod.set_draft(
+                name, viewport=raw.get("viewport"), inner=raw.get("inner"),
+                frames=raw.get("frames"), root=cases_dir)
     except CaseError as exc:
         _fail(exc)
     except (OSError, ValueError) as exc:
         _fail(CaseError(str(exc)))
-    parts = [f"viewport={'✓' if case.viewport else '—'}",
-             f"inner={'✓' if case.inner else '—'}"]
-    if case.flow == "patch":
-        parts.append(f"frames={'✓' if case.frames else '—'}")
-    typer.echo(f"draft    {case.name}  " + "  ".join(parts))
+    preset = case.range_preset()
+    typer.echo(f"draft    {case.name}  preset={preset.id}  "
+               f"created={preset.created_at}  updated={preset.updated_at}")
 
 
 @app.command("relight")
@@ -277,6 +283,11 @@ def show(
         if case.sha256:
             typer.echo(f"sha256   {case.sha256[:16]}…")
     if case.flow in ("patch", "patchimg"):
+        typer.echo(f"presets  {len(case.range_presets)} 条  "
+                   f"active={case.active_range or '(无)'}")
+        for preset in case.range_presets:
+            typer.echo(f"  {preset.id:<4} created={preset.created_at}  "
+                       f"updated={preset.updated_at}")
         sections = [("viewport", case.viewport), ("inner", case.inner)]
         if case.flow == "patch":
             sections.append(("frames", case.frames))

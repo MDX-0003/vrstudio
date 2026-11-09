@@ -47,21 +47,23 @@ class VideoFacts:
         return self.width, self.height
 
 
-def resolve_case_inputs(case_name: str, cases_dir) -> dict:
+def resolve_case_inputs(case_name: str, cases_dir,
+                        extract_version: str | None = None) -> dict:
     """统一 case 模型 → assemble 的四元组（src/space/sidecar/output）。"""
     case = case_mod.load(case_name, cases_dir)
     if case.flow != "patch":
         raise typer.Exit(f"assemble --case: case {case_name} 是 {case.flow} 流"
                          f"（时间拼接只属于 patch）")
-    if not case.extract_current:
+    version = extract_version or case.extract_current
+    if not version:
         raise typer.Exit(f"assemble --case: case {case_name} 没有抽取版本")
-    d = case.dir(cases_dir) / "extracts" / case.extract_current
+    d = case.dir(cases_dir) / "extracts" / version
     out_dir = case.dir(cases_dir) / "out"
     return {
         "input": Path(case_mod.check_source(case, cases_dir)),
-        "space": out_dir / f"{case.extract_current}_space.mp4",
+        "space": out_dir / f"{version}_space.mp4",
         "sidecar": d / "clip.json",
-        "output": out_dir / f"{case.extract_current}_frame.mp4",
+        "output": out_dir / f"{version}_frame.mp4",
     }
 
 
@@ -75,6 +77,9 @@ def assemble(
     case_name: str = typer.Option(None, "--case",
                                   help="统一 case 名：源片/空间合并段/clip.json/输出全部自动定位"),
     cases_dir: Path = typer.Option(None, help="default: <repo>/cases"),
+    extract_version: str = typer.Option(
+        None, "--extract",
+        help="要拼接的抽取版本；缺省用 [extract] current，需与 merge 用同一版本"),
     input_video: Path = typer.Option(None, "--input", help="source ERP (360) video"),
     space: Path = typer.Option(None, "--space", help="空间合并段 mp4（merge 的输出）"),
     sidecar: Path = typer.Option(None, help="clip.json (single segment)"),
@@ -88,9 +93,11 @@ def assemble(
     if case_name:
         if input_video or space or sidecar or output:
             raise typer.Exit("assemble: --case 与 --input/--space/--sidecar/--output 互斥")
-        resolved = resolve_case_inputs(case_name, cases_dir)
+        resolved = resolve_case_inputs(case_name, cases_dir, extract_version)
         input_video, space, sidecar, output = (resolved["input"], resolved["space"],
                                                resolved["sidecar"], resolved["output"])
+    elif extract_version:
+        raise typer.Exit("assemble: --extract 只用于 --case 模式")
     elif not (input_video and space and sidecar and output):
         raise typer.Exit("assemble: 需要 --case，或完整的 --input/--space/--sidecar/--output")
 

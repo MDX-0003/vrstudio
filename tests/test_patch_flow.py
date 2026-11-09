@@ -83,12 +83,12 @@ def test_merge_resolve_full_chain(patch_case):
     with pytest.raises(Exception, match="extract"):
         merge_cli.resolve_case_inputs("p1", root)        # 没抽取版本
     case_mod.set_extract_current("p1", "20261016T000000", root=root)
-    with pytest.raises(Exception, match="adopt"):
-        merge_cli.resolve_case_inputs("p1", root)        # 没采用的结果
     d = case_mod.case_dir("p1", root) / "extracts" / "20261016T000000"
     d.mkdir(parents=True)
-    (d / "result.mp4").write_bytes(b"r")
     (d / "clip.json").write_bytes(b"{}")
+    with pytest.raises(Exception, match="adopt"):
+        merge_cli.resolve_case_inputs("p1", root)        # 没采用的结果
+    (d / "result.mp4").write_bytes(b"r")
     got = merge_cli.resolve_case_inputs("p1", root)
     assert got["ai"] == d / "result.mp4"
     assert got["sidecar"] == d / "clip.json"

@@ -37,32 +37,38 @@ from ..jsonio import json_safe
 app = typer.Typer(add_completion=False, help=__doc__)
 
 
-def resolve_case_inputs(case_name: str, cases_dir) -> dict:
+def resolve_case_inputs(case_name: str, cases_dir,
+                        extract_version: str | None = None) -> dict:
     """统一 case 模型 → merge 的四元组（input/ai/sidecar/output）。
 
-    纯路径解析，无 ffmpeg / 无解码——web 与单测共用。output 缺省落
-    ``out/<extract 版本>_space.mp4``（空间合并只管中段；时间拼接是 ``assemble``）；
-    返回件在 extracts/<current>/result.mp4（generate adopt 的落点），不在时明确
-    报"先 adopt"而不是让下游报打不开文件。
+    纯路径解析，无 ffmpeg / 无解码——web 与单测共用。``extract_version`` 缺省用
+    ``[extract] current``；显式版本让合并页可以选旧版而不改 generate 的当前版本。
+    output 落 ``out/<版本>_space.mp4``（空间合并只管中段；时间拼接是 ``assemble``）；
+    AI 输入优先 ``[merge] input``，没有指针时回退该版本的 ``result.mp4``。
     """
     case = case_mod.load(case_name, cases_dir)
     if case.flow != "patch":
         raise typer.Exit(f"merge --case: case {case_name} 是 {case.flow} 流"
                          f"（patch 流专用入口；fullredraw 用 recompose）")
-    if not case.extract_current:
+    version = extract_version or case.extract_current
+    if not version:
         raise typer.Exit(f"merge --case: case {case_name} 没有抽取版本"
                          f"（[extract] current 未定，先 `vrstudio extract name`）")
-    d = case.dir(cases_dir) / "extracts" / case.extract_current
-    ai = d / "result.mp4"
-    if not ai.is_file():
-        raise typer.Exit(f"merge --case: 没有采用的结果（{ai} 不存在）——"
-                         f"先 `vrstudio generate adopt --case {case_name}`")
+    d = case.dir(cases_dir) / "extracts" / version
+    if not (d / "clip.json").is_file():
+        raise typer.Exit(f"merge --case: 抽取版本 {version} 缺 clip.json")
+    ai = (case.merge_input_file(cases_dir) if case.merge_input
+          else d / "result.mp4")
+    if ai is None or not ai.is_file():
+        raise typer.Exit(
+            f"merge --case: 没有可用的 AI 输入（{d / 'result.mp4'} 不存在）——"
+            f"先 `vrstudio generate adopt --case {case_name}`，或在合并页上传外部结果")
     src = case_mod.check_source(case, cases_dir)
     out_dir = case.dir(cases_dir) / "out"
     out_dir.mkdir(parents=True, exist_ok=True)
     return {
         "input": Path(src), "ai": ai, "sidecar": d / "clip.json",
-        "output": out_dir / f"{case.extract_current}_space.mp4",
+        "output": out_dir / f"{version}_space.mp4",
     }
 
 
@@ -142,7 +148,8 @@ class AiFrameSource:
 
 def _merge_image(case, cases_dir, *, feather: int, levels: int,
                  report: Path | None, quiet: bool, progress_every: int,
-                 allow_crop: bool = False) -> None:
+                 allow_crop: bool = False,
+                 extract_version: str | None = None) -> None:
     """patchimg 的贴回：AI 视口结果归一 → composite_frame → 只写 inner。
 
     与视频 patch 同一条几何路径（SegmentMaps + composite_frame），区别只在
@@ -150,9 +157,10 @@ def _merge_image(case, cases_dir, *, feather: int, levels: int,
     复制，因此 ``np.array_equal(out[~support], src[~support])`` 是结构性成立
     的，不依赖容差。
     """
-    if not case.extract_current:
+    version = extract_version or case.extract_current
+    if not version:
         raise typer.Exit("merge: patchimg 还没有 extract 版本——先 extract")
-    d = case.dir(cases_dir) / "extracts" / case.extract_current
+    d = case.dir(cases_dir) / "extracts" / version
     geometry_path = d / "image.json"
     result_path = d / "result.png"
     if not geometry_path.is_file():
@@ -200,12 +208,12 @@ def _merge_image(case, cases_dir, *, feather: int, levels: int,
 
         out_dir = case.dir(cases_dir) / "out"
         out_dir.mkdir(parents=True, exist_ok=True)
-        out = out_dir / f"{case.extract_current}_image.png"
+        out = out_dir / f"{version}_image.png"
         write_png(out, out_image)
 
         data = {
             "case": case.name,
-            "extract": case.extract_current,
+            "extract": version,
             "erp": [erp_w, erp_h],
             "viewport": {"yaw_deg": geo.viewport.yaw_deg,
                          "pitch_deg": geo.viewport.pitch_deg,
@@ -265,16 +273,18 @@ def _check_stitch_input(generated, manifest, path: Path) -> None:
 
 
 def _merge_full(case, cases_dir, *, report: Path | None, quiet: bool,
-                progress_every: int, follow_input: bool = False) -> None:
+                progress_every: int, follow_input: bool = False,
+                extract_version: str | None = None) -> None:
     """fullRedrawImg 的收口：把 4K 21:9 结果 stitch 回 2:1 的源图尺寸。
 
     与 fullredraw 的视频 recompose 同一条单帧核心；模型裁画布或重构图时
     ``stitch_image`` 按冗余带相关性拒绝出片。``follow_input`` 让输出按输入
     像素密度缩放，成片加尺寸后缀，避免覆盖案例分辨率的成片。
     """
-    if not case.extract_current:
+    version = extract_version or case.extract_current
+    if not version:
         raise typer.Exit("merge: fullRedrawImg 还没有 extract 版本——先 extract")
-    d = case.dir(cases_dir) / "extracts" / case.extract_current
+    d = case.dir(cases_dir) / "extracts" / version
     manifest_path = d / "image_pad.json"
     # 拼接输入：``[merge] input`` 指向的素材优先，没写指针才回退 adopt 落点（决策 66）。
     result_path = case.merge_input_file(cases_dir) or d / "result.png"
@@ -334,12 +344,12 @@ def _merge_full(case, cases_dir, *, report: Path | None, quiet: bool,
         out_dir = case.dir(cases_dir) / "out"
         out_dir.mkdir(parents=True, exist_ok=True)
         suffix = "" if stitched.output_mode == "case" else f"_{out_w}x{out_h}"
-        out = out_dir / f"{case.extract_current}_image{suffix}.png"
+        out = out_dir / f"{version}_image{suffix}.png"
         write_png(out, stitched.image)
 
         data = {
             "case": case.name,
-            "extract": case.extract_current,
+            "extract": version,
             "input": {"asset": case.merge_input, "path": str(result_path),
                       "sha256": case_mod.file_sha256(result_path)},
             "source": [int(width), int(height)],
@@ -384,8 +394,11 @@ def _merge_full(case, cases_dir, *, report: Path | None, quiet: bool,
 def merge(
     case_name: str = typer.Option(None, "--case",
                                   help="统一 case 名：input/ai/sidecar/output 全部"
-                                       "自动定位（源哈希守卫 + extracts/<current> + out/）"),
+                                       "自动定位（源哈希守卫 + extracts/<版本> + out/）"),
     cases_dir: Path = typer.Option(None, help="default: <repo>/cases"),
+    extract_version: str = typer.Option(
+        None, "--extract",
+        help="要合并的抽取版本；缺省用 [extract] current。合并页选旧版时显式传入"),
     input_video: Path = typer.Option(None, "--input", help="source ERP (360) video"),
     ai: Path = typer.Option(None, help="AI-regenerated viewport clip"),
     sidecar: Path = typer.Option(None, help="clip.json (single segment)"),
@@ -430,21 +443,25 @@ def merge(
                                  "（--case 模式全部自动定位）")
             _merge_image(case, cases_dir, feather=feather, levels=levels,
                          report=report, quiet=quiet,
-                         progress_every=progress_every, allow_crop=allow_crop)
+                         progress_every=progress_every, allow_crop=allow_crop,
+                         extract_version=extract_version)
             return
         if case.flow == "fullRedrawImg":
             if input_video or ai or sidecar or output:
                 raise typer.Exit("merge: --case 与 --input/--ai/--sidecar/--output 互斥"
                                  "（--case 模式全部自动定位）")
             _merge_full(case, cases_dir, report=report, quiet=quiet,
-                        progress_every=progress_every, follow_input=follow_input)
+                        progress_every=progress_every, follow_input=follow_input,
+                        extract_version=extract_version)
             return
         if input_video or ai or sidecar or output:
             raise typer.Exit("merge: --case 与 --input/--ai/--sidecar/--output 互斥"
                              "（--case 模式四者全部自动定位）")
-        resolved = resolve_case_inputs(case_name, cases_dir)
+        resolved = resolve_case_inputs(case_name, cases_dir, extract_version)
         input_video, ai, sidecar, output = (resolved["input"], resolved["ai"],
                                             resolved["sidecar"], resolved["output"])
+    elif extract_version:
+        raise typer.Exit("merge: --extract 只用于 --case 模式")
     elif follow_input:
         raise typer.Exit("merge: --follow-input 只用于 fullRedrawImg 的 --case 拼接")
     elif not (input_video and ai and sidecar and output):

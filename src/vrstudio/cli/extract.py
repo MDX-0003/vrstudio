@@ -144,7 +144,8 @@ def from_case(
         fh.close()
 
 
-def _extract_image(case, src: Path, cases_dir, log: Log) -> None:
+def _extract_image(case, src: Path, cases_dir, log: Log,
+                   viewport: Viewport, inner: InnerRect) -> None:
     """patchimg 的视口裁剪：2:1 ERP -> 16:9 视口图 + inner mask + image.json。
 
     模型只重绘这张透视视口图。视口跨 ERP 接缝时由 ``build_view_map`` 的环绕
@@ -152,8 +153,6 @@ def _extract_image(case, src: Path, cases_dir, log: Log) -> None:
     """
     image = read_image(src)
     erp_h, erp_w = image.shape[:2]
-    viewport = Viewport(**case.viewport)
-    inner = InnerRect(**case.inner)
     geo = ImageGeometry(erp_width=erp_w, erp_height=erp_h,
                         viewport=viewport, inner=inner)
 
@@ -224,8 +223,10 @@ def _extract_full_redraw_img(case, src: Path, cases_dir, log: Log, conf) -> None
 def from_case_name(
     case_name: str = typer.Option(..., "--case", help="统一 case 名（cases/ 下目录）"),
     cases_dir: Path = typer.Option(None, help="default: <repo>/cases"),
+    preset: str = typer.Option(None, "--preset",
+                               help="patch/patchimg 的 preset id；缺省用 [pick] active"),
 ):
-    """Extract by unified case name: 草稿冻结进 extracts/<版本>。
+    """Extract by unified case name: 选中的 preset 冻结进 extracts/<版本>。
 
     patch 冻结成 clip.json + clip.mp4 + clip_mask.png；patchimg 冻结成
     image.json + clip.png + clip_mask.png（视口局部）；fullRedrawImg 冻结成
@@ -238,12 +239,30 @@ def from_case_name(
                     f"（extract 是 patch/patchimg/fullRedrawImg 专属步骤）",
                     fg=typer.colors.RED, err=True)
         raise typer.Exit(2)
-    missing = case_mod.draft_ready(case)
-    if missing:
-        need = "viewport/inner" if case.flow == "patchimg" else "viewport/inner/frames"
-        typer.secho(f"extract: pick 草稿未定（缺 [{missing}]）——先在 web pick 或"
-                    f" case.toml 里补齐 {need}", fg=typer.colors.RED, err=True)
+    if preset and case.flow == "fullRedrawImg":
+        typer.secho("extract: --preset 只用于 patch/patchimg", fg=typer.colors.RED,
+                    err=True)
         raise typer.Exit(2)
+    chosen = None
+    if case.flow in ("patch", "patchimg"):
+        try:
+            chosen = case.range_preset(preset)
+        except case_mod.CaseError as exc:
+            available = "、".join(item.id for item in case.range_presets) or "（无）"
+            need = ("viewport/inner" if case.flow == "patchimg"
+                    else "viewport/inner/frames")
+            typer.secho(f"extract: {exc}；缺 {need}——先在 web pick 保存选区；"
+                        f"可用 preset：{available}",
+                        fg=typer.colors.RED, err=True)
+            raise typer.Exit(2) from exc
+        missing = case_mod.preset_ready(case, chosen.id)
+        if missing:
+            need = ("viewport/inner" if case.flow == "patchimg"
+                    else "viewport/inner/frames")
+            typer.secho(
+                f"extract: preset {chosen.id} 未定（缺 [{missing}]）——先在 web pick "
+                f"补齐 {need} 并点保存", fg=typer.colors.RED, err=True)
+            raise typer.Exit(2)
     src = case_mod.check_source(case, cases_dir)
 
     fh, log_path = open_log_file(f"extract_{case.name}")
@@ -252,7 +271,9 @@ def from_case_name(
         log.phase(f"case: {case.name} (source sha256 verified)")
         if case.flow == "patchimg":
             try:
-                _extract_image(case, src, cases_dir, log)
+                _extract_image(case, src, cases_dir, log,
+                               Viewport(**chosen.viewport),
+                               InnerRect(**chosen.inner))
             except (ImageFlowError, ValueError, TypeError) as exc:
                 typer.secho(f"extract: {exc}", fg=typer.colors.RED, err=True)
                 raise typer.Exit(2) from exc
@@ -273,9 +294,10 @@ def from_case_name(
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
         erp_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         erp_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        seg = Segment(id="seg_0", frame_start=int(case.frames["start"]),
-                      frame_end=int(case.frames["end"]),
-                      viewport=Viewport(**case.viewport), inner=InnerRect(**case.inner))
+        seg = Segment(id="seg_0", frame_start=int(chosen.frames["start"]),
+                      frame_end=int(chosen.frames["end"]),
+                      viewport=Viewport(**chosen.viewport),
+                      inner=InnerRect(**chosen.inner))
         if not cap.set(cv2.CAP_PROP_POS_FRAMES, seg.frame_start):
             log.info("WARNING: could not seek; decoding from the start instead.")
         version = time.strftime("%Y%m%d-%H%M%S")

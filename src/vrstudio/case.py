@@ -18,6 +18,7 @@ import re
 import shutil
 import tomllib
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -45,13 +46,14 @@ _RELIGHT_KEYS = ("current", "gt", "atmo", "scene", "strength", "local_shading",
 #: ``[relight]`` 里指向素材的两把指针，以及各自要求的素材角色。
 _RELIGHT_SLOTS = {"gt": RELIGHT_GT, "atmo": RELIGHT_ATMO}
 
-#: ``[merge]`` 属于 fullRedrawImg 与 fullredraw：``input`` 指向素材库里的拼接输入，
-#: 缺省时回退到 adopt 落点（图片是 ``extracts/<current>/result.png``，视频是
-#: ``result.mp4``）——决策 66/78。
+#: ``[merge]`` 属于 patch、fullRedrawImg 与 fullredraw：``input`` 指向素材库里的拼接输入，
+#: 缺省时回退到 adopt 落点（patch 是 ``extracts/<current>/result.mp4``，图片是
+#: ``extracts/<current>/result.png``，fullredraw 是 case 根目录的 ``result.mp4``）——决策 66/78/97。
 _MERGE_INPUT_KEYS = ("input",)
 
 #: 每条流程的拼接输入种类；不在表里的流程没有 ``[merge]`` 段。
-_MERGE_INPUT_KINDS = {"fullRedrawImg": "image", "fullredraw": "video"}
+_MERGE_INPUT_KINDS = {"patch": "video", "fullRedrawImg": "image",
+                      "fullredraw": "video"}
 
 #: 拼接输入专用的素材角色（决策 67/78）：种类由流程决定，不进任何生成下拉与提交。
 MERGE_INPUT = "merge_input"
@@ -119,12 +121,29 @@ class Asset:
 
 
 @dataclass
+class RangePreset:
+    """一条手动保存的选区；id 只做内部主键，界面标题用 created_at。"""
+
+    id: str
+    created_at: str
+    updated_at: str
+    viewport: dict
+    inner: dict
+    frames: dict | None = None
+
+
+@dataclass
 class Case:
     name: str
     flow: str
     source_path: str | None = None            # 仅 patch/fullredraw；gen 用 assets
     sha256: str | None = None
-    # ── 仅 flow = patch：选区草稿（web pick / 手填，extract 时冻结进 clip.json）──
+    # ── 仅 flow = patch/patchimg：手动保存的选区列表与当前指针 ──
+    range_presets: list[RangePreset] = field(default_factory=list)
+    active_range: str | None = None
+    #: 旧格式（顶层 [viewport]/[inner]/[frames]）加载后的内存标记；save 时先备份再迁移。
+    legacy_draft: bool = False
+    # ── active preset 的投影，供 CLI 与门控继续读取 ──
     viewport: dict | None = None
     inner: dict | None = None
     frames: dict | None = None
@@ -151,6 +170,23 @@ class Case:
             if item.id == asset_id:
                 return item
         raise CaseError(f"case {self.name} 没有素材 {asset_id!r}")
+
+    def range_preset(self, preset_id: str | None = None) -> RangePreset:
+        wanted = preset_id or self.active_range
+        if not wanted:
+            raise CaseError(f"case {self.name} 还没有保存的选区")
+        for preset in self.range_presets:
+            if preset.id == wanted:
+                return preset
+        raise CaseError(f"case {self.name} 没有选区 preset {wanted!r}")
+
+    def next_range_preset_id(self) -> str:
+        numbers = []
+        for preset in self.range_presets:
+            match = re.fullmatch(r"r(\d+)", preset.id)
+            if match:
+                numbers.append(int(match.group(1)))
+        return f"r{max(numbers, default=0) + 1}"
 
     def master(self) -> Asset | None:
         """提示词几何与上传基准：按契约的回退链取第一条可用素材。"""
@@ -197,16 +233,24 @@ class Case:
         return self.asset(self.merge_input)
 
     def merge_input_file(self, root: str | Path | None = None) -> Path | None:
-        """拼接输入的落点文件：指针优先，否则 adopt 落点 result.png；都没有时 None。
+        """拼接输入的落点文件：指针优先，否则回退 adopt 落点；都没有时 None。
 
         CLI 与 web 共用这一处判定，避免两边各写一套“先看指针再回退”的规则。
+        patch 的回退是 ``extracts/<current>/result.mp4``；fullredraw 是 case 根目录
+        的 ``result.mp4``；图片流程是 ``extracts/<current>/result.png``。
         """
         asset = self.merge_input_asset()
         if asset is not None:
             return asset.resolved(self, root)
         kind = merge_input_kind(self)
         if kind == "video":
-            fallback = self.dir(root) / "result.mp4"
+            if self.flow == "patch":
+                if not self.extract_current:
+                    return None
+                fallback = (self.dir(root) / "extracts" / self.extract_current
+                            / "result.mp4")
+            else:
+                fallback = self.dir(root) / "result.mp4"
         elif kind == "image" and self.extract_current:
             fallback = self.dir(root) / "extracts" / self.extract_current / "result.png"
         else:
@@ -351,6 +395,100 @@ def delete(name: str, root: str | Path | None = None) -> Path:
 # ── 读写 ─────────────────────────────────────────────────────────────────
 
 
+def _now_iso() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _require_preset_keys(value: dict, keys: tuple[str, ...], label: str, path: Path) -> None:
+    missing = [key for key in keys if key not in value]
+    if missing:
+        raise CaseError(f"{path}: {label} 缺字段：{'、'.join(missing)}")
+
+
+def _parse_range_preset(raw, flow: str, path: Path,
+                        seen: set[str]) -> RangePreset:
+    """解析一条 ``[[range_preset]]``；字段缺失按真实原因拒绝。"""
+    if not isinstance(raw, dict):
+        raise CaseError(f"{path}: [[range_preset]] 每项必须是表")
+    preset_id = str(raw.get("id") or "")
+    if not re.fullmatch(r"r[1-9]\d*", preset_id):
+        raise CaseError(f"{path}: range_preset.id 必须是 r1、r2…，收到 {preset_id!r}")
+    if preset_id in seen:
+        raise CaseError(f"{path}: range_preset.id 重复：{preset_id}")
+    seen.add(preset_id)
+    created = raw.get("created_at")
+    updated = raw.get("updated_at") or created
+    if not isinstance(created, str) or not created:
+        raise CaseError(f"{path}: range_preset {preset_id} 缺 created_at")
+    if not isinstance(updated, str) or not updated:
+        raise CaseError(f"{path}: range_preset {preset_id} 的 updated_at 不合法")
+    viewport = raw.get("viewport")
+    inner = raw.get("inner")
+    if not isinstance(viewport, dict):
+        raise CaseError(f"{path}: range_preset {preset_id} 缺 [range_preset.viewport]")
+    if not isinstance(inner, dict):
+        raise CaseError(f"{path}: range_preset {preset_id} 缺 [range_preset.inner]")
+    # CLI ``case draft`` 可以分步写，所以空段是允许的；``draft_ready`` 会报缺哪段。
+    if viewport:
+        _require_preset_keys(viewport, ("yaw_deg", "pitch_deg", "fov_h_deg",
+                                        "width", "height"),
+                             f"range_preset {preset_id} 的 viewport", path)
+    if inner:
+        _require_preset_keys(inner, ("x", "y", "width", "height"),
+                             f"range_preset {preset_id} 的 inner", path)
+    frames = raw.get("frames")
+    if flow == "patch":
+        if frames is not None and not isinstance(frames, dict):
+            raise CaseError(f"{path}: range_preset {preset_id} 的 frames 必须是表")
+        if frames:
+            _require_preset_keys(frames, ("start", "end"),
+                                 f"range_preset {preset_id} 的 frames", path)
+    elif frames is not None:
+        raise CaseError(f"{path}: patchimg 的 range_preset 不该有 frames")
+    return RangePreset(id=preset_id, created_at=created, updated_at=updated,
+                       viewport=dict(viewport), inner=dict(inner),
+                       frames=dict(frames) if frames is not None else None)
+
+
+def _apply_active_preset(case: Case) -> None:
+    """把 active preset 投影到 Case.viewport/inner/frames，供 CLI 与门控读取。"""
+    if not case.active_range:
+        case.viewport = None
+        case.inner = None
+        case.frames = None
+        return
+    preset = case.range_preset()
+    case.viewport = dict(preset.viewport) or None
+    case.inner = dict(preset.inner) or None
+    case.frames = dict(preset.frames) if preset.frames else None
+
+
+def _check_range_presets(case: Case, path: Path) -> None:
+    if not case.range_presets:
+        if case.active_range:
+            raise CaseError(f"{path}: [pick] active 指向不存在的 preset {case.active_range}")
+        return
+    ids = {preset.id for preset in case.range_presets}
+    if not case.active_range:
+        raise CaseError(f"{path}: 有 [[range_preset]] 时必须写 [pick] active")
+    if case.active_range not in ids:
+        raise CaseError(f"{path}: [pick] active 指向不存在的 preset {case.active_range}")
+    if case.flow == "patchimg":
+        bad = [preset.id for preset in case.range_presets if preset.frames is not None]
+        if bad:
+            raise CaseError(f"{path}: patchimg 的 range_preset 不该有 frames：{'、'.join(bad)}")
+
+
+def _legacy_timestamp(path: Path) -> str:
+    return datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(
+        timespec="seconds")
+
+
+def _backup_legacy_case(path: Path) -> None:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    shutil.copyfile(path, path.with_name(f"case.toml.bak-{stamp}"))
+
+
 def load(name: str, root: str | Path | None = None) -> Case:
     path = case_toml(name, root)
     if not path.is_file():
@@ -371,12 +509,50 @@ def load(name: str, root: str | Path | None = None) -> Case:
         raise CaseError(f"{path}: [gen] reference_images 必须是字符串数组")
     assets = _parse_assets(raw.get("assets"), path)
     selected, roles = _parse_submit(raw.get("submit"), assets, flow, path)
+    pick_raw = raw.get("pick")
+    if pick_raw is not None and not isinstance(pick_raw, dict):
+        raise CaseError(f"{path}: [pick] 必须是表")
+    active = pick_raw.get("active") if isinstance(pick_raw, dict) else None
+    if active is not None and not isinstance(active, str):
+        raise CaseError(f"{path}: [pick] active 必须是字符串")
+    presets_raw = raw.get("range_preset")
+    presets: list[RangePreset] = []
+    legacy = False
+    if presets_raw is not None:
+        if flow not in ("patch", "patchimg"):
+            raise CaseError(f"{path}: [[range_preset]] 只属于 patch 与 patchimg")
+        if not isinstance(presets_raw, list):
+            raise CaseError(f"{path}: [[range_preset]] 必须是数组")
+        if any(raw.get(section) is not None
+               for section in ("viewport", "inner", "frames")):
+            raise CaseError(
+                f"{path}: 不能同时有 [[range_preset]] 与顶层 "
+                f"[viewport]/[inner]/[frames]；请只保留一种格式")
+        seen: set[str] = set()
+        presets = [_parse_range_preset(item, flow, path, seen)
+                   for item in presets_raw]
+    elif flow in ("patch", "patchimg") and any(
+            raw.get(section) is not None
+            for section in ("viewport", "inner", "frames")):
+        # 旧格式迁移：顶层三段合成一条 r1；save 时才落新格式并备份旧文件。
+        created = _legacy_timestamp(path)
+        frames = raw.get("frames") if flow == "patch" else None
+        presets = [RangePreset(
+            id="r1", created_at=created, updated_at=created,
+            viewport=dict(raw.get("viewport") or {}),
+            inner=dict(raw.get("inner") or {}),
+            frames=dict(frames) if frames is not None else None,
+        )]
+        active = "r1"
+        legacy = True
     case = Case(
         name=name, flow=flow,
         source_path=str(source.get("path", "")) or None,
         sha256=source.get("sha256"),
-        viewport=raw.get("viewport"), inner=raw.get("inner"),
-        frames=raw.get("frames"), extract_current=raw.get("extract", {}).get("current"),
+        range_presets=presets,
+        active_range=active,
+        legacy_draft=legacy,
+        extract_current=raw.get("extract", {}).get("current"),
         assets=assets,
         submit_selected=selected,
         submit_roles=roles,
@@ -391,16 +567,25 @@ def load(name: str, root: str | Path | None = None) -> Case:
     for section in _PATCH_SECTIONS:
         if raw.get(section) is not None and section not in allowed:
             raise CaseError(f"{path}: flow={flow} 不该有 [{section}]（patch 专属段）")
+    if flow not in ("patch", "patchimg"):
+        if raw.get("pick") is not None:
+            raise CaseError(f"{path}: [pick] 只属于 patch 与 patchimg")
+        if raw.get("range_preset") is not None:
+            raise CaseError(f"{path}: [[range_preset]] 只属于 patch 与 patchimg")
     if flow != "gen" and raw.get("gen") is not None:
         raise CaseError(f"{path}: [gen] 只属于 flow=gen")
     if flow != "relight" and raw.get("relight") is not None:
         raise CaseError(f"{path}: [relight] 只属于 flow=relight")
     if flow not in _MERGE_INPUT_KINDS and raw.get("merge") is not None:
-        raise CaseError(f"{path}: [merge] 只属于 fullRedrawImg 与 fullredraw")
+        raise CaseError(
+            f"{path}: [merge] 只属于 patch、fullRedrawImg 与 fullredraw")
     if flow in _MERGE_INPUT_KINDS:
         _check_merge_input(case, path)
     if flow != "gen" and flow != "relight" and not case.source_path:
         raise CaseError(f"{path}: [source] 缺 path")
+    if flow in ("patch", "patchimg"):
+        _check_range_presets(case, path)
+        _apply_active_preset(case)
     if flow == "relight":
         case.relight = _parse_relight(raw.get("relight"), path)
         _check_relight_assets(case, path)
@@ -430,13 +615,39 @@ def save(case: Case, root: str | Path | None = None) -> Case:
         lines += [f"{_s(key)} = {_s(value)}"
                   for key, value in case.submit_roles.items()]
     if case.flow in ("patch", "patchimg"):
-        sections = [("viewport", case.viewport), ("inner", case.inner)]
-        if case.flow == "patch":
-            sections.append(("frames", case.frames))
-        for section, value in sections:
-            if value:
-                lines += ["", f"[{section}]"]
-                lines += [_kv(k, v) for k, v in value.items()]
+        if case.range_presets:
+            _check_range_presets(case, case_toml(case.name, root))
+            if case.legacy_draft:
+                path = case_toml(case.name, root)
+                if path.is_file():
+                    _backup_legacy_case(path)
+                case.legacy_draft = False
+            # 让直接改 Case.viewport/inner/frames 的调用方也能落进 active preset。
+            if case.active_range:
+                active = case.range_preset()
+                if case.viewport:
+                    active.viewport = dict(case.viewport)
+                if case.inner:
+                    active.inner = dict(case.inner)
+                if case.flow == "patch" and case.frames:
+                    active.frames = dict(case.frames)
+            if case.active_range:
+                lines += ["", "[pick]", f"active = {_s(case.active_range)}"]
+            for preset in case.range_presets:
+                lines += ["", "[[range_preset]]",
+                          f"id = {_s(preset.id)}",
+                          f"created_at = {_s(preset.created_at)}",
+                          f"updated_at = {_s(preset.updated_at)}"]
+                lines += ["", "[range_preset.viewport]"]
+                lines += [_kv(key, value) for key, value in preset.viewport.items()]
+                lines += ["", "[range_preset.inner]"]
+                lines += [_kv(key, value) for key, value in preset.inner.items()]
+                if preset.frames is not None:
+                    lines += ["", "[range_preset.frames]"]
+                    lines += [_kv(key, value) for key, value in preset.frames.items()]
+        else:
+            _check_range_presets(case, case_toml(case.name, root))
+            case.legacy_draft = False
     if case.flow in ("patch", "patchimg", "fullRedrawImg") and case.extract_current:
         lines += ["", "[extract]", f"current = {_s(case.extract_current)}"]
     if case.adopt_round:
@@ -692,8 +903,17 @@ def _merge_kind_label(kind: str) -> str:
     return "图片" if kind == "image" else "视频"
 
 
+def _merge_input_hint(case: Case) -> str:
+    if case.flow == "patch":
+        return "视口视频，不是 2:1 源片或成片"
+    if case.flow == "fullredraw":
+        return "21:9 画布视频，不是 2:1 源片或成片"
+    return "21:9 画布图，不是 2:1 源图或成片"
+
+
 def _check_merge_input(case: Case, path: Path) -> None:
-    """拼接输入指针必须指向本流程对应种类的素材：图片流读 21:9 画布图，视频流读画布视频。"""
+    """拼接输入指针必须指向本流程对应种类的素材：patch 读外部视口视频，
+    fullRedrawImg 读 21:9 画布图，fullredraw 读 21:9 画布视频。"""
     if not case.merge_input:
         return
     expected = merge_input_kind(case)
@@ -949,12 +1169,24 @@ def patchimg_default_draft(source_width: int) -> dict:
     }
 
 
+def _check_preset_complete(case: Case, *, viewport: dict | None,
+                           inner: dict | None, frames: dict | None) -> None:
+    if not viewport:
+        raise CaseError("保存选区需要 viewport")
+    if not inner:
+        raise CaseError("保存选区需要 inner")
+    if case.flow == "patch" and not frames:
+        raise CaseError("patch 保存选区需要 frames")
+    if case.flow == "patchimg" and frames is not None:
+        raise CaseError("patchimg 没有 [frames]；局部区域由 viewport/inner 定义")
+
+
 def set_draft(name: str, *, viewport: dict | None = None, inner: dict | None = None,
               frames: dict | None = None, root: str | Path | None = None) -> Case:
-    """pick 草稿写入（web pick / CLI 都是调用方；唯一权威在 case 模型）。
+    """pick 草稿写入（CLI ``case draft`` 与新建默认草稿共用）。
 
-    只更新传入的段，未传的段保持原样——pick 是迭代动作，逐字段收敛。
-    patchimg 没有时间轴，传 ``frames`` 直接拒绝。
+    有 active preset 时更新它并刷新 ``updated_at``；没有 preset 时新建一条。
+    web pick 的高频几何不调用这里，只写 ``derived/pick/draft.toml``。
     """
     case = load(name, root)
     if case.flow not in ("patch", "patchimg"):
@@ -962,25 +1194,121 @@ def set_draft(name: str, *, viewport: dict | None = None, inner: dict | None = N
     if case.flow == "patchimg" and frames is not None:
         raise CaseError(
             f"case {name} 是 patchimg 流，没有 [frames]；局部区域由 viewport/inner 定义")
-    if viewport is not None:
-        case.viewport = dict(viewport)
-    if inner is not None:
-        case.inner = dict(inner)
-    if frames is not None:
-        case.frames = dict(frames)
+    now = _now_iso()
+    if not case.range_presets:
+        # CLI 可以分三步写 viewport/inner/frames；空段由 draft_ready 兜底。
+        preset = RangePreset(
+            id="r1", created_at=now, updated_at=now,
+            viewport=dict(viewport or {}), inner=dict(inner or {}),
+            frames=dict(frames) if frames is not None else None,
+        )
+        case.range_presets = [preset]
+        case.active_range = preset.id
+    else:
+        if not case.active_range:
+            case.active_range = case.range_presets[0].id
+        preset = case.range_preset()
+        if viewport is not None:
+            preset.viewport = dict(viewport)
+        if inner is not None:
+            preset.inner = dict(inner)
+        if frames is not None:
+            preset.frames = dict(frames)
+        preset.updated_at = now
+    _apply_active_preset(case)
+    return save(case, root)
+
+
+def add_range_preset(name: str, *, viewport: dict, inner: dict,
+                     frames: dict | None = None,
+                     root: str | Path | None = None) -> Case:
+    """按当前 draft 新建一条 preset 并设为 active（web 的“另存为”）。"""
+    case = load(name, root)
+    if case.flow not in ("patch", "patchimg"):
+        raise CaseError(f"case {name} 是 {case.flow} 流，没有选区 preset")
+    _check_preset_complete(case, viewport=viewport, inner=inner, frames=frames)
+    now = _now_iso()
+    preset = RangePreset(
+        id=case.next_range_preset_id(), created_at=now, updated_at=now,
+        viewport=dict(viewport), inner=dict(inner),
+        frames=dict(frames) if frames is not None else None,
+    )
+    case.range_presets.append(preset)
+    case.active_range = preset.id
+    _apply_active_preset(case)
+    return save(case, root)
+
+
+def save_range_preset(name: str, preset_id: str, *, viewport: dict, inner: dict,
+                      frames: dict | None = None,
+                      root: str | Path | None = None) -> Case:
+    """用当前 draft 覆盖指定 preset 并刷新 ``updated_at``（web 的“保存”）。"""
+    case = load(name, root)
+    if case.flow not in ("patch", "patchimg"):
+        raise CaseError(f"case {name} 是 {case.flow} 流，没有选区 preset")
+    _check_preset_complete(case, viewport=viewport, inner=inner, frames=frames)
+    preset = case.range_preset(preset_id)
+    preset.viewport = dict(viewport)
+    preset.inner = dict(inner)
+    if case.flow == "patch":
+        preset.frames = dict(frames or {})
+    preset.updated_at = _now_iso()
+    case.active_range = preset.id
+    _apply_active_preset(case)
+    return save(case, root)
+
+
+def set_active_range(name: str, preset_id: str,
+                     root: str | Path | None = None) -> Case:
+    """把 ``[pick] active`` 指到指定 preset，并把几何投影到 Case。"""
+    case = load(name, root)
+    preset = case.range_preset(preset_id)
+    case.active_range = preset.id
+    _apply_active_preset(case)
+    return save(case, root)
+
+
+def delete_range_preset(name: str, preset_id: str,
+                        root: str | Path | None = None) -> Case:
+    """删除一条 preset；删 active 时自动指向剩下的第一条，没有就清空。"""
+    case = load(name, root)
+    preset = case.range_preset(preset_id)
+    case.range_presets = [item for item in case.range_presets
+                          if item.id != preset.id]
+    if case.active_range == preset.id:
+        case.active_range = case.range_presets[0].id if case.range_presets else None
+    _apply_active_preset(case)
     return save(case, root)
 
 
 def draft_ready(case: Case) -> str | None:
-    """草稿是否齐到可以 extract：缺哪段返回哪段名，齐了返回 None。"""
+    """active preset 是否齐到可以 extract：缺哪段返回哪段名，齐了返回 None。"""
     if case.flow == "patch":
         required = ("viewport", "inner", "frames")
     elif case.flow == "patchimg":
         required = ("viewport", "inner")
     else:
         return None
+    if not case.active_range:
+        return required[0]
+    preset = case.range_preset()
     for section in required:
-        if not getattr(case, section):
+        if not getattr(preset, section):
+            return section
+    return None
+
+
+def preset_ready(case: Case, preset_id: str | None = None) -> str | None:
+    """指定 preset（缺省 active）是否完整；缺哪段返回哪段名。"""
+    if case.flow == "patch":
+        required = ("viewport", "inner", "frames")
+    elif case.flow == "patchimg":
+        required = ("viewport", "inner")
+    else:
+        return "preset"
+    preset = case.range_preset(preset_id)
+    for section in required:
+        if not getattr(preset, section):
             return section
     return None
 
@@ -1075,11 +1403,9 @@ def set_merge_input(name: str, asset_id: str | None,
     if asset_id:
         asset = case.asset(asset_id)
         if asset.kind != expected:
-            hint = ("21:9 画布图，不是 2:1 源图或成片" if expected == "image"
-                    else "21:9 画布视频，不是 2:1 源片或成片")
             raise CaseError(
                 f"素材 {asset_id} 是 {asset.kind}；拼接输入必须是"
-                f"{_merge_kind_label(expected)}（{hint}）")
+                f"{_merge_kind_label(expected)}（{_merge_input_hint(case)}）")
     case.merge_input = asset_id or None
     return save(case, root)
 
@@ -1099,8 +1425,12 @@ def add_merge_input(name: str, path: str | Path,
     if not src.is_file():
         raise CaseError(f"文件不存在：{src}")
     if kind_of(src) != expected:
-        hint = ("png/jpg/webp 的 21:9 画布图" if expected == "image"
-                else "mp4/mov/mkv/avi 的 21:9 画布视频")
+        if expected == "image":
+            hint = "png/jpg/webp 的 21:9 画布图"
+        elif case.flow == "patch":
+            hint = "mp4/mov/mkv/avi 的视口视频"
+        else:
+            hint = "mp4/mov/mkv/avi 的 21:9 画布视频"
         raise CaseError(
             f"{src.name} 不是{_merge_kind_label(expected)}；拼接输入必须是 {hint}")
     digest = file_sha256(src)
