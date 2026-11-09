@@ -7,7 +7,7 @@ import type {
   RegionPayload,
   Viewport,
 } from '@/types/case-info'
-import { getJson, postJson } from './client'
+import { deleteJson, getJson, postJson } from './client'
 import { casePath } from './path'
 
 export interface GeometryPayload {
@@ -24,6 +24,8 @@ export interface GeometryPayload {
   scaled?: boolean
   /** 导入时帧范围是否因目标更短而被截到最后一帧。 */
   frames_clamped?: boolean
+  /** 当前 draft 与 active preset 是否不同。 */
+  dirty?: boolean
 }
 
 export function setViewport(name: string, fx: number, fy: number): Promise<GeometryPayload> {
@@ -60,15 +62,31 @@ export function nudgeViewport(
   return postJson<GeometryPayload>(`${casePath(name)}/nudge`, { dyaw, dpitch })
 }
 
-export function saveDraft(
+/** 写工作草稿 derived/pick/draft.toml；不写 case.toml。 */
+export function savePickDraft(
   name: string,
   sections: { viewport?: Viewport; inner?: Inner; frames?: FrameRange },
-): Promise<CaseInfo> {
-  return postJson<CaseInfo>(`${casePath(name)}/draft`, sections)
+): Promise<GeometryPayload> {
+  return postJson<GeometryPayload>(`${casePath(name)}/pick-draft`, sections)
 }
 
-export function resetDraft(name: string, version?: string): Promise<GeometryPayload> {
-  return postJson<GeometryPayload>(`${casePath(name)}/reset-draft`, version ? { version } : {})
+/** 从当前 draft 另存为一条 preset。 */
+export function createRangePreset(name: string): Promise<CaseInfo> {
+  return postJson<CaseInfo>(`${casePath(name)}/range-presets`, {})
+}
+
+/** 用当前 draft 覆盖指定 preset。 */
+export function saveRangePreset(name: string, presetId: string): Promise<CaseInfo> {
+  return postJson<CaseInfo>(`${casePath(name)}/range-presets/${presetId}/save`, {})
+}
+
+/** 把 preset 复制进当前 draft 并设为 active。 */
+export function loadRangePreset(name: string, presetId: string): Promise<GeometryPayload> {
+  return postJson<GeometryPayload>(`${casePath(name)}/range-presets/${presetId}/load`, {})
+}
+
+export function deleteRangePreset(name: string, presetId: string): Promise<CaseInfo> {
+  return deleteJson<CaseInfo>(`${casePath(name)}/range-presets/${presetId}`)
 }
 
 /** 读已经保存的选区，返回剪贴板负载；前端负责序列化与写剪贴板。 */

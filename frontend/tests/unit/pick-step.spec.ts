@@ -9,6 +9,9 @@ vi.mock('element-plus', () => ({
     warning: vi.fn(),
     info: vi.fn(),
   },
+  ElMessageBox: {
+    confirm: vi.fn().mockResolvedValue(undefined),
+  },
 }))
 
 vi.mock('@/api/workflow', () => ({
@@ -16,8 +19,11 @@ vi.mock('@/api/workflow', () => ({
   setViewportSize: vi.fn(),
   setInner: vi.fn(),
   nudgeViewport: vi.fn(),
-  resetDraft: vi.fn(),
-  saveDraft: vi.fn(),
+  savePickDraft: vi.fn(),
+  createRangePreset: vi.fn(),
+  saveRangePreset: vi.fn(),
+  loadRangePreset: vi.fn(),
+  deleteRangePreset: vi.fn(),
   ensureProxy: vi.fn(),
   fetchProxy: vi.fn(),
   exportRegion: vi.fn(),
@@ -36,7 +42,14 @@ vi.mock('@/composables/useInnerDrag', async () => {
 })
 
 import { ElMessage } from 'element-plus'
-import { exportRegion, importRegion, nudgeViewport } from '@/api/workflow'
+import {
+  createRangePreset,
+  exportRegion,
+  importRegion,
+  loadRangePreset,
+  nudgeViewport,
+  saveRangePreset,
+} from '@/api/workflow'
 import { ClipboardUnavailableError, readClipboard, writeClipboard } from '@/utils/clipboard'
 import PickStep from '@/views/wizard/PickStep.vue'
 import type { CaseInfo, RegionPayload } from '@/types/case-info'
@@ -112,6 +125,32 @@ function info(): CaseInfo {
     viewport_options: [],
     proxy: { state: 'ready', url: '/video/proxy/p1' },
     gates: {},
+  } as unknown as CaseInfo
+}
+
+function pickInfo(dirty = false): CaseInfo {
+  const base = info()
+  const preset = (id: string, start: number, end: number) => ({
+    id,
+    created_at: '2026-11-09T16:30:00+08:00',
+    updated_at: '2026-11-09T17:05:00+08:00',
+    viewport: base.viewport!,
+    inner: base.inner!,
+    frames: { start, end },
+  })
+  return {
+    ...base,
+    pick: {
+      draft: {
+        viewport: base.viewport!,
+        inner: base.inner!,
+        frames: base.frames,
+        updated_at: '2026-11-09T17:05:00+08:00',
+      },
+      active: 'r1',
+      presets: [preset('r1', 0, 7), preset('r2', 0, 5)],
+      dirty,
+    },
   } as unknown as CaseInfo
 }
 
@@ -338,6 +377,49 @@ describe('PickStep 选区范围的剪贴板导入导出（决策 92）', () => {
 
     expect(importRegion).toHaveBeenCalledWith('p1', regionPayload())
     expect(wrapper.find('.dialog-stub').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})
+
+describe('PickStep 保存的范围列表', () => {
+  it('renders the saved ranges and updates the active one', async () => {
+    vi.mocked(saveRangePreset).mockResolvedValue(pickInfo() as never)
+    const wrapper = await mountStep(pickInfo())
+    expect(wrapper.findAll('.range-row')).toHaveLength(2)
+    expect(wrapper.find('.range-panel').text()).toContain('保存的范围')
+
+    await wrapper.findAll('.range-panel button').find((item) => item.text() === '保存')!.trigger('click')
+    await flushPromises()
+    expect(saveRangePreset).toHaveBeenCalledWith('p1', 'r1')
+    expect(wrapper.emitted('updated')).toBeTruthy()
+    wrapper.unmount()
+  })
+
+  it('creates a new range with 另存为', async () => {
+    vi.mocked(createRangePreset).mockResolvedValue(pickInfo() as never)
+    const wrapper = await mountStep(pickInfo())
+    await wrapper
+      .findAll('.range-panel button')
+      .find((item) => item.text() === '另存为')!
+      .trigger('click')
+    await flushPromises()
+    expect(createRangePreset).toHaveBeenCalledWith('p1')
+    wrapper.unmount()
+  })
+
+  it('loads a range on double click', async () => {
+    vi.mocked(loadRangePreset).mockResolvedValue(geometryPayload() as never)
+    const wrapper = await mountStep(pickInfo())
+    await wrapper.findAll('.range-row')[1].trigger('dblclick')
+    await flushPromises()
+    expect(loadRangePreset).toHaveBeenCalledWith('p1', 'r2')
+    expect(wrapper.emitted('geometry')).toBeTruthy()
+    wrapper.unmount()
+  })
+
+  it('shows the unsaved marker from the pick payload', async () => {
+    const wrapper = await mountStep(pickInfo(true))
+    expect(wrapper.find('.dirty-badge').text()).toContain('未保存改动')
     wrapper.unmount()
   })
 })

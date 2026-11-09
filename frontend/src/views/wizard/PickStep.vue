@@ -1,22 +1,18 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { CaretLeft, CaretRight, CopyDocument, Download, VideoPlay } from '@element-plus/icons-vue'
 import {
-  CaretLeft,
-  CaretRight,
-  CopyDocument,
-  Download,
-  Refresh,
-  VideoPlay,
-} from '@element-plus/icons-vue'
-import {
+  createRangePreset,
+  deleteRangePreset,
   ensureProxy,
   exportRegion,
   fetchProxy,
   importRegion,
+  loadRangePreset,
   nudgeViewport,
-  resetDraft,
-  saveDraft,
+  savePickDraft,
+  saveRangePreset,
   setFov,
   setInner,
   setViewport,
@@ -24,6 +20,8 @@ import {
 } from '@/api/workflow'
 import type { GeometryPayload } from '@/api/workflow'
 import FileRow from '@/components/common/FileRow.vue'
+import RangeRow from '@/components/range/RangeRow.vue'
+import type { RangeTag } from '@/components/range/types'
 import { useInnerDrag } from '@/composables/useInnerDrag'
 import type {
   CaseInfo,
@@ -31,11 +29,14 @@ import type {
   Footprint,
   FrameRange,
   Inner,
+  PickState,
+  RangePreset,
   RegionPayload,
   Viewport,
   ViewportOption,
 } from '@/types/case-info'
 import { ClipboardUnavailableError, readClipboard, writeClipboard } from '@/utils/clipboard'
+import { formatRangeTime as formatTime, presetSummary } from '@/utils/range'
 
 const props = defineProps<{ caseName: string; info: CaseInfo }>()
 const emit = defineEmits<{
@@ -43,18 +44,28 @@ const emit = defineEmits<{
   geometry: [data: GeometryPayload]
 }>()
 
-const viewport = ref<Viewport | null>(props.info.viewport)
-const inner = ref<Inner | null>(props.info.inner)
+const initialDraft = props.info.pick?.draft ?? null
+const viewport = ref<Viewport | null>(initialDraft?.viewport ?? props.info.viewport)
+const inner = ref<Inner | null>(initialDraft?.inner ?? props.info.inner)
 const footprint = ref<Footprint[]>([...props.info.viewport_footprint])
 const viewportOptions = ref<ViewportOption[]>([...props.info.viewport_options])
 const coverage = ref<Coverage | null>(props.info.coverage ?? null)
-const fov = ref<number>(props.info.viewport?.fov_h_deg ?? 59)
+const fov = ref<number>(viewport.value?.fov_h_deg ?? 59)
 const fovRange = ref<[number, number]>(props.info.fov_range ?? [20, 120])
 const frames = ref<FrameRange>(
-  props.info.frames ?? { start: 0, end: Math.max(0, (props.info.frame_count ?? 1) - 1) },
+  initialDraft?.frames ??
+    props.info.frames ?? {
+      start: 0,
+      end: Math.max(0, (props.info.frame_count ?? 1) - 1),
+    },
 )
 const startFrame = ref(frames.value.start)
 const endFrame = ref(frames.value.end)
+const presets = ref<RangePreset[]>([...(props.info.pick?.presets ?? [])])
+const activeRange = ref<string | null>(props.info.pick?.active ?? null)
+const selectedRange = ref<string | null>(activeRange.value)
+const dirty = ref<boolean>(props.info.pick?.dirty ?? false)
+const rangeSaving = ref(false)
 
 const erpVideo = ref<HTMLVideoElement | null>(null)
 const erpImage = ref<HTMLImageElement | null>(null)
@@ -63,7 +74,6 @@ const frame = ref(frames.value.start)
 const playing = ref(false)
 const proxyState = ref(props.info.proxy?.state ?? 'missing')
 const proxyBusy = ref(false)
-const frameSaving = ref(false)
 const regionExporting = ref(false)
 const regionImporting = ref(false)
 const manualDialog = ref(false)
@@ -154,6 +164,7 @@ function applyGeometry(payload: GeometryPayload): void {
     startFrame.value = payload.frames.start
     endFrame.value = payload.frames.end
   }
+  if (payload.dirty !== undefined) dirty.value = payload.dirty
   vpVersion.value = Date.now()
   emit('geometry', payload)
 }
@@ -278,32 +289,122 @@ function stepFrame(delta: number): void {
   seekToFrame(frame.value + delta)
 }
 
-async function saveFrames(): Promise<void> {
+function presetTags(preset: RangePreset): RangeTag[] {
+  return preset.id === activeRange.value ? [{ text: '当前', kind: 'current' }] : []
+}
+
+function applyPickState(pick: PickState | null | undefined): void {
+  if (!pick) return
+  if (pick.draft) {
+    viewport.value = pick.draft.viewport
+    inner.value = pick.draft.inner
+    fov.value = pick.draft.viewport.fov_h_deg
+    if (pick.draft.frames) {
+      frames.value = pick.draft.frames
+      startFrame.value = pick.draft.frames.start
+      endFrame.value = pick.draft.frames.end
+    }
+  }
+  presets.value = [...pick.presets]
+  activeRange.value = pick.active
+  selectedRange.value = pick.active
+  dirty.value = pick.dirty
+  vpVersion.value = Date.now()
+}
+
+async function onSaveRange(): Promise<void> {
+  if (rangeSaving.value) return
+  if (!activeRange.value) {
+    await onSaveAsRange()
+    return
+  }
+  rangeSaving.value = true
+  try {
+    const data = await saveRangePreset(props.caseName, activeRange.value)
+    applyPickState(data.pick)
+    emit('updated', data)
+    ElMessage.success('已保存到当前范围')
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '保存范围失败')
+  } finally {
+    rangeSaving.value = false
+  }
+}
+
+async function onSaveAsRange(): Promise<void> {
+  if (rangeSaving.value) return
+  rangeSaving.value = true
+  try {
+    const data = await createRangePreset(props.caseName)
+    applyPickState(data.pick)
+    emit('updated', data)
+    ElMessage.success('已另存为一条新范围')
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '另存为范围失败')
+  } finally {
+    rangeSaving.value = false
+  }
+}
+
+async function onLoadRange(preset: RangePreset): Promise<void> {
+  if (dirty.value) {
+    try {
+      await ElMessageBox.confirm('当前草稿有未保存改动，载入这条范围会丢弃这些改动。', '载入范围', {
+        type: 'warning',
+        confirmButtonText: '载入',
+        cancelButtonText: '取消',
+      })
+    } catch {
+      return
+    }
+  }
+  try {
+    const payload = await loadRangePreset(props.caseName, preset.id)
+    applyGeometry(payload)
+    activeRange.value = preset.id
+    selectedRange.value = preset.id
+    dirty.value = false
+    ElMessage.success(`已载入 ${formatTime(preset.created_at)} 的范围`)
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '载入范围失败')
+  }
+}
+
+async function onDeleteRange(preset: RangePreset): Promise<void> {
+  try {
+    await ElMessageBox.confirm('删除这条范围？已抽取的版本仍然保留，不受影响。', '删除范围', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+  try {
+    const data = await deleteRangePreset(props.caseName, preset.id)
+    applyPickState(data.pick)
+    emit('updated', data)
+    ElMessage.success('已删除范围')
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '删除范围失败')
+  }
+}
+
+async function onFramesChange(): Promise<void> {
   const start = Math.min(startFrame.value, endFrame.value)
   const end = Math.max(startFrame.value, endFrame.value)
   if (start < 0 || end > maxFrame.value || start >= end) {
     ElMessage.warning(`帧范围要在 0–${maxFrame.value} 之间，且开始小于结束`)
     return
   }
-  frameSaving.value = true
   try {
-    const data = await saveDraft(props.caseName, { frames: { start, end } })
+    const payload = await savePickDraft(props.caseName, { frames: { start, end } })
     frames.value = { start, end }
-    emit('updated', data)
-    ElMessage.success('抽取范围已保存')
+    startFrame.value = start
+    endFrame.value = end
+    if (payload.dirty !== undefined) dirty.value = payload.dirty
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : '保存帧范围失败')
-  } finally {
-    frameSaving.value = false
-  }
-}
-
-async function resetToExtract(): Promise<void> {
-  try {
-    applyGeometry(await resetDraft(props.caseName))
-    ElMessage.success('已回到当前抽取版本的选区')
-  } catch (err) {
-    ElMessage.error(err instanceof Error ? err.message : '重置选区失败')
   }
 }
 
@@ -440,18 +541,22 @@ function stopProxyPolling(): void {
 watch(
   () => props.info,
   (info) => {
-    viewport.value = info.viewport
-    inner.value = info.inner
+    if (info.pick) {
+      applyPickState(info.pick)
+    } else {
+      viewport.value = info.viewport
+      inner.value = info.inner
+      fov.value = info.viewport?.fov_h_deg ?? fov.value
+      if (info.frames) {
+        frames.value = info.frames
+        startFrame.value = info.frames.start
+        endFrame.value = info.frames.end
+      }
+    }
     footprint.value = [...info.viewport_footprint]
     viewportOptions.value = [...info.viewport_options]
-    fov.value = info.viewport?.fov_h_deg ?? fov.value
     fovRange.value = info.fov_range ?? fovRange.value
     coverage.value = info.coverage ?? null
-    if (info.frames) {
-      frames.value = info.frames
-      startFrame.value = info.frames.start
-      endFrame.value = info.frames.end
-    }
   },
 )
 
@@ -463,91 +568,131 @@ onUnmounted(() => {
 
 <template>
   <div class="pick-layout">
-    <section class="panel">
-      <div class="panel-head">
-        <h2 class="panel-title">全景与视口</h2>
-        <span class="muted">点哪里，视口中心就在哪里</span>
-      </div>
-      <div class="panel-body">
-        <div class="erp-wrap">
-          <img
-            v-if="isImage"
-            ref="erpImage"
-            :src="info.source_file?.open_url ?? ''"
-            alt="源 ERP 全景图"
-            class="erp-image"
-            draggable="false"
-            @click="onErpClick"
-          />
-          <video
-            v-else
-            ref="erpVideo"
-            :src="erpSource"
-            muted
-            preload="auto"
-            @loadedmetadata="syncFromVideo"
-            @timeupdate="syncFromVideo"
-            @seeked="syncFromVideo"
-            @play="playing = true"
-            @pause="playing = false"
-            @click="onErpClick"
-          />
-          <div
-            v-for="(box, index) in footprint"
-            :key="index"
-            class="footprint"
-            :style="{
-              left: `${box.x * 100}%`,
-              top: `${box.y * 100}%`,
-              width: `${box.w * 100}%`,
-              height: `${box.h * 100}%`,
-            }"
-          />
+    <div class="left-col">
+      <section class="panel">
+        <div class="panel-head">
+          <h2 class="panel-title">全景与视口</h2>
+          <span class="muted">点哪里，视口中心就在哪里</span>
         </div>
+        <div class="panel-body">
+          <div class="erp-wrap">
+            <img
+              v-if="isImage"
+              ref="erpImage"
+              :src="info.source_file?.open_url ?? ''"
+              alt="源 ERP 全景图"
+              class="erp-image"
+              draggable="false"
+              @click="onErpClick"
+            />
+            <video
+              v-else
+              ref="erpVideo"
+              :src="erpSource"
+              muted
+              preload="auto"
+              @loadedmetadata="syncFromVideo"
+              @timeupdate="syncFromVideo"
+              @seeked="syncFromVideo"
+              @play="playing = true"
+              @pause="playing = false"
+              @click="onErpClick"
+            />
+            <div
+              v-for="(box, index) in footprint"
+              :key="index"
+              class="footprint"
+              :style="{
+                left: `${box.x * 100}%`,
+                top: `${box.y * 100}%`,
+                width: `${box.w * 100}%`,
+                height: `${box.h * 100}%`,
+              }"
+            />
+          </div>
 
-        <div v-if="!isImage" class="scrub">
-          <el-button :icon="playing ? undefined : VideoPlay" size="small" @click="togglePlay">
-            {{ playing ? '暂停' : '播放' }}
-          </el-button>
-          <el-button :icon="CaretLeft" size="small" @click="stepFrame(-1)" />
-          <el-button :icon="CaretRight" size="small" @click="stepFrame(1)" />
-          <el-slider
-            :model-value="frame"
-            :min="0"
-            :max="maxFrame"
-            :show-tooltip="false"
-            class="frame-slider"
-            @update:model-value="onSlider"
-          />
-          <span class="mono muted">{{ frame }} / {{ maxFrame }}</span>
-        </div>
-
-        <FileRow v-if="info.source_file" :entry="info.source_file" class="source-file" />
-
-        <div class="meta-row">
-          <span>yaw {{ yawText }}°</span>
-          <span>pitch {{ pitchText }}°</span>
-          <span>视口 {{ viewportLabel }}</span>
-          <span v-if="!isImage" class="proxy-state">
-            预览代理：{{ proxyState }}
-            <el-button
-              v-if="!proxyReady"
-              link
-              type="primary"
-              :loading="proxyBusy"
-              @click="buildProxy"
-            >
-              生成代理
+          <div v-if="!isImage" class="scrub">
+            <el-button :icon="playing ? undefined : VideoPlay" size="small" @click="togglePlay">
+              {{ playing ? '暂停' : '播放' }}
             </el-button>
-          </span>
+            <el-button :icon="CaretLeft" size="small" @click="stepFrame(-1)" />
+            <el-button :icon="CaretRight" size="small" @click="stepFrame(1)" />
+            <el-slider
+              :model-value="frame"
+              :min="0"
+              :max="maxFrame"
+              :show-tooltip="false"
+              class="frame-slider"
+              @update:model-value="onSlider"
+            />
+            <span class="mono muted">{{ frame }} / {{ maxFrame }}</span>
+          </div>
+
+          <FileRow v-if="info.source_file" :entry="info.source_file" class="source-file" />
+
+          <div class="meta-row">
+            <span>yaw {{ yawText }}°</span>
+            <span>pitch {{ pitchText }}°</span>
+            <span>视口 {{ viewportLabel }}</span>
+            <span v-if="!isImage" class="proxy-state">
+              预览代理：{{ proxyState }}
+              <el-button
+                v-if="!proxyReady"
+                link
+                type="primary"
+                :loading="proxyBusy"
+                @click="buildProxy"
+              >
+                生成代理
+              </el-button>
+            </span>
+          </div>
         </div>
-      </div>
-    </section>
+      </section>
+
+      <section class="panel range-panel">
+        <div class="panel-head">
+          <h2 class="panel-title">保存的范围</h2>
+          <div class="range-head-actions">
+            <span v-if="dirty" class="dirty-badge">未保存改动</span>
+            <el-button size="small" :loading="rangeSaving" @click="onSaveAsRange">
+              另存为
+            </el-button>
+            <el-button size="small" type="primary" :loading="rangeSaving" @click="onSaveRange">
+              保存
+            </el-button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div v-if="!presets.length" class="range-empty muted">
+            还没有保存的范围。调好选区后点“另存为”。
+          </div>
+          <div v-else class="range-list">
+            <RangeRow
+              v-for="preset in presets"
+              :key="preset.id"
+              :time="formatTime(preset.created_at)"
+              :geometry="presetSummary(preset)"
+              :meta="`最近保存 ${formatTime(preset.updated_at)}`"
+              :tags="presetTags(preset)"
+              :active="preset.id === activeRange"
+              :selected="preset.id === selectedRange"
+              selectable
+              activatable
+              deletable
+              @select="selectedRange = preset.id"
+              @activate="onLoadRange(preset)"
+              @delete="onDeleteRange(preset)"
+            />
+          </div>
+          <p class="range-hint muted">单击选中，双击载入当前草稿；删除当前条会自动载入下一条。</p>
+        </div>
+      </section>
+    </div>
 
     <aside class="panel">
       <div class="panel-head">
         <h2 class="panel-title">{{ isImage ? '选区' : '选区与抽帧范围' }}</h2>
-        <el-button link type="primary" :icon="Refresh" @click="resetToExtract">重置选区</el-button>
       </div>
       <div class="panel-body">
         <div v-if="isPatch" class="region-actions">
@@ -693,6 +838,7 @@ onUnmounted(() => {
               :max="maxFrame"
               size="small"
               controls-position="right"
+              @change="onFramesChange"
             />
             <span>–</span>
             <el-input-number
@@ -701,9 +847,10 @@ onUnmounted(() => {
               :max="maxFrame"
               size="small"
               controls-position="right"
+              @change="onFramesChange"
             />
           </label>
-          <el-button size="small" :loading="frameSaving" @click="saveFrames">保存范围</el-button>
+          <span class="muted">改动即写草稿</span>
         </div>
       </div>
     </aside>
@@ -744,6 +891,48 @@ onUnmounted(() => {
   grid-template-columns: minmax(0, 1.15fr) minmax(380px, 1fr);
   gap: var(--space-4);
   align-items: start;
+}
+
+.left-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.range-head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.dirty-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+  font-size: var(--text-xs);
+}
+
+.range-empty {
+  padding: var(--space-2) 0;
+  font-size: var(--text-sm);
+}
+
+.range-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 300px;
+  overflow: auto;
+}
+
+.range-hint {
+  margin: var(--space-2) 0 0;
+  font-size: 11px;
 }
 
 .erp-wrap {

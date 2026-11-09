@@ -195,10 +195,51 @@ export interface FileInfo {
   open_url?: string | null
 }
 
+export interface RangePreset {
+  id: string
+  created_at: string
+  updated_at: string
+  viewport: Viewport
+  inner: Inner
+  frames: FrameRange | null
+}
+
+export interface PickDraft {
+  viewport: Viewport
+  inner: Inner
+  frames: FrameRange | null
+  updated_at: string
+}
+
+export interface PickState {
+  draft: PickDraft | null
+  active: string | null
+  presets: RangePreset[]
+  dirty: boolean
+}
+
+export interface MergeVersion {
+  version: string
+  fps: number | null
+  has_result: boolean
+}
+
+export interface MergeRange {
+  viewport: Viewport
+  inner: Inner
+  frames: FrameRange | null
+  presets: Pick<RangePreset, 'id' | 'created_at' | 'updated_at'>[]
+  versions: MergeVersion[]
+}
+
 export interface ExtractVersion {
   version: string
   extracted: boolean
   has_result: boolean
+  viewport?: Viewport
+  inner?: Inner
+  frames?: FrameRange | null
+  fps?: number | null
 }
 
 /** 图片轮次里的一张候选；index 就是 adopt 请求要带的下标（从 1 开始）。 */
@@ -432,6 +473,11 @@ export interface CaseInfo {
   viewport: Viewport | null
   inner: Inner | null
   frames: FrameRange | null
+  /** patch/patchimg 的选区草稿与已保存范围；其他流程为 null。 */
+  pick?: PickState | null
+  active_range?: string | null
+  /** 合并页的抽取版本分组；只有 patch/patchimg 有。 */
+  merge_ranges?: MergeRange[]
   frame_count: number | null
   fps: number | null
   duration_s: number | null

@@ -131,6 +131,19 @@ function onGenerateSaveState(state: SaveState): void {
 
 function applyGeometry(payload: GeometryPayload): void {
   if (!caseInfo.value) return
+  const pick = caseInfo.value.pick
+  const nextPick = pick
+    ? {
+        ...pick,
+        draft: {
+          viewport: payload.viewport,
+          inner: payload.inner,
+          frames: payload.frames ?? pick.draft?.frames ?? null,
+          updated_at: pick.draft?.updated_at ?? '',
+        },
+        dirty: payload.dirty ?? pick.dirty,
+      }
+    : pick
   caseInfo.value = {
     ...caseInfo.value,
     viewport: payload.viewport,
@@ -139,6 +152,7 @@ function applyGeometry(payload: GeometryPayload): void {
     previews: payload.previews,
     // 选区范围导入会一并写 frames；其他几何动作不带，保持原值。
     ...(payload.frames ? { frames: payload.frames } : {}),
+    ...(nextPick ? { pick: nextPick } : {}),
   }
 }
 
