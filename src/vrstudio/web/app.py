@@ -21,7 +21,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
-from dataclasses import asdict, replace
+from dataclasses import replace
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -62,7 +62,7 @@ from ..procenv import decode_text, utf8_env
 from ..redraw.geometry import follow_input_plan
 from ..redraw.manifest import ImageManifest, Manifest
 from ..relight import regions as regions_mod
-from . import case_meta
+from . import case_meta, pick_draft
 from .identity import (
     MAX_NAME_LENGTH,
     NAME_COOKIE,
@@ -195,7 +195,18 @@ def _cleanup_uploads() -> None:
 
 # ── 预览 store 缓存（case.toml mtime 变更即失效）────────────────────────
 
-_stores: dict[str, tuple[float, PreviewStore]] = {}
+_stores: dict[str, tuple[tuple[float, float], PreviewStore]] = {}
+
+
+def _store_stamp(store: PreviewStore) -> tuple[float, float]:
+    """case.toml + pick draft 的 mtime；任一变化都要让预览缓存失效。"""
+    case_mtime = case_mod.case_toml(store.name, _ctx["cases_root"]).stat().st_mtime
+    draft = pick_draft.draft_path(store.case, _ctx["cases_root"])
+    try:
+        draft_mtime = draft.stat().st_mtime
+    except OSError:
+        draft_mtime = 0.0
+    return case_mtime, draft_mtime
 
 
 def get_store(name: str) -> PreviewStore | None:
@@ -203,23 +214,22 @@ def get_store(name: str) -> PreviewStore | None:
         store = PreviewStore(name, _ctx["cases_root"])
     except CaseError:
         return None
-    mtime = case_mod.case_toml(name, _ctx["cases_root"]).stat().st_mtime
+    stamp = _store_stamp(store)
     hit = _stores.get(name)
-    if hit and hit[0] == mtime and hit[1].case.viewport == store.case.viewport:
+    if hit and hit[0] == stamp:
         return hit[1]
-    _stores[name] = (mtime, store)
+    _stores[name] = (stamp, store)
     return store
 
 
 def _remember_store(name: str, store: PreviewStore) -> None:
     """几何写入走 store 时保住它的解码缓存。
 
-    ``get_store`` 以 case.toml 的 mtime 失效；store 自己写盘会改这个 mtime。
-    不在这里同步缓存记录的话，下一次 ``get_store`` 会重建 PreviewStore，
-    已解码的 ERP 帧（LRU）随之丢掉，视口微调又要从 8K 源片重新解码。
+    ``get_store`` 以 case.toml 与 draft 的 mtime 失效；store 自己写 draft 会改
+    draft mtime。不在这里同步缓存记录的话，下一次 ``get_store`` 会重建
+    PreviewStore，已解码的 ERP 帧（LRU）随之丢掉，视口微调又要从 8K 源片重新解码。
     """
-    mtime = case_mod.case_toml(name, _ctx["cases_root"]).stat().st_mtime
-    _stores[name] = (mtime, store)
+    _stores[name] = (_store_stamp(store), store)
 
 
 def _drop_store(name: str) -> None:
@@ -308,6 +318,7 @@ def _geometry_payload(store: PreviewStore, name: str, **extra) -> dict:
         "viewport_footprint": _footprint_payload(store),
         "coverage": _coverage_payload(store),
         "fov_range": [FOV_MIN_DEG, FOV_MAX_DEG],
+        "dirty": pick_draft.draft_dirty(store.case, store.draft),
     }
     payload.update(extra)
     return payload
@@ -332,7 +343,7 @@ def _region_payload(store: PreviewStore) -> dict:
     """导出当前 case 已保存的选区三段；前端直接序列化进剪贴板。"""
     case = store.case
     if not (case.viewport and case.inner and case.frames):
-        raise ValueError("选区还没保存完整（viewport/inner/frames 缺一段）")
+        raise ValueError("当前草稿还没完整（viewport/inner/frames 缺一段）")
     if store.frame_count <= 0 or store.fps <= 0:
         raise ValueError("读不到源片的帧率或帧数，无法导出抽取范围")
     return {
@@ -872,15 +883,108 @@ _EXTRACT_FILES = {
 }
 
 
+def _range_preset_payload(preset: case_mod.RangePreset) -> dict:
+    return {
+        "id": preset.id,
+        "created_at": preset.created_at,
+        "updated_at": preset.updated_at,
+        "viewport": dict(preset.viewport),
+        "inner": dict(preset.inner),
+        "frames": dict(preset.frames) if preset.frames is not None else None,
+    }
+
+
+def _pick_payload(case: case_mod.Case, store: PreviewStore | None) -> dict:
+    draft = (store.draft if store is not None
+             else pick_draft.draft_from_preset(case))
+    return {
+        "draft": draft.payload() if draft is not None else None,
+        "active": case.active_range,
+        "presets": [_range_preset_payload(item) for item in case.range_presets],
+        "dirty": pick_draft.draft_dirty(case, draft),
+    }
+
+
+def _extract_geometry(case: case_mod.Case, vdir: Path) -> dict | None:
+    """读冻结的 clip.json / image.json，给抽取版本补几何摘要；坏文件不 500。"""
+    try:
+        if case.flow == "patch":
+            data = json.loads((vdir / "clip.json").read_text(encoding="utf-8"))
+            seg = data["segments"][0]
+            return {
+                "viewport": dict(seg["viewport"]),
+                "inner": dict(seg["inner"]),
+                "frames": {"start": int(seg["frame_start"]),
+                           "end": int(seg["frame_end"])},
+                "fps": float(data.get("fps") or 0.0),
+            }
+        if case.flow == "patchimg":
+            data = json.loads((vdir / "image.json").read_text(encoding="utf-8"))
+            return {
+                "viewport": dict(data["viewport"]),
+                "inner": dict(data["inner"]),
+                "frames": None,
+                "fps": None,
+            }
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return None
+
+
+def _geometry_key(viewport: dict, inner: dict, frames: dict | None) -> tuple:
+    return (
+        round(float(viewport.get("yaw_deg", 0.0)), 2),
+        round(float(viewport.get("pitch_deg", 0.0)), 2),
+        round(float(viewport.get("fov_h_deg", 0.0)), 1),
+        int(viewport.get("width", 0)), int(viewport.get("height", 0)),
+        tuple(int(inner.get(key, 0)) for key in ("x", "y", "width", "height")),
+        (int(frames["start"]), int(frames["end"])) if frames else None,
+    )
+
+
+def _merge_ranges(case: case_mod.Case, extracts: list[dict]) -> list[dict]:
+    """抽取版本按几何分组；preset 只作为时间标签，未抽取的 preset 不出现。"""
+    groups: dict[tuple, dict] = {}
+    for entry in reversed(extracts):
+        viewport = entry.get("viewport")
+        inner = entry.get("inner")
+        if not viewport or not inner:
+            continue
+        frames = entry.get("frames")
+        key = _geometry_key(viewport, inner, frames)
+        group = groups.setdefault(key, {
+            "viewport": dict(viewport), "inner": dict(inner),
+            "frames": dict(frames) if frames else None,
+            "presets": [], "versions": [],
+        })
+        group["versions"].append({
+            "version": entry["version"], "fps": entry.get("fps"),
+            "has_result": bool(entry.get("has_result")),
+        })
+    for preset in case.range_presets:
+        key = _geometry_key(preset.viewport, preset.inner, preset.frames)
+        group = groups.get(key)
+        if group is not None:
+            group["presets"].append({
+                "id": preset.id, "created_at": preset.created_at,
+                "updated_at": preset.updated_at,
+            })
+    return list(groups.values())
+
+
 def _extracts(case: case_mod.Case) -> list[dict]:
     marker, result_name = _EXTRACT_FILES.get(case.flow, ("clip.json", "result.mp4"))
     vroot = case.dir(_ctx["cases_root"]) / "extracts"
     out = []
     if vroot.is_dir():
         for vdir in sorted(p for p in vroot.iterdir() if p.is_dir()):
-            out.append({"version": vdir.name,
-                        "extracted": (vdir / marker).is_file(),
-                        "has_result": (vdir / result_name).is_file()})
+            entry = {"version": vdir.name,
+                     "extracted": (vdir / marker).is_file(),
+                     "has_result": (vdir / result_name).is_file()}
+            geometry = _extract_geometry(case, vdir)
+            if geometry:
+                entry.update(geometry)
+            out.append(entry)
     return out
 
 
@@ -1695,8 +1799,10 @@ def _gates(case: case_mod.Case, extracts: list[dict],
         cur = cdir / "extracts" / (case.extract_current or "")
         steps = {
             "pick": {"ok": missing is None,
-                     "reason": f"case.toml 里缺 [{missing}] 段，补齐后才能抽取" if missing else "",
-                     "evidence": f"草稿三段（viewport/inner/frames）都在 {case_mod.case_toml(case.name, _ctx['cases_root'])} 里"},
+                     "reason": (f"先保存一条完整的选区范围（缺 {missing}）"
+                                if missing else ""),
+                     "evidence": (f"已保存 {len(case.range_presets)} 条范围，"
+                                  f"active={case.active_range or '(无)'}")},
             "extract": {"ok": extracted,
                         "reason": "" if extracted else "先完成选区并运行抽取",
                         "evidence": f"在 {cur}\\ 检测到 clip.json / clip.mp4 / clip_mask.png，当前抽取版本是 {case.extract_current}；想重新抽取，调好选区后再点一次按钮（会生成新版本，旧版本不动）"},
@@ -1706,8 +1812,10 @@ def _gates(case: case_mod.Case, extracts: list[dict],
                 "evidence": (f"在 {cur}\\result.mp4 检测到已选用的结果（来自 Session {case.adopt_round}）"
                              if adopted else f"在 {cur}\\result.mp4 检测到结果"),
                 "ready": extracted},
-            "merge": {"ok": has_out, "ready": extracted and adopted,
-                      "reason": "" if has_out else "采用一次生成结果后，才能合并出片",
+            "merge": {"ok": has_out,
+                      "ready": extracted and (adopted or case.merge_input is not None),
+                      "reason": "" if has_out else
+                      "先在合并页选一个抽取版本，并采用结果或上传外部视口视频",
                       "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}；每次合并都会覆盖同名文件{partial_note}"},
             "compare": {"ok": has_out, "reason": "" if has_out else "合并出片后可以在这里对比",
                         "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}{partial_note}"},
@@ -1780,10 +1888,10 @@ def _gates(case: case_mod.Case, extracts: list[dict],
         if patchimg:
             steps["pick"] = {
                 "ok": missing is None,
-                "reason": (f"case.toml 里缺 [{missing}] 段，补齐后才能抽取"
+                "reason": (f"先保存一条完整的选区范围（缺 {missing}）"
                            if missing else ""),
-                "evidence": (f"草稿两段（viewport/inner）都在 "
-                             f"{case_mod.case_toml(case.name, _ctx['cases_root'])} 里"),
+                "evidence": (f"已保存 {len(case.range_presets)} 条范围，"
+                             f"active={case.active_range or '(无)'}"),
             }
         steps["extract"] = {
             "ok": extracted,
@@ -2046,6 +2154,10 @@ def _case_info(name: str) -> dict | None:
     cdir = case.dir(_ctx["cases_root"])
     extracts = (_extracts(case)
                 if case.flow in ("patch", *case_mod.IMAGE_FLOWS) else [])
+    pick = (_pick_payload(case, store)
+            if case.flow in ("patch", "patchimg") else None)
+    merge_ranges = (_merge_ranges(case, extracts)
+                    if case.flow in ("patch", "patchimg") else [])
     # 素材明细要解码整批图片，一次请求只算一遍：assets / keyframe / gates 共用。
     assets = _asset_details(case)
     info = {
@@ -2056,6 +2168,9 @@ def _case_info(name: str) -> dict | None:
         "source_file": (file_entry(Path(case.source_path))
                         if case.source_path else None),
         "viewport": case.viewport, "inner": case.inner, "frames": case.frames,
+        "pick": pick,
+        "active_range": case.active_range,
+        "merge_ranges": merge_ranges,
         "frame_count": store.frame_count if store else None,
         "fps": store.fps if store else None,
         "duration_s": store.duration_s if store else None,
@@ -3643,31 +3758,158 @@ async def api_params(request):
     return JSONResponse(info)
 
 
-# ── 草稿 API（pick；唯一权威 = vrstudio.case.set_draft）─────────────────
+# ── 选区 API（pick-draft + range-presets；case.toml 只由 preset 写）──────
 
 
-async def api_draft(request):
+def _draft_geometry(store: PreviewStore) -> dict:
+    return {
+        "viewport": dict(store.case.viewport or {}),
+        "inner": dict(store.case.inner or {}),
+        "frames": dict(store.case.frames) if store.case.frames else None,
+    }
+
+
+async def api_pick_draft(request):
+    """高频几何写进 derived/pick/draft.toml；不写 case.toml。"""
     name = request.path_params["name"]
+    store, bad = _selection_store(name)
+    if bad is not None:
+        return bad
     try:
-        case = case_mod.load(name, _ctx["cases_root"])
-    except CaseError:
-        return JSONResponse({"error": "no such case"}, status_code=404)
-    if case.flow not in ("patch", "patchimg"):
-        return JSONResponse(
-            {"error": f"{case.flow} 没有选区草稿：视口与 inner 只用于 "
-                      f"patch（视频局部）与 patchimg（图片局部）"},
-            status_code=400)
-    body = await request.json()
-    sections = {}
-    for key in ("viewport", "inner", "frames"):
-        if key in body:
-            sections[key] = body[key]
+        body = await request.json()
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "请求体不是合法 JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "请求体必须是 JSON 对象"}, status_code=400)
+    sections = [key for key in ("viewport", "inner", "frames") if key in body]
     if not sections:
         return JSONResponse({"error": "没有要写的段"}, status_code=400)
+    if "viewport" in body:
+        if not isinstance(body["viewport"], dict):
+            return JSONResponse({"error": "viewport 必须是对象"}, status_code=400)
+        store.case.viewport = dict(body["viewport"])
+    if "inner" in body:
+        if not isinstance(body["inner"], dict):
+            return JSONResponse({"error": "inner 必须是对象"}, status_code=400)
+        store.case.inner = dict(body["inner"])
+    if "frames" in body:
+        if store.case.flow != "patch":
+            return JSONResponse({"error": "patchimg 没有 frames"}, status_code=400)
+        frames = body["frames"]
+        if not isinstance(frames, dict):
+            return JSONResponse({"error": "frames 必须是对象"}, status_code=400)
+        try:
+            start = int(frames.get("start", -1))
+            end = int(frames.get("end", -1))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "frames.start/end 必须是整数"},
+                                status_code=400)
+        if start < 0 or start >= end:
+            return JSONResponse({"error": "帧范围开始必须小于结束，且不小于 0"},
+                                status_code=400)
+        if store.frame_count > 0:
+            max_frame = store.frame_count - 1
+            if end > max_frame:
+                return JSONResponse(
+                    {"error": f"帧范围要在 0–{max_frame} 之间，且开始小于结束"},
+                    status_code=400)
+        store.case.frames = {"start": start, "end": end}
+    await asyncio.to_thread(store.save_geometry)
+    _remember_store(name, store)
+    extra = {"frames": dict(store.case.frames)} if store.case.frames else {}
+    return JSONResponse(_geometry_payload(store, name, **extra))
+
+
+async def api_range_presets(request):
+    """从当前 draft 新建一条 preset（另存为）；不写名称。"""
+    name = request.path_params["name"]
+    store, bad = _selection_store(name)
+    if bad is not None:
+        return bad
     try:
-        case_mod.set_draft(name, root=_ctx["cases_root"], **sections)
+        body = await request.json()
+    except (ValueError, TypeError):
+        body = {}
+    if isinstance(body, dict) and body.get("name"):
+        return JSONResponse({"error": "preset 不写名称"}, status_code=400)
+    geometry = _draft_geometry(store)
+    try:
+        await asyncio.to_thread(
+            case_mod.add_range_preset, name,
+            viewport=geometry["viewport"], inner=geometry["inner"],
+            frames=geometry["frames"], root=_ctx["cases_root"])
     except CaseError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    _stores.pop(name, None)
+    return JSONResponse(_case_info(name))
+
+
+async def api_range_preset_save(request):
+    """用当前 draft 覆盖指定 preset，并刷新 updated_at。"""
+    name = request.path_params["name"]
+    preset_id = request.path_params["preset_id"]
+    store, bad = _selection_store(name)
+    if bad is not None:
+        return bad
+    geometry = _draft_geometry(store)
+    try:
+        await asyncio.to_thread(
+            case_mod.save_range_preset, name, preset_id,
+            viewport=geometry["viewport"], inner=geometry["inner"],
+            frames=geometry["frames"], root=_ctx["cases_root"])
+    except CaseError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    _stores.pop(name, None)
+    return JSONResponse(_case_info(name))
+
+
+async def api_range_preset_load(request):
+    """把 preset 复制进 draft 并设为 active。"""
+    name = request.path_params["name"]
+    preset_id = request.path_params["preset_id"]
+    store, bad = _selection_store(name)
+    if bad is not None:
+        return bad
+    try:
+        preset = store.case.range_preset(preset_id)
+    except CaseError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    try:
+        case = await asyncio.to_thread(
+            case_mod.set_active_range, name, preset_id, root=_ctx["cases_root"])
+    except CaseError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    await asyncio.to_thread(
+        pick_draft.save_draft, case, _ctx["cases_root"],
+        viewport=preset.viewport, inner=preset.inner, frames=preset.frames,
+        updated_at=preset.updated_at)
+    _stores.pop(name, None)
+    fresh = get_store(name)
+    if fresh is None:
+        return JSONResponse({"error": "no such case"}, status_code=404)
+    extra = {"frames": dict(preset.frames)} if preset.frames else {}
+    return JSONResponse(_geometry_payload(fresh, name, **extra))
+
+
+async def api_range_preset_delete(request):
+    """删除 preset；删 active 时把下一条写回 draft，没有剩余就保留 draft。"""
+    name = request.path_params["name"]
+    preset_id = request.path_params["preset_id"]
+    store, bad = _selection_store(name)
+    if bad is not None:
+        return bad
+    try:
+        case = await asyncio.to_thread(
+            case_mod.delete_range_preset, name, preset_id,
+            root=_ctx["cases_root"])
+    except CaseError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if case.active_range:
+        preset = case.range_preset()
+        await asyncio.to_thread(
+            pick_draft.save_draft, case, _ctx["cases_root"],
+            viewport=preset.viewport, inner=preset.inner, frames=preset.frames,
+            updated_at=preset.updated_at)
     _stores.pop(name, None)
     return JSONResponse(_case_info(name))
 
@@ -3800,45 +4042,8 @@ async def api_nudge(request):
         store, name, nudged={"yaw": yaw, "pitch": pitch}))
 
 
-async def api_reset_draft(request):
-    name = request.path_params["name"]
-    try:
-        case = case_mod.load(name, _ctx["cases_root"])
-    except CaseError:
-        return JSONResponse({"error": "no such case"}, status_code=404)
-    if case.flow not in ("patch", "patchimg"):
-        return JSONResponse(
-            {"error": f"{case.flow} 没有选区草稿，不存在可回退的选区"},
-            status_code=400)
-    body = await request.json()
-    version = body.get("version") or case.extract_current
-    if not version:
-        return JSONResponse({"error": "还没有任何抽取版本可回退"}, status_code=400)
-    d = case.dir(_ctx["cases_root"]) / "extracts" / version
-    # 视频 patch 的选区冻结在 clip.json 的段里，patchimg 冻结在 image.json 里。
-    marker = "clip.json" if case.flow == "patch" else "image.json"
-    sj = d / marker
-    if not sj.is_file():
-        return JSONResponse({"error": f"抽取 {version} 缺 {marker}"}, status_code=400)
-    if case.flow == "patch":
-        seg = json.loads(sj.read_text(encoding="utf-8"))["segments"][0]
-        viewport, inner = seg["viewport"], seg["inner"]
-    else:
-        try:
-            geometry = sidecar_mod.load_image(sj)
-        except (OSError, ValueError, TypeError) as exc:
-            return JSONResponse({"error": f"{marker} 不合法：{exc}"}, status_code=400)
-        viewport, inner = asdict(geometry.viewport), asdict(geometry.inner)
-    case_mod.set_draft(name, root=_ctx["cases_root"], viewport=viewport, inner=inner)
-    _stores.pop(name, None)
-    store = get_store(name)
-    if store is None:
-        return JSONResponse({"error": "no such case"}, status_code=404)
-    return JSONResponse(_geometry_payload(store, name))
-
-
 async def api_region_export(request):
-    """导出选区范围：读 case.toml 的已保存值，不读前端可能未落盘的状态。"""
+    """导出选区范围：读当前 draft，不读前端尚未提交的本地状态。"""
     name = request.path_params["name"]
     store, bad = _selection_store(name)
     if bad is not None:
@@ -3902,7 +4107,10 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
     cdir = case.dir(_ctx["cases_root"])
     root = ["--cases-dir", str(_root())]
     if op == "extract":
-        return vrstudio_argv("extract", "name", "--case", name, *root)
+        argv = vrstudio_argv("extract", "name", "--case", name, *root)
+        if body.get("preset"):
+            argv += ["--preset", str(body["preset"])]
+        return argv
     if op == "pad":
         return vrstudio_argv("pad", "--in", case.source_path,
                              "--out", str(cdir / "seedance_input.mp4"),
@@ -3958,6 +4166,8 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
         return argv
     if op == "merge":
         argv = vrstudio_argv("merge", "--case", name, "-q", *root)
+        if body.get("extract"):
+            argv += ["--extract", str(body["extract"])]
         if body.get("allow_crop"):
             argv += ["--allow-crop"]
         if body.get("output_mode") == "input" and case.flow == "fullRedrawImg":
@@ -4012,17 +4222,20 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
     raise CaseError(f"未知操作：{op}")
 
 
-def _assemble_followup(name: str) -> list[tuple[str, str, list[str]]]:
+def _assemble_followup(name: str,
+                       extract_version: str | None = None) -> list[tuple[str, str, list[str]]]:
     """merge 成功后的时间拼接任务；整片抽取不排（决策 31/32）。"""
     try:
         case = case_mod.load(name, _ctx["cases_root"])
     except CaseError:
         return []
-    if case.flow != "patch" or not case.extract_current:
+    version = extract_version or case.extract_current
+    if case.flow != "patch" or not version:
         return []
-    if _is_whole_extract(case, case.extract_current):
+    if _is_whole_extract(case, version):
         return []
     argv = vrstudio_argv("assemble", "--case", name,
+                         "--extract", version,
                          "--cases-dir", str(_root()))
     return [("assemble", name, argv)]
 
@@ -4055,7 +4268,8 @@ async def api_run(request):
     except CaseError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     if op == "merge":
-        follow = await asyncio.to_thread(_assemble_followup, name)
+        follow = await asyncio.to_thread(
+            _assemble_followup, name, body.get("extract"))
     elif op == "pad":
         follow = await asyncio.to_thread(_pad_followup, name)
     else:
@@ -4291,7 +4505,14 @@ routes = [
     Route("/api/case/{name}", api_case, methods=["GET", "DELETE"]),
     Route("/api/case/{name}/lock", api_case_lock, methods=["GET", "POST", "DELETE"]),
     Route("/api/case/{name}/owner", api_case_owner, methods=["POST"]),
-    Route("/api/case/{name}/draft", api_draft, methods=["POST"]),
+    Route("/api/case/{name}/pick-draft", api_pick_draft, methods=["POST"]),
+    Route("/api/case/{name}/range-presets", api_range_presets, methods=["POST"]),
+    Route("/api/case/{name}/range-presets/{preset_id}/save",
+          api_range_preset_save, methods=["POST"]),
+    Route("/api/case/{name}/range-presets/{preset_id}/load",
+          api_range_preset_load, methods=["POST"]),
+    Route("/api/case/{name}/range-presets/{preset_id}",
+          api_range_preset_delete, methods=["DELETE"]),
     Route("/api/case/{name}/relight", api_relight_draft, methods=["POST"]),
     Route("/api/case/{name}/relight/regions", api_relight_regions,
           methods=["GET", "POST"]),
@@ -4321,7 +4542,6 @@ routes = [
     Route("/api/case/{name}/fov", api_fov, methods=["POST"]),
     Route("/api/case/{name}/inner", api_inner, methods=["POST"]),
     Route("/api/case/{name}/nudge", api_nudge, methods=["POST"]),
-    Route("/api/case/{name}/reset-draft", api_reset_draft, methods=["POST"]),
     Route("/api/case/{name}/region/export", api_region_export),
     Route("/api/case/{name}/region/import", api_region_import, methods=["POST"]),
     Route("/api/case/{name}/run", api_run, methods=["POST"]),
@@ -4362,14 +4582,15 @@ class NoStoreMiddleware:
 #: 否则每次拖框都会让另一页的提示词保存撞 409。
 _REVISION_WRITES = re.compile(
     r"^/api/case/(?P<name>[^/]+)/"
-    r"(?:draft|prompt|params|assets|submit|reset-draft|owner|region/import|keyframe/(?:prompt|refs|pick|handoff))$"
+    r"(?:range-presets(?:/[^/]+(?:/(?:save|load))?)?|prompt|params|assets|submit|"
+    r"owner|keyframe/(?:prompt|refs|pick|handoff))$"
 )
 
 #: 几何高频写端点：拖动帧不带 revision 头，照旧放行不推进 revision；
 #: 落定帧（拖拽结束后的最后一次）带头时做可选校验，一致才落盘并推进。
 #: 没有这层，几何草稿就是纯粹的最后写入者胜出，会静默覆盖别人的草稿。
 _REVISION_GEOMETRY = re.compile(
-    r"^/api/case/(?P<name>[^/]+)/(?:viewport|inner|nudge|viewport-size)$"
+    r"^/api/case/(?P<name>[^/]+)/(?:viewport|inner|nudge|viewport-size|pick-draft)$"
 )
 
 

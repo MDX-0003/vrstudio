@@ -27,6 +27,7 @@ from vrstudio.media.videoio import VideoInfo
 from vrstudio.redraw.geometry import PadSpec, plan_pad
 from vrstudio.redraw.manifest import VideoSettings, from_plan
 from vrstudio.web import app as web_app
+from vrstudio.web import pick_draft
 from vrstudio.web import tasks as tasks_mod
 
 VIEWPORT = {"yaw_deg": 10.0, "pitch_deg": -5.0, "fov_h_deg": 90.0,
@@ -58,6 +59,10 @@ def patch_case(tmp_path) -> str:
     case_mod.set_draft("p1", viewport=VIEWPORT, inner=INNER, frames=FRAMES,
                        root=tmp_path)
     return "p1"
+
+
+def _draft(case: str, tmp_path):
+    return pick_draft.load_draft(case_mod.load(case, tmp_path), tmp_path)
 
 
 def _mk_extract(case: str, tmp_path, version: str, with_result: bool = False):
@@ -514,25 +519,22 @@ def test_case_meta_revision_and_conflict(client, patch_case, tmp_path):
     assert info["meta"]["owner_name"] == "访客"
     assert (case_mod.case_dir(patch_case, tmp_path) / "case-meta.json").is_file()
 
-    body = {"frames": {"start": 0, "end": 4}, "revision": 0}
-    r = client.post(f"/api/case/{patch_case}/draft", json=body)
+    r = client.post(f"/api/case/{patch_case}/range-presets", json={})
     assert r.status_code == 200, r.text
     assert r.headers["x-case-revision"] == "1"
 
-    r = client.post(f"/api/case/{patch_case}/draft", json=body)
+    r = client.post(f"/api/case/{patch_case}/range-presets", json={"revision": 0})
     assert r.status_code == 409
     payload = r.json()
     assert payload["code"] == "revision_conflict"
     assert payload["current_revision"] == 1
 
-    r = client.post(f"/api/case/{patch_case}/draft",
-                    json={**body, "revision": 1})
+    r = client.post(f"/api/case/{patch_case}/range-presets", json={"revision": 1})
     assert r.status_code == 200
     assert r.headers["x-case-revision"] == "2"
 
     # 老前端不传 revision：允许写入，仍然递增。
-    r = client.post(f"/api/case/{patch_case}/draft",
-                    json={"frames": {"start": 0, "end": 5}})
+    r = client.post(f"/api/case/{patch_case}/range-presets", json={})
     assert r.status_code == 200
     assert r.headers["x-case-revision"] == "3"
 
@@ -624,12 +626,18 @@ def test_cases_list_sorts_by_last_activity_desc(client, patch_case, tmp_path,
 
 
 def test_draft_write_and_case_info_roundtrip(client, patch_case, tmp_path):
-    r = client.post("/api/case/p1/draft",
+    r = client.post("/api/case/p1/pick-draft",
                     json={"frames": {"start": 2, "end": 4}})
     assert r.status_code == 200
-    assert case_mod.load("p1", tmp_path).frames == {"start": 2, "end": 4}
-    info = r.json()
+    assert r.json()["frames"] == {"start": 2, "end": 4}
+    draft = _draft("p1", tmp_path)
+    assert draft.frames == {"start": 2, "end": 4}
+    # 高频 draft 不写 case.toml，也不改动已保存的 preset。
+    assert case_mod.load("p1", tmp_path).frames == FRAMES
+    info = client.get("/api/case/p1").json()
     assert info["gates"]["pick"]["ok"] is True
+    assert info["pick"]["draft"]["frames"] == {"start": 2, "end": 4}
+    assert info["pick"]["dirty"] is True
     assert info["rounds"]["rounds"] == []                  # vrgen 缺席 → 空轮次
     assert "vrgen" in info["rounds"]["hint"]
 
@@ -638,13 +646,14 @@ def test_draft_rejects_fullredraw(client, tmp_path):
     src = tmp_path / "s.mp4"
     src.write_bytes(b"x")
     case_mod.create("f1", "fullredraw", src, root=tmp_path)
-    assert client.post("/api/case/f1/draft", json={"inner": INNER}).status_code == 400
+    assert client.post("/api/case/f1/pick-draft",
+                       json={"inner": INNER}).status_code == 400
 
 
 def test_viewport_click_sets_yaw_pitch(client, patch_case, tmp_path):
     r = client.post("/api/case/p1/viewport", json={"fx": 0.75, "fy": 0.25})
     assert r.status_code == 200
-    vp = case_mod.load("p1", tmp_path).viewport
+    vp = _draft("p1", tmp_path).viewport
     assert vp["yaw_deg"] == 90.0 and vp["pitch_deg"] == 45.0
     payload = r.json()
     assert payload["viewport"]["yaw_deg"] == 90.0
@@ -655,7 +664,7 @@ def test_inner_drag_submits_fractions(client, patch_case, tmp_path):
     r = client.post("/api/case/p1/inner",
                     json={"fx": 0.25, "fy": 0.5, "fw": 0.5, "fh": 0.25})
     assert r.status_code == 200
-    inner = case_mod.load("p1", tmp_path).inner
+    inner = _draft("p1", tmp_path).inner
     assert (inner["x"], inner["y"]) == (80, 90)            # 分数 × 视口像素
     assert (inner["width"], inner["height"]) == (160, 45)
     payload = r.json()
@@ -676,7 +685,7 @@ def test_inner_keeps_preview_store_and_url(client, patch_case, tmp_path):
     assert web_app.get_store("p1") is store
     after_info = client.get("/api/case/p1").json()
     assert after_info["previews"]["vp"] == before_url
-    inner = case_mod.load("p1", tmp_path).inner
+    inner = _draft("p1", tmp_path).inner
     assert (inner["x"], inner["y"], inner["width"], inner["height"]) == (80, 90, 160, 45)
 
 
@@ -687,7 +696,7 @@ def test_nudge_wraps_yaw_and_clamps_pitch(client, patch_case, tmp_path):
     assert payload["nudged"] == {"yaw": -170.0, "pitch": 89.0}
     assert payload["viewport"]["yaw_deg"] == -170.0
     assert "previews" in payload and "assets" not in payload
-    vp = case_mod.load("p1", tmp_path).viewport
+    vp = _draft("p1", tmp_path).viewport
     assert vp["yaw_deg"] == -170.0 and vp["pitch_deg"] == 89.0
 
 
@@ -743,7 +752,7 @@ def test_fov_changes_angle_without_rescaling_inner(client, patch_case, tmp_path)
     assert data["inner"] == INNER                     # fov 不缩放 inner
     assert data["previews"]["vp"] != before["previews"]["vp"]
     assert data["fov_range"] == [20.0, 120.0]
-    assert case_mod.load("p1", tmp_path).viewport["fov_h_deg"] == 110.0
+    assert _draft("p1", tmp_path).viewport["fov_h_deg"] == 110.0
 
 
 def test_fov_rejects_out_of_range_and_bad_values(client, patch_case):
@@ -789,16 +798,93 @@ def test_coverage_payload_reports_footprint_and_density():
     assert cov["inner_deg"] == 53.1
 
 
-def test_reset_draft_restores_from_version(client, patch_case, tmp_path):
-    _mk_extract("p1", tmp_path, "v1")
+def test_range_preset_load_restores_draft(client, patch_case, tmp_path):
     client.post("/api/case/p1/inner",
                 json={"fx": 0.1, "fy": 0.1, "fw": 0.2, "fh": 0.2})
-    r = client.post("/api/case/p1/reset-draft", json={"version": "v1"})
+    r = client.post("/api/case/p1/range-presets/r1/load")
     assert r.status_code == 200
-    assert case_mod.load("p1", tmp_path).inner == INNER     # 回到版本记录的框
+    assert _draft("p1", tmp_path).inner == INNER            # 回到 preset 的框
     payload = r.json()
     assert payload["inner"] == INNER
     assert "previews" in payload and "assets" not in payload
+
+
+def test_pick_payload_exposes_draft_presets_and_dirty(client, patch_case, tmp_path):
+    info = client.get("/api/case/p1").json()
+    pick = info["pick"]
+    assert pick["active"] == "r1" and len(pick["presets"]) == 1
+    assert pick["dirty"] is False
+    assert pick["draft"]["viewport"] == VIEWPORT
+
+    path = case_mod.case_toml("p1", tmp_path)
+    before = path.read_bytes()
+    before_mtime = path.stat().st_mtime_ns
+    r = client.post("/api/case/p1/pick-draft",
+                    json={"viewport": {**VIEWPORT, "yaw_deg": 90.0}})
+    assert r.status_code == 200
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == before_mtime
+
+    info = client.get("/api/case/p1").json()
+    assert info["pick"]["dirty"] is True
+    assert info["pick"]["draft"]["viewport"]["yaw_deg"] == 90.0
+    assert info["pick"]["presets"][0]["viewport"]["yaw_deg"] == 10.0
+
+
+def test_range_preset_create_save_delete(client, patch_case, tmp_path):
+    r = client.post("/api/case/p1/range-presets", json={})
+    assert r.status_code == 200, r.text
+    info = r.json()
+    assert info["pick"]["active"] == "r2"
+    assert [item["id"] for item in info["pick"]["presets"]] == ["r1", "r2"]
+
+    client.post("/api/case/p1/pick-draft",
+                json={"inner": {"x": 10, "y": 20, "width": 100, "height": 60}})
+    r = client.post("/api/case/p1/range-presets/r2/save")
+    assert r.status_code == 200, r.text
+    info = r.json()
+    r2 = next(item for item in info["pick"]["presets"] if item["id"] == "r2")
+    assert r2["inner"] == {"x": 10, "y": 20, "width": 100, "height": 60}
+    assert info["pick"]["dirty"] is False
+
+    r = client.delete("/api/case/p1/range-presets/r2")
+    assert r.status_code == 200, r.text
+    info = r.json()
+    assert info["pick"]["active"] == "r1"
+    assert [item["id"] for item in info["pick"]["presets"]] == ["r1"]
+    assert info["pick"]["draft"]["inner"] == INNER
+
+
+def test_merge_ranges_groups_versions_and_preset_labels(client, patch_case, tmp_path):
+    _mk_extract("p1", tmp_path, "v1", with_result=True)
+    d = case_mod.case_dir("p1", tmp_path) / "extracts" / "v2"
+    d.mkdir(parents=True)
+    other_viewport = {**VIEWPORT, "yaw_deg": -30.0}
+    (d / "clip.json").write_text(json.dumps(
+        {"fps": 30.0, "segments": [{"id": "s0", "frame_start": 0, "frame_end": 5,
+                                    "viewport": other_viewport, "inner": INNER}]},
+        ensure_ascii=False), encoding="utf-8")
+    (d / "result.mp4").write_bytes(b"r")
+
+    ranges = client.get("/api/case/p1").json()["merge_ranges"]
+    assert len(ranges) == 2
+    matched = next(group for group in ranges if group["presets"])
+    assert [item["id"] for item in matched["presets"]] == ["r1"]
+    assert [item["version"] for item in matched["versions"]] == ["v1"]
+    unmatched = next(group for group in ranges if not group["presets"])
+    assert unmatched["versions"][0]["version"] == "v2"
+
+
+def test_pick_draft_source_hash_guard_falls_back(client, patch_case, tmp_path):
+    case = case_mod.load("p1", tmp_path)
+    pick_draft.save_draft(case, tmp_path, viewport=VIEWPORT, inner=INNER,
+                          frames=FRAMES)
+    path = pick_draft.draft_path(case, tmp_path)
+    path.write_text(path.read_text(encoding="utf-8").replace(
+        case.sha256, "0" * 64), encoding="utf-8")
+    info = client.get("/api/case/p1").json()
+    assert info["pick"]["draft"]["viewport"] == VIEWPORT
+    assert info["pick"]["dirty"] is False
 
 
 # ── op 注册表与门控递进 ──────────────────────────────────────────────────
@@ -2532,7 +2618,7 @@ def test_region_export_rejects_other_flows(client, tmp_path):
     assert client.get("/api/case/nope/region/export").status_code == 404
 
 
-def test_region_import_writes_geometry_frames_and_bumps_revision(client, tmp_path):
+def test_region_import_writes_geometry_frames_into_draft(client, tmp_path):
     _video_patch_case(tmp_path)
     body = _region_body(
         viewport={"yaw_deg": 45.55, "pitch_deg": -12.3, "fov_h_deg": 75.5,
@@ -2542,7 +2628,7 @@ def test_region_import_writes_geometry_frames_and_bumps_revision(client, tmp_pat
     )
     r = client.post("/api/case/p1/region/import", json=body)
     assert r.status_code == 200, r.text
-    assert r.headers["x-case-revision"] == "1"
+    assert "x-case-revision" not in r.headers
     payload = r.json()
     assert payload["scaled"] is False
     assert payload["frames"] == {"start": 2, "end": 6}
@@ -2550,7 +2636,7 @@ def test_region_import_writes_geometry_frames_and_bumps_revision(client, tmp_pat
     assert payload["inner"] == {"x": 20, "y": 30, "width": 100, "height": 60}
     assert "previews" in payload
 
-    saved = case_mod.load("p1", tmp_path)
+    saved = _draft("p1", tmp_path)
     assert saved.viewport["yaw_deg"] == 45.55
     assert saved.viewport["pitch_deg"] == -12.3
     assert saved.viewport["fov_h_deg"] == 75.5
@@ -2571,7 +2657,7 @@ def test_region_import_scales_inner_but_keeps_target_viewport_size(client, tmp_p
     assert payload["scaled"] is True
     assert (payload["viewport"]["width"], payload["viewport"]["height"]) == (320, 180)
     assert payload["inner"] == {"x": 80, "y": 45, "width": 160, "height": 90}
-    saved = case_mod.load("p1", tmp_path)
+    saved = _draft("p1", tmp_path)
     assert (saved.viewport["width"], saved.viewport["height"]) == (320, 180)
     assert saved.inner == {"x": 80, "y": 45, "width": 160, "height": 90}
 
@@ -2589,7 +2675,7 @@ def test_region_import_maps_frames_by_time_across_fps(client, tmp_path):
     payload = r.json()
     assert payload["frames"] == {"start": 12, "end": 35}
     assert payload["frames_clamped"] is False
-    saved = case_mod.load("p1", tmp_path)
+    saved = _draft("p1", tmp_path)
     assert saved.frames == {"start": 12, "end": 35}
 
 
@@ -2605,7 +2691,7 @@ def test_region_import_clamps_frames_to_a_shorter_target(client, tmp_path):
     payload = r.json()
     assert payload["frames"] == {"start": 0, "end": 7}
     assert payload["frames_clamped"] is True
-    assert case_mod.load("p1", tmp_path).frames == {"start": 0, "end": 7}
+    assert _draft("p1", tmp_path).frames == {"start": 0, "end": 7}
 
 
 def test_region_import_rejects_frames_starting_after_target_duration(client, tmp_path):
@@ -2618,6 +2704,7 @@ def test_region_import_rejects_frames_starting_after_target_duration(client, tmp
     r = client.post("/api/case/p1/region/import", json=body)
     assert r.status_code == 400
     assert "超过目标" in r.json()["error"]
+    # 失败不写 draft；case.toml 的 preset 几何保持不变。
     assert case_mod.load("p1", tmp_path).frames == {"start": 0, "end": 7}
 
 
@@ -2680,16 +2767,15 @@ def test_region_import_rejects_malformed_json(client, tmp_path):
     assert r.status_code == 400 and "JSON" in r.json()["error"]
 
 
-def test_region_import_respects_revision(client, tmp_path):
+def test_region_import_is_draft_only(client, tmp_path):
     _video_patch_case(tmp_path)
     body = _region_body()
     first = client.post("/api/case/p1/region/import", json=body)
     assert first.status_code == 200
-    assert first.headers["x-case-revision"] == "1"
+    assert "x-case-revision" not in first.headers
+    # 带旧 revision 也不拦：它只写 draft，不参与 case.toml 的乐观并发。
     stale = client.post("/api/case/p1/region/import", json=body,
                         headers={"X-Case-Revision": "0"})
-    assert stale.status_code == 409
-    assert stale.json()["code"] == "revision_conflict"
+    assert stale.status_code == 200
     again = client.post("/api/case/p1/region/import", json=body)
     assert again.status_code == 200
-    assert again.headers["x-case-revision"] == "2"

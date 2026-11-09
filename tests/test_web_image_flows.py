@@ -18,6 +18,7 @@ from vrstudio import case as case_mod
 from vrstudio.cli import generate as generate_cli
 from vrstudio.media.imageio import write_png
 from vrstudio.web import app as web_app
+from vrstudio.web import pick_draft
 
 VIEWPORT = {"yaw_deg": 10.0, "pitch_deg": -5.0, "fov_h_deg": 90.0,
             "width": 320, "height": 180}
@@ -350,16 +351,17 @@ def test_sources_lists_images_separately(client, sources):
 
 
 def test_draft_accepts_patchimg_and_rejects_frames(client, patchimg_case):
-    r = client.post(f"/api/case/{patchimg_case}/draft", json={"inner": INNER})
+    r = client.post(f"/api/case/{patchimg_case}/pick-draft", json={"inner": INNER})
     assert r.status_code == 200, r.text
-    r = client.post(f"/api/case/{patchimg_case}/draft",
+    r = client.post(f"/api/case/{patchimg_case}/pick-draft",
                     json={"frames": {"start": 0, "end": 3}})
     assert r.status_code == 400
-    assert "没有 [frames]" in r.json()["error"]
+    assert "没有 frames" in r.json()["error"]
 
 
 def test_draft_rejects_fullredrawimg_with_a_flow_message(client, full_img_case):
-    r = client.post(f"/api/case/{full_img_case}/draft", json={"viewport": VIEWPORT})
+    r = client.post(f"/api/case/{full_img_case}/pick-draft",
+                    json={"viewport": VIEWPORT})
     assert r.status_code == 400
     assert "没有选区草稿" in r.json()["error"]
 
@@ -378,8 +380,9 @@ def test_viewport_size_and_fov_work_for_patchimg(client, patchimg_case):
                     json={"width": 3840, "height": 2160})
     assert r.status_code == 200, r.text
     case = case_mod.load(patchimg_case, web_app._ctx["cases_root"])
-    assert case.viewport["width"] == 3840
-    assert case.inner["width"] == int(INNER["width"] * 12)
+    draft = pick_draft.load_draft(case, web_app._ctx["cases_root"])
+    assert draft.viewport["width"] == 3840
+    assert draft.inner["width"] == int(INNER["width"] * 12)
 
 
 # ── 候选图与预览 ─────────────────────────────────────────────────────────
@@ -395,26 +398,15 @@ def test_preview_store_handles_an_image_source(tmp_path, client, patchimg_case):
         store.viewport_frame_path(1)
 
 
-def test_reset_draft_restores_patchimg_geometry(tmp_path, client, patchimg_case):
-    version = _extract_version(tmp_path, patchimg_case, "image.json")
-    (version / "image.json").write_text(json.dumps({
-        "version": 1, "erp_width": 320, "erp_height": 160,
-        "viewport": {"yaw_deg": -30.0, "pitch_deg": 5.0, "fov_h_deg": 70.0,
-                     "width": 320, "height": 180},
-        "inner": {"x": 10, "y": 20, "width": 100, "height": 80},
-    }), encoding="utf-8")
-    case_mod.set_draft(patchimg_case, inner={**INNER, "x": 1}, root=tmp_path)
-    r = client.post(f"/api/case/{patchimg_case}/reset-draft", json={})
+def test_range_preset_load_restores_patchimg_geometry(client, patchimg_case, tmp_path):
+    client.post(f"/api/case/{patchimg_case}/pick-draft",
+                json={"inner": {**INNER, "x": 1}})
+    r = client.post(f"/api/case/{patchimg_case}/range-presets/r1/load")
     assert r.status_code == 200, r.text
     case = case_mod.load(patchimg_case, tmp_path)
-    assert case.viewport["yaw_deg"] == -30.0
-    assert case.inner["x"] == 10
-
-
-def test_reset_draft_rejects_fullredrawimg(client, full_img_case):
-    r = client.post(f"/api/case/{full_img_case}/reset-draft", json={})
-    assert r.status_code == 400
-    assert "没有选区草稿" in r.json()["error"]
+    draft = pick_draft.load_draft(case, tmp_path)
+    assert draft.viewport == VIEWPORT
+    assert draft.inner == INNER
 
 
 def test_case_info_exposes_image_rounds_and_report(tmp_path, client, patchimg_case):

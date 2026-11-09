@@ -6,8 +6,8 @@ ERP 面不需要服务端渲染：向导页用原生 ``<video>`` 逐帧走查源
 解码的 4K ERP 帧放一个小的内存 LRU（与几何无关，视口移动后仍命中）；
 重投影 JPEG 缓存放在 case 目录 ``derived/pick/`` 下，是可随时删除的再生成缓存。
 
-与 vrpatch 版的差异：草稿读写从"vrpatch 私有 case.toml 段落改写"改为统一
-case 模型（``vrstudio.case.set_draft``），本模块不再拥有任何写 case 的语法。
+与 vrpatch 版的差异：高频几何只写 ``derived/pick/draft.toml``，不再每次点击
+重写 ``case.toml``；显式保存的 ``[[range_preset]]`` 由 ``vrstudio.case`` 管理。
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ import numpy as np
 from .. import case as case_mod
 from ..media.imageio import read_image
 from ..patch.projection import erp_to_rect
+from . import pick_draft
 from .logging import PREVIEW_LOGGER
 from .proxy import proxy_identity, proxy_path, proxy_ready
 
@@ -78,6 +79,15 @@ class PreviewStore:
         self.case = case_mod.load(name, cases_root)   # 失败抛 CaseError（404/400 由上层映射）
         self.dir = self.case.dir(cases_root) / "derived" / "pick"
         self.dir.mkdir(parents=True, exist_ok=True)
+        # pick 页当前工作草稿；没有草稿时回退 active preset。
+        self.draft = pick_draft.load_draft(self.case, cases_root)
+        if self.draft is None:
+            self.draft = pick_draft.draft_from_preset(self.case)
+        if self.draft is not None:
+            self.case.viewport = dict(self.draft.viewport) or None
+            self.case.inner = dict(self.draft.inner) or None
+            self.case.frames = (dict(self.draft.frames)
+                                if self.draft.frames is not None else None)
         self._erp_lru: dict[int, np.ndarray] = {}
         self.is_image = self.case.flow in case_mod.IMAGE_FLOWS
         if self.is_image:
@@ -123,8 +133,10 @@ class PreviewStore:
         return dict(self.case.inner or {})
 
     def save_geometry(self) -> None:
-        case_mod.set_draft(self.name, viewport=self._vp(), inner=self._inner(),
-                           root=self.root)
+        """把当前几何写进 derived/pick/draft.toml；不碰 case.toml。"""
+        self.draft = pick_draft.save_draft(
+            self.case, self.root, viewport=self._vp(), inner=self._inner(),
+            frames=dict(self.case.frames) if self.case.frames else None)
 
     def set_viewport_from_erp_click(self, fx: float, fy: float) -> None:
         """fx, fy 是 ERP 面上的 0..1 分数 → 视口中心的经纬度。"""
@@ -260,13 +272,12 @@ class PreviewStore:
         self.case.viewport = vp
         self.case.inner = inner
         self.case.frames = new_frames
-        case_mod.set_draft(self.name, viewport=vp, inner=inner,
-                           frames=new_frames, root=self.root)
+        self.save_geometry()
         self.key = self._new_key()
         return scaled, frames_clamped
 
     def nudge(self, dyaw: float, dpitch: float) -> tuple[float, float]:
-        """摇杆微调；服务端做算术并写回，case.toml 里永远是合法值
+        """摇杆微调；服务端做算术并写回 draft，值永远是合法的
         （yaw 在 ±180 回绕，pitch 钳到 ±89）。"""
         vp = self._vp()
         yaw = ((vp.get("yaw_deg", 0.0) + dyaw + 180.0) % 360.0 + 360.0) % 360.0 - 180.0
