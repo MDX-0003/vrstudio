@@ -1,4 +1,4 @@
-import type { Flow, Gates } from '@/types/case'
+import type { Flow, Gates, UploadGate } from '@/types/case'
 import type { Pole } from '@/utils/erpMath'
 
 export interface AssetDetail {
@@ -464,6 +464,8 @@ export interface CaseInfo {
   step_files: Record<string, StepFiles>
   /** fullredraw 最新一组上传件的摘要；还没导出时为 null。 */
   pad_upload?: PadUploadInfo | null
+  /** fullredraw 合规副本能否导出：扩充件已生成，且源片时长在模式区间内。 */
+  upload_gate?: UploadGate | null
   gates: Gates
   previews: { vp?: string }
   viewport_options: ViewportOption[]

@@ -25,6 +25,12 @@ export interface Gate {
 
 export type Gates = Record<string, Gate | undefined>
 
+/** fullredraw 合规副本的导出前置条件；不满足时按钮置灰并显示 reason。 */
+export interface UploadGate {
+  ready: boolean
+  reason: string
+}
+
 export interface CaseBrief {
   name: string
   flow: Flow

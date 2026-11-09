@@ -436,6 +436,7 @@ describe('MergeStep 按步骤拆分的扩充页（fullredraw 视频）', () => {
       uploads?: typeof uploadFiles
       padUpload?: Record<string, unknown> | null
       scale?: string
+      uploadGate?: { ready: boolean; reason: string } | null
     } = {},
   ): CaseInfo {
     return {
@@ -454,6 +455,7 @@ describe('MergeStep 按步骤拆分的扩充页（fullredraw 视频）', () => {
         fixed: { video_model_id: 37 },
       },
       pad_upload: options.padUpload ?? null,
+      upload_gate: options.uploadGate ?? null,
       step_files: {
         pad: {
           inputs: [],
@@ -487,7 +489,7 @@ describe('MergeStep 按步骤拆分的扩充页（fullredraw 视频）', () => {
   it('shows only the pad controls and both file groups', async () => {
     const wrapper = await mountPad({ uploads: uploadFiles })
     expect(wrapper.text()).toContain('扩充产物')
-    expect(wrapper.text()).toContain('上传件')
+    expect(wrapper.text()).toContain('生成平台合规分辨率副本')
     expect(wrapper.text()).toContain('seedance_input.mp4')
     expect(wrapper.text()).toContain('upload_pad_4398x1884.mp4')
     // 裁回控件只在裁回步出现。
@@ -507,13 +509,22 @@ describe('MergeStep 按步骤拆分的扩充页（fullredraw 视频）', () => {
     wrapper.unmount()
   })
 
-  it('offers 生成上传件 when nothing has been exported yet', async () => {
+  it('offers 生成合规副本 when nothing has been exported yet', async () => {
     vi.mocked(runOperation).mockClear()
     const wrapper = await mountPad()
-    expect(wrapper.text()).toContain('还没有上传件')
-    await button(wrapper, '生成上传件').trigger('click')
+    expect(wrapper.text()).toContain('还没有合规副本')
+    await button(wrapper, '生成合规副本').trigger('click')
     await flushPromises()
     expect(runOperation).toHaveBeenCalledWith('p1', 'export_upload', {})
+    wrapper.unmount()
+  })
+
+  it('disables the export button and shows the duration reason', async () => {
+    const wrapper = await mountPad({
+      uploadGate: { ready: false, reason: '源片 1.9 秒，videoEdit 要求 2–30 秒；…' },
+    })
+    expect(wrapper.text()).toContain('源片 1.9 秒')
+    expect(button(wrapper, '生成合规副本').attributes('disabled')).toBeDefined()
     wrapper.unmount()
   })
 

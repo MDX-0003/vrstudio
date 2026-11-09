@@ -2372,6 +2372,51 @@ def _clip_seconds(case: case_mod.Case) -> float | None:
     return round(frames / sidecar.fps, 1) if frames > 0 else None
 
 
+def _video_seconds(path: Path) -> float | None:
+    """视频时长（秒）：帧数 / 帧率；读不到返回 None。"""
+    try:
+        cap = cv2.VideoCapture(str(path))
+        if not cap.isOpened():
+            return None
+        frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        cap.release()
+    except Exception:                                    # noqa: BLE001
+        return None
+    if frames <= 0 or fps <= 0:
+        return None
+    return round(frames / fps, 2)
+
+
+def _apply_upload_gate(info: dict, case: case_mod.Case, mode: str | None) -> None:
+    """fullredraw 合规副本的导出前置条件：先有扩充件，且源片时长在模式区间内。
+
+    时长不是缩放能修的项：低于下限时 ``vrgen prep`` 只会回「素材 pad 不合约」，
+    所以在按钮上先挡住并把真实原因说出来。
+    """
+    if case.flow != "fullredraw":
+        return
+    pad = (info.get("gates") or {}).get("pad") or {}
+    if not pad.get("ok"):
+        info["upload_gate"] = {"ready": False,
+                               "reason": pad.get("reason") or "还没有扩充过画面"}
+        return
+    pad_file = case.dir(_ctx["cases_root"]) / "seedance_input.mp4"
+    if not pad_file.is_file():
+        info["upload_gate"] = {"ready": False, "reason": "扩充件不在磁盘上；重新扩充一次"}
+        return
+    seconds = _video_seconds(pad_file)
+    limit = _duration_limit(info, mode)
+    if seconds is not None and limit and not limit[0] <= seconds <= limit[1]:
+        info["upload_gate"] = {
+            "ready": False,
+            "reason": (f"源片 {seconds:g} 秒，{mode} 要求 {limit[0]}–{limit[1]} 秒；"
+                       f"合规副本按平台限额导出，时长不满足时会被平台拒"),
+        }
+        return
+    info["upload_gate"] = {"ready": True, "reason": ""}
+
+
 def _apply_mode_gate(info: dict, case: case_mod.Case, mode: str | None) -> None:
     gate = (info.get("gates") or {}).get("generate")
     if gate is None or not mode:
@@ -2482,6 +2527,7 @@ async def api_case(request):
     info["generation_params"] = params
     mode = (params.get("current") or {}).get("mode")
     _apply_mode_gate(info, case, mode)
+    _apply_upload_gate(info, case, mode)
     info["prompt"] = await asyncio.to_thread(_prompt, name, info["flow"], mode)
     meta = await asyncio.to_thread(_meta().ensure, name, current_user(request))
     info["meta"] = meta.as_dict()
@@ -2906,6 +2952,7 @@ async def api_assets(request):
     info["generation_params"] = params
     mode = (params.get("current") or {}).get("mode")
     _apply_mode_gate(info, case, mode)
+    _apply_upload_gate(info, case, mode)
     info["prompt"] = await asyncio.to_thread(_prompt, name, case.flow, mode)
     return JSONResponse(info)
 
@@ -2917,6 +2964,7 @@ def _info_with_generation(name: str) -> dict:
     info["generation_params"] = params
     mode = (params.get("current") or {}).get("mode")
     _apply_mode_gate(info, case, mode)
+    _apply_upload_gate(info, case, mode)
     info["prompt"] = _prompt(name, case.flow, mode)
     info["meta"] = _meta().read(name).as_dict()
     return info
@@ -3590,6 +3638,7 @@ async def api_params(request):
     info["generation_params"] = params
     mode = (params.get("current") or {}).get("mode")
     _apply_mode_gate(info, case, mode)
+    _apply_upload_gate(info, case, mode)
     info["prompt"] = await asyncio.to_thread(_prompt, name, case.flow, mode)
     return JSONResponse(info)
 

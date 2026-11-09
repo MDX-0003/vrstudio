@@ -67,9 +67,15 @@ const isRecomposeStep = computed(() => props.step === 'recompose')
 const padReady = computed(() => Boolean(padGate.value?.ok))
 const uploadFiles = computed(() => padFiles.value?.uploads ?? [])
 const uploadSummary = computed(() => props.info.pad_upload ?? null)
+const uploadGate = computed(() => props.info.upload_gate ?? null)
+const uploadBlocked = computed(() =>
+  uploadGate.value ? gateBlocked(uploadGate.value) : gateBlocked(padGate.value),
+)
+// 扩充件还没生成时，原因已经由上方 pad 门控提示；这里只显示重复不了的时长问题。
+const uploadBlockReason = computed(() => (padReady.value ? (uploadGate.value?.reason ?? '') : ''))
 const uploadHint = computed(() => {
   const up = uploadSummary.value
-  if (!up || !up.upload) return '按当前模型的输入限额缩放；给外部工具直接使用'
+  if (!up || !up.upload) return '按当前模型的输入限额缩放，供外部工具使用'
   const limit = up.limit?.max_pixel ? `，上限 ${up.limit.max_pixel.toLocaleString()} 像素` : ''
   const model = up.video_model_id ? `model ${up.video_model_id}` : ''
   return `按 ${[model, up.mode, `scale ${up.scale}`].filter(Boolean).join(' · ')} 缩放${limit}`
@@ -390,11 +396,18 @@ watch(latest, async (task) => {
             <div class="file-group upload-group">
               <div class="file-group-head">
                 <h3>
-                  上传件
-                  <el-tag size="small" effect="light" type="primary">外部生成用这组</el-tag>
+                  生成平台合规分辨率副本
+                  <el-tag size="small" effect="light" type="primary">外部工具用这组</el-tag>
                 </h3>
                 <span class="muted group-hint">{{ uploadHint }}</span>
               </div>
+              <el-alert
+                v-if="uploadBlockReason"
+                type="info"
+                :closable="false"
+                class="gate-alert"
+                :title="uploadBlockReason"
+              />
               <template v-if="uploadFiles.length">
                 <FileRow v-for="file in uploadFiles" :key="file.path" :entry="file">
                   <template v-if="file.exists && file.open_url" #actions>
@@ -408,7 +421,7 @@ watch(latest, async (task) => {
                   type="warning"
                   :closable="false"
                   class="gate-alert"
-                  title="当前生成参数已变，这份上传件不再对应当前设置"
+                  title="当前生成参数已变，这份副本不再对应当前设置"
                 >
                   <el-button
                     link
@@ -420,19 +433,20 @@ watch(latest, async (task) => {
                   </el-button>
                 </el-alert>
                 <p class="upload-note muted">
-                  外部工具请直接使用这一组：尺寸已按平台上限缩放，mask 与视频同一尺寸， JSON
-                  记录了画布、缩放比例与冗余带位置。
+                  全尺寸扩充件超过平台像素上限，不能直接上传。这组已按限额缩到同一尺寸：视频与 mask
+                  的宽高一致，JSON 记录画布、缩放比例与冗余带位置；交给外部工具时用这组，
+                  不要用上面的全尺寸文件。
                 </p>
               </template>
               <div v-else class="upload-empty">
-                <span class="muted">还没有上传件；扩充完成后会自动生成，也可以现在补一份</span>
+                <span class="muted">还没有合规副本；扩充完成后会自动生成，也可以现在补一份</span>
                 <el-button
                   size="small"
                   :loading="running === 'export_upload'"
-                  :disabled="gateBlocked(padGate)"
+                  :disabled="uploadBlocked"
                   @click="runOp('export_upload')"
                 >
-                  生成上传件
+                  生成合规副本
                 </el-button>
               </div>
             </div>

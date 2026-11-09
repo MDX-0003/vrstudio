@@ -2218,6 +2218,52 @@ def test_duration_gate_names_the_mode_limit(client, patch_case, tmp_path):
     assert run_gate({})["ready"] is True
 
 
+def test_upload_gate_blocks_source_below_mode_minimum(client, tmp_path, fullredraw_case):
+    """1.9 秒的扩充件低于 videoEdit 的 2 秒下限：导出按钮先挡住并说出原因。"""
+    cdir = case_mod.case_dir("f1", tmp_path)
+    _write_erp_video(cdir / "seedance_input.mp4", frames=57, fps=30.0)
+    case = case_mod.load("f1", tmp_path)
+    info = {"gates": {"pad": {"ok": True, "ready": True, "reason": ""}},
+            "generation_params": {"modes": [{"value": "videoEdit",
+                                             "duration": {"min": 2, "max": 30}}]}}
+    web_app._apply_upload_gate(info, case, "videoEdit")
+    gate = info["upload_gate"]
+    assert gate["ready"] is False
+    assert "1.9 秒" in gate["reason"] and "2–30 秒" in gate["reason"]
+
+
+def test_upload_gate_passes_when_duration_fits(client, tmp_path, fullredraw_case):
+    cdir = case_mod.case_dir("f1", tmp_path)
+    _write_erp_video(cdir / "seedance_input.mp4", frames=90, fps=30.0)
+    case = case_mod.load("f1", tmp_path)
+    info = {"gates": {"pad": {"ok": True, "ready": True, "reason": ""}},
+            "generation_params": {"modes": [{"value": "videoEdit",
+                                             "duration": {"min": 2, "max": 30}}]}}
+    web_app._apply_upload_gate(info, case, "videoEdit")
+    assert info["upload_gate"] == {"ready": True, "reason": ""}
+
+
+def test_upload_gate_uses_pad_reason_before_padding(client, tmp_path, fullredraw_case):
+    case = case_mod.load("f1", tmp_path)
+    info = {"gates": {"pad": {"ok": False, "ready": True,
+                              "reason": "还没有扩充过画面；先扩充，生成步才可用"}},
+            "generation_params": {"modes": []}}
+    web_app._apply_upload_gate(info, case, "videoEdit")
+    assert info["upload_gate"]["ready"] is False
+    assert "扩充" in info["upload_gate"]["reason"]
+
+
+def test_upload_gate_blocks_when_pad_file_is_gone(client, tmp_path, fullredraw_case):
+    (case_mod.case_dir("f1", tmp_path) / "seedance_input.mp4").unlink()
+    case = case_mod.load("f1", tmp_path)
+    info = {"gates": {"pad": {"ok": True, "ready": True, "reason": ""}},
+            "generation_params": {"modes": [{"value": "videoEdit",
+                                             "duration": {"min": 2, "max": 30}}]}}
+    web_app._apply_upload_gate(info, case, "videoEdit")
+    assert info["upload_gate"]["ready"] is False
+    assert "重新扩充" in info["upload_gate"]["reason"]
+
+
 def test_keyframe_gate_states(client, patch_case, tmp_path, monkeypatch):
     _keyframe_ready(tmp_path, monkeypatch)
     info = client.get("/api/case/p1").json()
