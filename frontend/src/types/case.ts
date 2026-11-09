@@ -64,6 +64,13 @@ export interface CreateCasePayload {
   mode?: string
 }
 
+/** 上传源文件的落点：同名同内容时复用已有文件，同名不同内容时自动改号。 */
+export interface CreatedSource {
+  name: string
+  reused: boolean
+  renamed_from: string | null
+}
+
 export interface AssetRow {
   id: string
   name: string

@@ -2153,6 +2153,8 @@ async def api_cases(request):
     what = "源图片" if image_flow else "源视频"
     raw_source = str(body.get("video") or "")
     upload_id = str(body.get("upload_id") or "")
+    upload_stem: str | None = None
+    source_info: dict | None = None
     if raw_source and upload_id:
         return JSONResponse({"error": "upload_id 与源文件只能二选一"}, status_code=400)
     if upload_id:
@@ -2166,16 +2168,24 @@ async def api_cases(request):
             return JSONResponse(
                 {"error": f"{what}必须是 {' / '.join(sorted(exts))} 之一"},
                 status_code=400)
+        meta = _upload_meta(upload_dirs[0])
         target = sources_dir() / uploaded.name
-        if target.exists():
-            return JSONResponse(
-                {"error": f"sources/ 里已有同名文件：{uploaded.name}，请重命名后重新上传"},
-                status_code=409)
+        reused = _same_content(target, meta)
+        renamed_from = None
+        final_name = uploaded.name
+        if not reused and target.exists():
+            renamed_from = uploaded.name
+            final_name = _free_source_name(uploaded.name)
         sources_dir().mkdir(parents=True, exist_ok=True)
-        shutil.move(str(uploaded), str(target))
+        if not reused:
+            shutil.move(str(uploaded), str(sources_dir() / final_name))
+        # 成功、复用、改号三条路都要清掉会话；失败时才留给 24 小时 TTL。
         for directory in upload_dirs:
             shutil.rmtree(directory, ignore_errors=True)
-        raw_source = uploaded.name
+        raw_source = final_name
+        upload_stem = uploaded.stem
+        source_info = {"name": final_name, "reused": reused,
+                       "renamed_from": renamed_from}
     source = sources_dir() / Path(raw_source).name if raw_source else None
     mode = body.get("mode")
     if flow == "gen":
@@ -2192,7 +2202,7 @@ async def api_cases(request):
     elif flow != "relight" and (source is None or not source.is_file()):
         return JSONResponse({"error": f"sources/ 里没有这个{what}"}, status_code=400)
 
-    name = str(body.get("name") or (source.stem if source else "")).strip()
+    name = str(body.get("name") or (upload_stem or (source.stem if source else ""))).strip()
     if not name:
         return JSONResponse({"error": "必须填写 case 名"}, status_code=400)
     n = w = 0
@@ -2228,7 +2238,8 @@ async def api_cases(request):
                 {"error": f"case 已创建，但模式没保存：{error}",
                  "name": name, "created": True}, status_code=502)
     return JSONResponse({"name": case.name, "flow": flow,
-                         "fps": round(fps, 3), "width": w})
+                         "fps": round(fps, 3), "width": w,
+                         "source": source_info})
 
 
 def _last_activity(case: case_mod.Case) -> tuple[str | None, float]:
@@ -2390,12 +2401,12 @@ def _apply_mode_gate(info: dict, case: case_mod.Case, mode: str | None) -> None:
 
 
 async def _delete_case(request, name: str):
-    """删除 case 目录与 vrgen 台账；sources/ 与 logs/ 不动。
+    """删除 case 目录与 vrgen 台账；sources/ 里的源只在无人引用时回收。
 
     不可逆，所以两道闸门：case 被他人占用、或有运行中/排队任务时拒绝。
     """
     try:
-        await asyncio.to_thread(case_mod.load, name, _ctx["cases_root"])
+        case = await asyncio.to_thread(case_mod.load, name, _ctx["cases_root"])
     except CaseError:
         return JSONResponse({"error": "no such case"}, status_code=404)
     lock = _locks().read(name)
@@ -2412,6 +2423,7 @@ async def _delete_case(request, name: str):
         await asyncio.to_thread(case_mod.delete, name, _ctx["cases_root"])
     except CaseError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
+    reclaimed = await asyncio.to_thread(_reclaim_source, case)
     if run_dir.is_dir():
         try:
             await asyncio.to_thread(shutil.rmtree, run_dir)
@@ -2419,7 +2431,38 @@ async def _delete_case(request, name: str):
             return JSONResponse(
                 {"error": f"case 目录已删，但 vrgen 台账删不掉：{exc}"},
                 status_code=500)
-    return JSONResponse({"deleted": name})
+    return JSONResponse({"deleted": name, "source_reclaimed": reclaimed})
+
+
+def _reclaim_source(case: case_mod.Case) -> str | None:
+    """删 case 后回收它的源文件：只有无人引用且位于 sources/ 下时才移到 .trash。
+
+    共用源（其他 case 仍引用同一路径）一律不动；移动失败只当作未回收，不影响
+    已经完成的删除。
+    """
+    source = case_mod.source_file(case)
+    if source is None or not source.is_file():
+        return None
+    root = sources_dir().resolve()
+    try:
+        source.resolve().relative_to(root)
+    except ValueError:
+        return None
+    if case_mod.source_references(_ctx["cases_root"]).get(case_mod.source_key(source)):
+        return None
+    trash = root / ".trash"
+    trash.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    target = trash / f"{source.stem}-{stamp}{source.suffix}"
+    n = 1
+    while target.exists():
+        n += 1
+        target = trash / f"{source.stem}-{stamp}-{n}{source.suffix}"
+    try:
+        shutil.move(str(source), str(target))
+    except OSError:
+        return None
+    return str(target)
 
 
 async def api_case(request):
@@ -2732,6 +2775,28 @@ def _uploaded_paths(upload_ids: list[str]) -> tuple[list[Path], list[Path]]:
         paths.append(path)
         dirs.append(directory)
     return paths, dirs
+
+
+def _same_content(path: Path, meta: dict) -> bool:
+    """``path`` 与上传件字节一致：先比大小，一致再比会话里已算好的 sha256。"""
+    sha256 = str(meta.get("sha256") or "")
+    if not sha256 or not path.is_file():
+        return False
+    try:
+        if path.stat().st_size != int(meta.get("size") or -1):
+            return False
+    except OSError:
+        return False
+    return case_mod.file_sha256(path) == sha256
+
+
+def _free_source_name(name: str) -> str:
+    """``<stem> (1)<ext>`` 起，取 sources/ 里第一个空闲的名字。"""
+    p = Path(name)
+    n = 1
+    while (sources_dir() / f"{p.stem} ({n}){p.suffix}").exists():
+        n += 1
+    return f"{p.stem} ({n}){p.suffix}"
 
 
 async def api_assets(request):

@@ -1,4 +1,10 @@
-import type { CaseBrief, CreateCasePayload, ModesResponse, SourcesResponse } from '@/types/case'
+import type {
+  CaseBrief,
+  CreateCasePayload,
+  CreatedSource,
+  ModesResponse,
+  SourcesResponse,
+} from '@/types/case'
 import { deleteJson, getJson, postJson } from './client'
 
 export function fetchCases(): Promise<CaseBrief[]> {
@@ -15,11 +21,18 @@ export function fetchModes(): Promise<ModesResponse> {
 
 export function createCaseRequest(
   payload: CreateCasePayload,
-): Promise<{ name: string; created?: boolean }> {
-  return postJson<{ name: string; created?: boolean }>('/api/cases', payload)
+): Promise<{ name: string; created?: boolean; source?: CreatedSource | null }> {
+  return postJson<{ name: string; created?: boolean; source?: CreatedSource | null }>(
+    '/api/cases',
+    payload,
+  )
 }
 
 /** 删除 case：服务端清掉 cases/<name>/ 与 vrgen_runs/<name>/。不可恢复。 */
-export function deleteCaseRequest(name: string): Promise<{ deleted: string }> {
-  return deleteJson<{ deleted: string }>(`/api/case/${encodeURIComponent(name)}`)
+export function deleteCaseRequest(
+  name: string,
+): Promise<{ deleted: string; source_reclaimed?: string | null }> {
+  return deleteJson<{ deleted: string; source_reclaimed?: string | null }>(
+    `/api/case/${encodeURIComponent(name)}`,
+  )
 }

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import tomllib
@@ -281,6 +282,40 @@ def create(name: str, flow: str, source: str | Path | None = None,
 
 
 # ── 删除 ─────────────────────────────────────────────────────────────────
+
+
+def source_references(root: str | Path | None = None) -> dict[str, list[str]]:
+    """``[source] path`` → 引用它的 case 名，供源文件回收判断。
+
+    只直读 toml，不走 ``load``：一个坏 case 不该让别人的删除失败，这里也不需要
+    校验、迁移或 sha256。路径统一经 ``_stored_path`` 解析后按真实路径归一。
+    """
+    refs: dict[str, list[str]] = {}
+    for path in sorted(cases_root(root).glob("*/case.toml")):
+        try:
+            raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        source = raw.get("source")
+        if not isinstance(source, dict):
+            continue
+        raw_path = str(source.get("path") or "").strip()
+        if not raw_path:
+            continue
+        refs.setdefault(source_key(_stored_path(raw_path)), []).append(path.parent.name)
+    return refs
+
+
+def source_key(path: str | Path) -> str:
+    """同一个源文件的不同写法归一到同一个键（Windows 下大小写不敏感）。"""
+    return os.path.normcase(str(Path(path).resolve()))
+
+
+def source_file(case: Case) -> Path | None:
+    """case 的源文件真实路径；没有源时 None。回收与诊断共用同一解析。"""
+    if not case.source_path:
+        return None
+    return _stored_path(case.source_path)
 
 
 def delete(name: str, root: str | Path | None = None) -> Path:

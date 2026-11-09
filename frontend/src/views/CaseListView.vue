@@ -209,7 +209,13 @@ async function createCase(): Promise<void> {
     })
     createOpen.value = false
     lastUploaded.value = null
-    ElMessage.success(`已创建 ${result.name}`)
+    const source = result.source
+    const suffix = source?.reused
+      ? `；已复用 sources/ 里内容相同的 ${source.name}`
+      : source?.renamed_from
+        ? `；${source.renamed_from} 已另存为 ${source.name}`
+        : ''
+    ElMessage.success(`已创建 ${result.name}${suffix}`)
     await loadCases()
     const next = nextStepForFlow(form.flow, {})
     router.push({ name: 'case', params: { name: result.name, step: next.key } })
@@ -237,7 +243,8 @@ async function removeCase(row: CaseRow): Promise<void> {
   }
   try {
     await ElMessageBox.confirm(
-      `将删除 cases/${row.name}/ 与 vrgen_runs/${row.name}/ 下的全部文件，不可恢复。`,
+      `将删除 cases/${row.name}/ 与 vrgen_runs/${row.name}/ 下的全部文件，不可恢复。` +
+        '源文件若没有其他 case 使用，会移到 sources/.trash/。',
       `删除 case「${row.name}」`,
       {
         type: 'warning',
@@ -251,8 +258,12 @@ async function removeCase(row: CaseRow): Promise<void> {
   }
   deleting.value = row.name
   try {
-    await deleteCaseRequest(row.name)
-    ElMessage.success(`已删除 ${row.name}`)
+    const result = await deleteCaseRequest(row.name)
+    ElMessage.success(
+      result.source_reclaimed
+        ? `已删除 ${row.name}；源文件已移入 sources/.trash/`
+        : `已删除 ${row.name}`,
+    )
     await loadCases()
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : '删除 case 失败')
