@@ -167,7 +167,7 @@ def _merge_image(case, cases_dir, *, feather: int, levels: int,
         raise typer.Exit(f"merge: 缺 {geometry_path.name}——重跑 extract")
     if not result_path.is_file():
         raise typer.Exit(
-            f"merge: 没有采用的结果（{result_path} 不存在）——先 "
+            f"merge: 没有已采用的生成结果（{result_path} 不存在）——先 "
             f"`vrstudio generate adopt --case {case.name} --index N`")
     src = case_mod.check_source(case, cases_dir)
     try:

@@ -205,7 +205,7 @@ describe('MergeStep 拼接输入（fullRedrawImg）', () => {
   it('clears the pointer back to the generated result', async () => {
     vi.mocked(setMergeInput).mockClear()
     const wrapper = await mountImage('i1')
-    await button(wrapper, '改用采用结果').trigger('click')
+    await button(wrapper, '改用已采用的生成结果').trigger('click')
     await flushPromises()
     expect(setMergeInput).toHaveBeenCalledWith('p1', null)
     wrapper.unmount()
@@ -406,7 +406,7 @@ describe('MergeStep 拼接输入（fullredraw 视频）', () => {
   it('clears the pointer back to the adopted result', async () => {
     vi.mocked(setMergeInput).mockClear()
     const wrapper = await mountVideo('v1')
-    await button(wrapper, '改用采用结果').trigger('click')
+    await button(wrapper, '改用已采用的生成结果').trigger('click')
     await flushPromises()
     expect(setMergeInput).toHaveBeenCalledWith('p1', null)
     wrapper.unmount()

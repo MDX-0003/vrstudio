@@ -29,7 +29,7 @@ const hint = computed(() => {
       '重建投影；比例不一致会被合并拒绝，除非勾选允许裁切。'
     )
   }
-  const source = current.value ? current.value.name : '生成步采用的结果'
+  const source = current.value ? current.value.name : '生成步已采用的生成结果'
   if (props.kind === 'image') {
     return (
       `拼接输入：${source}。外部改完的 21:9 画布图可以直接上传并选中；` +
@@ -66,7 +66,7 @@ function onUploaded(data: CaseInfo): void {
   <div class="merge-input">
     <div class="merge-input-actions">
       <span class="merge-input-label mono">
-        {{ current ? current.name : '采用结果（该版本 result.mp4）' }}
+        {{ current ? current.name : '已采用的生成结果（该版本 result.mp4）' }}
       </span>
       <el-button size="small" :icon="Upload" @click="uploadOpen = true">
         上传并用作拼接输入
@@ -76,9 +76,9 @@ function onUploaded(data: CaseInfo): void {
         link
         type="primary"
         :loading="switching"
-        @click="apply(null, '已改用采用结果')"
+        @click="apply(null, '已切回已采用的生成结果')"
       >
-        改用采用结果
+        改用已采用的生成结果
       </el-button>
     </div>
     <p class="merge-input-hint muted">{{ hint }}</p>

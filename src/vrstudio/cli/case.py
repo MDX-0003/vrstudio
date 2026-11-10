@@ -304,4 +304,4 @@ def show(
         adopt += f"  index={case.adopt_index}"
     typer.echo(f"adopt    {adopt}")
     if case.flow == "fullRedrawImg":
-        typer.echo(f"merge    {case.merge_input or '(用采用结果)'}")
+        typer.echo(f"merge    {case.merge_input or '(用已采用的生成结果)'}")

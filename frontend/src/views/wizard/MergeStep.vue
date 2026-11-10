@@ -67,7 +67,7 @@ const mergeReady = computed(
 const mergeBlockReason = computed(() => {
   if (!mergeRanges.value.length) return '还没有抽取记录；先去抽取页跑一次。'
   if (!selectedExtract.value) return '先选一个抽取版本。'
-  if (!mergeReady.value) return '这个版本没有采用结果，先上传外部视口视频。'
+  if (!mergeReady.value) return '这个版本没有已采用的生成结果，先上传外部视口视频。'
   return ''
 })
 
@@ -355,7 +355,7 @@ watch(latest, async (task) => {
                 :key="version.version"
                 :time="version.version"
                 :geometry="versionMeta(version)"
-                :meta="version.has_result ? '有采用结果' : '无采用结果'"
+                :meta="version.has_result ? '有已采用的生成结果' : '无已采用的生成结果'"
                 :tags="mergeTags(version)"
                 :selected="version.version === selectedExtract"
                 selectable
@@ -449,7 +449,7 @@ watch(latest, async (task) => {
               v-if="recomposeGate && !recomposeGate.ready"
               type="warning"
               :closable="false"
-              :title="recomposeGate.reason || '先采用一次生成结果'"
+              :title="recomposeGate.reason || '先有一个已采用的生成结果'"
               class="gate-alert"
             />
             <div class="file-group">

@@ -1826,7 +1826,7 @@ def _gates(case: case_mod.Case, extracts: list[dict],
             "merge": {"ok": has_out,
                       "ready": extracted and (adopted or case.merge_input is not None),
                       "reason": "" if has_out else
-                      "先在合并页选一个抽取版本，并采用结果或上传外部视口视频",
+                      "先在合并页选一个抽取版本，并确认它有已采用的生成结果，或上传外部视口视频",
                       "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}；每次合并都会覆盖同名文件{partial_note}"},
             "compare": {"ok": has_out, "reason": "" if has_out else "合并出片后可以在这里对比",
                         "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}{partial_note}"},
@@ -1876,13 +1876,13 @@ def _gates(case: case_mod.Case, extracts: list[dict],
                                  f"这一步已完成；再点一次按钮会重新扩充并覆盖它"
                                  ) if padded else ""},
             "generate": {"ok": result_file, "ready": padded,
-                         "reason": "" if result_file else "先送生成，并采用一次结果",
+                         "reason": "" if result_file else "先送生成，并采用一轮生成结果",
                          "evidence": (f"在 {cdir}\\result.mp4 检测到已选用的结果"
                                       f"（来自 Session {case.adopt_round}）；想换一个，回到上面点别的「选用」"
                                       if result_file else "")},
             "recompose": {"ok": has_out, "ready": recompose_ready,
                           "reason": "" if has_out else
-                          "采用结果后才能裁回原尺寸；也可以在下方上传或选择一份 21:9 画布视频",
+                          "有已采用的生成结果后才能裁回原尺寸；也可以在下方上传或选择一份 21:9 画布视频",
                           "evidence": f"在 {cdir}\\out\\ 检测到成片：{out_names}；每次裁回都会覆盖同名文件"},
             "compare": {"ok": has_out,
                         "reason": "" if has_out else "裁回原尺寸出片后，在这里对比",
@@ -1957,7 +1957,7 @@ def _gates(case: case_mod.Case, extracts: list[dict],
                              f"顺序与角色已写入 case.toml" if assets_ok else ""),
             },
             "generate": {"ok": result_file, "ready": assets_ok,
-                         "reason": "" if result_file else "填好提示词和分辨率后提交生成，并采用一轮结果",
+                         "reason": "" if result_file else "填好提示词和分辨率后提交生成，并采用一轮生成结果",
                          "evidence": (f"在 {cdir}\\result.mp4 检测到已选用的结果"
                                       f"（来自 Session {case.adopt_round}）；想换一个，回到上面点别的「选用」"
                                       if result_file else "")},
@@ -4192,7 +4192,7 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
         input_path = case.merge_input_file(_ctx["cases_root"]) or result
         if not input_path.is_file():
             raise CaseError(
-                "还没有裁回输入：先在「生成」里采用一轮结果，"
+                "还没有裁回输入：先在「生成」里采用一轮生成结果，"
                 "或上传/选择一份 21:9 画布视频作为拼接输入")
         out = cdir / "out" / (case.adopt_round or "result")
         argv = vrstudio_argv("recompose", "--in", str(input_path),
