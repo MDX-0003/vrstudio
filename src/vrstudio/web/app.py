@@ -4578,28 +4578,24 @@ class NoStoreMiddleware:
         await self.app(scope, receive, send_wrapper)
 
 
-#: 需要 revision 检查的写端点。几何高频接口（viewport/inner/nudge）不在这里，
-#: 否则每次拖框都会让另一页的提示词保存撞 409。
+#: 需要 revision 检查的写端点：只覆盖会改 case.toml 的显式保存。
+#: 几何端点（viewport/inner/nudge/viewport-size/pick-draft）写的是
+#: derived/pick/draft.toml，高频且按最后写入者胜出，不参与 revision，
+#: 否则快速点选时多个请求拿同一 revision 会互相撞 409。
 _REVISION_WRITES = re.compile(
     r"^/api/case/(?P<name>[^/]+)/"
     r"(?:range-presets(?:/[^/]+(?:/(?:save|load))?)?|prompt|params|assets|submit|"
     r"owner|keyframe/(?:prompt|refs|pick|handoff))$"
 )
 
-#: 几何高频写端点：拖动帧不带 revision 头，照旧放行不推进 revision；
-#: 落定帧（拖拽结束后的最后一次）带头时做可选校验，一致才落盘并推进。
-#: 没有这层，几何草稿就是纯粹的最后写入者胜出，会静默覆盖别人的草稿。
-_REVISION_GEOMETRY = re.compile(
-    r"^/api/case/(?P<name>[^/]+)/(?:viewport|inner|nudge|viewport-size|pick-draft)$"
-)
-
 
 class CaseRevisionMiddleware:
-    """可选 revision 的乐观并发检查。
+    """可选 revision 的乐观并发检查，只守护 case.toml 的显式保存。
 
     客户端带 ``X-Case-Revision``（或 JSON 里的 ``revision``）时，与
     ``case-meta.json`` 的当前值比较；不一致返回 409。写成功以后自动加一。
     老前端不传 revision，照旧写入，只是没有冲突保护。
+    几何草稿写 draft，不在这里检查也不推进 revision。
     """
 
     def __init__(self, app):
@@ -4611,8 +4607,7 @@ class CaseRevisionMiddleware:
             return
         method = scope["method"].upper()
         match = _REVISION_WRITES.match(scope["path"])
-        geometry = _REVISION_GEOMETRY.match(scope["path"])
-        if not match and not geometry:
+        if not match:
             await self.app(scope, receive, send)
             return
         if method in ("GET", "HEAD", "OPTIONS"):
@@ -4620,13 +4615,9 @@ class CaseRevisionMiddleware:
             return
 
         request = Request(scope, receive)
-        name = (match or geometry).group("name")
+        name = match.group("name")
         expected: int | None = None
         raw = request.headers.get("x-case-revision")
-        if geometry and raw in (None, ""):
-            # 几何拖动帧：不带头不打断。
-            await self.app(scope, receive, send)
-            return
         body = b""
         if raw not in (None, ""):
             try:

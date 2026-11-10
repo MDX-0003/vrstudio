@@ -92,6 +92,22 @@ describe('api client', () => {
     expect(headers['X-Case-Revision']).toBeUndefined()
   })
 
+  it('几何请求不带 revision，显式保存仍然带', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse({})))
+    vi.stubGlobal('fetch', fetchMock)
+    rememberRevision('geo-case', 7)
+
+    await postJson('/api/case/geo-case/viewport', { fx: 0.5, fy: 0.5 })
+    const geometryHeaders = fetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>
+    expect(geometryHeaders['X-Case-Revision']).toBeUndefined()
+
+    await postJson('/api/case/geo-case/range-presets', {})
+    const saveHeaders = fetchMock.mock.calls[1]?.[1]?.headers as Record<string, string>
+    expect(saveHeaders['X-Case-Revision']).toBe('7')
+
+    forgetRevision('geo-case')
+  })
+
   it('bounds the revision cache', async () => {
     for (let index = 0; index < 101; index += 1) rememberRevision(`rev-${index}`, index)
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({}))

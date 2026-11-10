@@ -44,9 +44,16 @@ function caseNameOf(path: string): string | null {
   return match ? decodeURIComponent(match[1]) : null
 }
 
+/** 几何草稿写 derived/pick/draft.toml：高频、最后写入者胜出，不带 case revision。 */
+function isGeometryPath(path: string): boolean {
+  return /^\/api\/case\/[^/]+\/(?:viewport|inner|nudge|viewport-size|pick-draft|region\/import)(?:\?|$)/.test(
+    path,
+  )
+}
+
 function withRevision(path: string, base: Record<string, string>): Record<string, string> {
   const name = caseNameOf(path)
-  if (name && revisions.has(name)) {
+  if (name && revisions.has(name) && !isGeometryPath(path)) {
     return { ...base, 'X-Case-Revision': String(revisions.get(name)) }
   }
   return base
