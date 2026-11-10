@@ -945,6 +945,7 @@ def test_gates_progress_with_extract_and_result(client, patch_case, tmp_path):
         assert info["gates"][step]["ok"] is True
     assert info["gates"]["merge"]["ready"] is True
     assert info["extracts"][0]["version"] == "v1" and info["extracts"][0]["has_result"]
+    assert info["extracts"][0]["extracted_at"]
 
 
 # ── 提示词模板与变量（决策 18；vrgen 侧用假 JSON 通道替身）────────────────

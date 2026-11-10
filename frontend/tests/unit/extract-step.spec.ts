@@ -45,11 +45,16 @@ const LinkStub = defineComponent({
   template: '<a :href="href" :target="target"><slot /></a>',
 })
 
+const TagStub = defineComponent({
+  props: { type: String, size: String, effect: String },
+  template: '<span class="tag-stub"><slot /></span>',
+})
+
 const stubs = {
   'el-button': ButtonStub,
   'el-alert': true,
   'el-empty': true,
-  'el-tag': true,
+  'el-tag': TagStub,
   'el-link': LinkStub,
   'el-icon': true,
 }
@@ -81,6 +86,7 @@ function pickInfo(): CaseInfo {
     viewport,
     inner,
     frames,
+    extract_current: 'v1',
     pick: {
       draft: { viewport, inner, frames, updated_at: '2026-11-09T17:05:00+08:00' },
       active: 'r1',
@@ -100,6 +106,7 @@ function pickInfo(): CaseInfo {
       {
         version: 'v1',
         extracted: true,
+        extracted_at: '2026-11-10T09:20:00+08:00',
         has_result: true,
         viewport,
         inner,
@@ -123,9 +130,9 @@ function task(status: string, createdOffsetMs = 0): TaskView {
   } as unknown as TaskView
 }
 
-async function mountStep() {
+async function mountStep(overrides: Partial<CaseInfo> = {}) {
   const wrapper = mount(ExtractStep, {
-    props: { caseName: 'p1', info: info() },
+    props: { caseName: 'p1', info: { ...info(), ...overrides } },
     global: { stubs },
   })
   await flushPromises()
@@ -234,18 +241,18 @@ describe('ExtractStep 完成刷新（2026-10-26 陈旧文件列表修复）', ()
   })
 
   it('shows the running state from the task list, not from a local click flag', async () => {
-    const wrapper = await mountStep()
+    const wrapper = await mountStep(pickInfo())
     const runBtn = () => wrapper.findAll('button').find((item) => item.text().includes('抽取'))!
 
-    expect(runBtn().attributes('disabled')).toBeUndefined()
+    expect((runBtn().element as HTMLButtonElement).disabled).toBe(false)
 
     tasksState.setLatest(task('running'))
     await flushPromises()
-    expect(runBtn().attributes('disabled')).toBeDefined()
+    expect((runBtn().element as HTMLButtonElement).disabled).toBe(true)
 
     tasksState.setLatest(task('done'))
     await flushPromises()
-    expect(runBtn().attributes('disabled')).toBeUndefined()
+    expect((runBtn().element as HTMLButtonElement).disabled).toBe(false)
     wrapper.unmount()
   })
 })
@@ -258,25 +265,32 @@ describe('ExtractStep 保存的范围与只读版本', () => {
       global: { stubs },
     })
     await flushPromises()
-    expect(wrapper.findAll('.range-row')).toHaveLength(2)
+    expect(wrapper.findAll('.range-row')).toHaveLength(1)
+    expect(wrapper.findAll('.version-card')).toHaveLength(1)
     await wrapper
       .findAll('button')
-      .find((item) => item.text().includes('运行抽取'))!
+      .find((item) => item.text().includes('抽取'))!
       .trigger('click')
     await flushPromises()
     expect(runOperation).toHaveBeenCalledWith('p1', 'extract', { preset: 'r1' })
     wrapper.unmount()
   })
 
-  it('marks the latest extract and does not make version rows selectable', async () => {
+  it('shows extract time, matched range time and geometry in the version card', async () => {
     const wrapper = mount(ExtractStep, {
       props: { caseName: 'p1', info: pickInfo() },
       global: { stubs },
     })
     await flushPromises()
-    const text = wrapper.text()
-    expect(text).toContain('最新')
-    expect(wrapper.findAll('.version-row.selectable')).toHaveLength(0)
+    const card = wrapper.find('.version-card')
+    expect(card.exists()).toBe(true)
+    expect(card.text()).toContain('最新')
+    expect(card.text()).toContain('抽取于')
+    expect(card.text()).toContain('对应范围')
+    expect(card.text()).toContain('最近保存')
+    expect(card.text()).toContain('yaw 10.0°')
+    expect(card.text()).toContain('x80 y40 · 160×100 · 帧 0–5')
+    expect(wrapper.findAll('.version-card .range-row')).toHaveLength(0)
     wrapper.unmount()
   })
 })

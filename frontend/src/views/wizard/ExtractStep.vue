@@ -10,7 +10,7 @@ import type { RangeTag } from '@/components/range/types'
 import { useCaseTasks } from '@/composables/useCaseTasks'
 import { taskStatusMeta } from '@/constants/taskStatus'
 import { formatSize } from '@/utils/format'
-import { formatRangeTime, geometrySummary, presetSummary, sameGeometry } from '@/utils/range'
+import { formatRangeTime, presetSummary, sameGeometry } from '@/utils/range'
 import type { CaseInfo, ExtractVersion, FileInfo, RangePreset } from '@/types/case-info'
 
 const props = defineProps<{ caseName: string; info: CaseInfo }>()
@@ -35,7 +35,6 @@ const running = computed(() => {
 const mountedAt = Date.now()
 
 const pickGate = computed(() => props.info.gates.pick)
-const extractGate = computed(() => props.info.gates.extract)
 const outputs = computed<FileInfo[]>(() => props.info.step_files.extract?.outputs ?? [])
 const current = computed(() => props.info.extract_current)
 const presets = computed(() => props.info.pick?.presets ?? [])
@@ -53,14 +52,9 @@ function presetTags(preset: RangePreset): RangeTag[] {
   return preset.id === selectedPresetId.value ? [{ text: '本次抽取', kind: 'current' }] : []
 }
 
-function versionGeometry(item: ExtractVersion): string {
-  if (!item.viewport || !item.inner) return ''
-  return geometrySummary(item.viewport, item.inner, item.frames ?? null)
-}
-
-function versionPresetLabel(item: ExtractVersion): string {
-  if (!item.viewport || !item.inner) return '仅抽取记录'
-  const match = presets.value.find((preset) =>
+function matchingPresets(item: ExtractVersion): RangePreset[] {
+  if (!item.viewport || !item.inner) return []
+  return presets.value.filter((preset) =>
     sameGeometry(
       preset.viewport,
       preset.inner,
@@ -70,13 +64,56 @@ function versionPresetLabel(item: ExtractVersion): string {
       item.frames ?? null,
     ),
   )
-  return match ? `与 ${formatRangeTime(match.created_at)} 的范围相同` : '仅抽取记录'
+}
+
+/** 多条 preset 几何相同时，取最近保存的那条做展示。 */
+function matchingPreset(item: ExtractVersion): RangePreset | null {
+  return (
+    [...matchingPresets(item)].sort(
+      (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
+    )[0] ?? null
+  )
+}
+
+function versionPresetText(item: ExtractVersion): string {
+  if (!item.viewport || !item.inner) return '仅抽取记录'
+  const matches = matchingPresets(item)
+  const match = matchingPreset(item)
+  if (!match) return '未匹配到当前保存的范围（可能已修改或删除）'
+  const suffix = matches.length > 1 ? `（同几何 ${matches.length} 条）` : ''
+  return `${formatRangeTime(match.updated_at)} 最近保存${suffix}`
+}
+
+function versionViewport(item: ExtractVersion): string {
+  const vp = item.viewport
+  if (!vp) return '—'
+  return (
+    `yaw ${vp.yaw_deg.toFixed(1)}° · pitch ${vp.pitch_deg.toFixed(1)}° · ` +
+    `fov ${vp.fov_h_deg.toFixed(1)}°`
+  )
+}
+
+function versionInner(item: ExtractVersion): string {
+  const inner = item.inner
+  if (!inner) return '—'
+  return `x${inner.x} y${inner.y} · ${inner.width}×${inner.height}`
+}
+
+function versionFrames(item: ExtractVersion): string {
+  return item.frames ? `帧 ${item.frames.start}–${item.frames.end}` : '无时间范围'
+}
+
+function versionExtractedAt(item: ExtractVersion): string {
+  return item.extracted_at ? formatRangeTime(item.extracted_at) : '未知'
 }
 
 function versionTags(item: ExtractVersion): RangeTag[] {
   const tags: RangeTag[] = []
   if (item.version === current.value) tags.push({ text: '最新', kind: 'current' })
   tags.push(item.has_result ? { text: '有结果', kind: 'ok' } : { text: '无结果', kind: 'warn' })
+  if (item.viewport && item.inner && !matchingPreset(item)) {
+    tags.push({ text: '范围已变', kind: 'warn' })
+  }
   return tags
 }
 
@@ -178,8 +215,19 @@ watch(
   <div class="ex-page">
     <section class="panel">
       <div class="panel-head">
-        <h2 class="panel-title">保存的范围</h2>
-        <span class="muted">点击选择本次抽取的范围</span>
+        <div>
+          <h2 class="panel-title">保存的范围</h2>
+          <span class="muted">点击选择本次抽取的范围</span>
+        </div>
+        <el-button
+          type="primary"
+          :icon="VideoPlay"
+          :loading="running"
+          :disabled="!selectedPresetId || Boolean(pickGate && !pickGate.ok)"
+          @click="runExtract"
+        >
+          抽取选中范围
+        </el-button>
       </div>
       <div class="panel-body">
         <div v-if="!presets.length" class="muted">先在选区页保存一条范围。</div>
@@ -200,6 +248,12 @@ watch(
         </div>
         <p class="range-summary muted">本次抽取：{{ selectedSummary || '未选择' }}</p>
         <el-alert
+          v-if="pickGate && !pickGate.ok"
+          type="warning"
+          :closable="false"
+          :title="pickGate.reason || '先保存一条完整范围'"
+        />
+        <el-alert
           v-if="info.pick?.dirty"
           type="warning"
           :closable="false"
@@ -208,46 +262,12 @@ watch(
       </div>
     </section>
 
-    <section class="panel">
-      <div class="panel-body">
-        <div class="ex-bar">
-          <div>
-            <div class="ex-label">最新版本</div>
-            <div class="ex-value mono">{{ current || '还没有' }}</div>
-          </div>
-          <div class="ex-divider" />
-          <span class="ex-gate" :class="pickGate?.ok ? 'ok' : 'todo'">
-            {{ pickGate?.ok ? '✓ 选区已保存' : '选区未完成' }}
-          </span>
-          <span class="ex-gate" :class="extractGate?.ok ? 'ok' : 'todo'">
-            {{ extractGate?.ok ? '✓ 抽取已完成' : '抽取未完成' }}
-          </span>
-          <span class="spacer" />
-          <el-button
-            type="primary"
-            size="large"
-            :icon="VideoPlay"
-            :loading="running"
-            :disabled="Boolean(pickGate && !pickGate.ok)"
-            @click="runExtract"
-          >
-            {{ current ? '重新抽取' : '运行抽取' }}
-          </el-button>
-        </div>
-        <el-alert
-          v-if="pickGate && !pickGate.ok"
-          type="warning"
-          :closable="false"
-          :title="pickGate.reason || '先完成选区'"
-          class="ex-alert"
-        />
-      </div>
-    </section>
-
-    <section class="panel">
+    <section class="panel ex-products-panel">
       <div class="panel-head">
-        <h2 class="panel-title">本次产物</h2>
-        <span class="muted">版本目录保留旧结果，不覆盖</span>
+        <h2 class="panel-title">最新抽取产物</h2>
+        <span class="muted">
+          {{ current ? `版本 ${current}` : '还没有' }} · 版本目录保留旧结果，不覆盖
+        </span>
       </div>
       <div class="panel-body">
         <div v-if="outputs.length" class="ex-products">
@@ -359,15 +379,45 @@ watch(
         </div>
         <div class="panel-body version-list">
           <div v-if="!info.extracts.length" class="muted">还没有可用版本。</div>
-          <RangeRow
-            v-for="item in info.extracts"
-            :key="item.version"
-            :time="item.version"
-            :geometry="versionGeometry(item)"
-            :meta="versionPresetLabel(item)"
-            :tags="versionTags(item)"
-          />
-          <p class="muted ex-note">切换版本会同时切换首尾原始帧与后续步骤的输入；旧版本不清除。</p>
+          <article v-for="item in info.extracts" :key="item.version" class="version-card">
+            <div class="version-head">
+              <span class="version-id mono">{{ item.version }}</span>
+              <span class="version-tags">
+                <el-tag
+                  v-for="tag in versionTags(item)"
+                  :key="tag.text"
+                  size="small"
+                  effect="light"
+                  :type="
+                    tag.kind === 'ok' ? 'success' : tag.kind === 'warn' ? 'warning' : 'primary'
+                  "
+                >
+                  {{ tag.text }}
+                </el-tag>
+              </span>
+            </div>
+            <dl class="version-facts">
+              <div>
+                <dt>抽取于</dt>
+                <dd class="mono">{{ versionExtractedAt(item) }}</dd>
+              </div>
+              <div>
+                <dt>对应范围</dt>
+                <dd>{{ versionPresetText(item) }}</dd>
+              </div>
+              <div>
+                <dt>视口</dt>
+                <dd class="mono">{{ versionViewport(item) }}</dd>
+              </div>
+              <div>
+                <dt>选区</dt>
+                <dd class="mono">{{ versionInner(item) }} · {{ versionFrames(item) }}</dd>
+              </div>
+            </dl>
+          </article>
+          <p class="muted ex-note">
+            列表只读；最新一版仍供生成与首尾帧使用，旧版本不清除。合并页可单独选择本次使用的版本。
+          </p>
         </div>
       </section>
 
@@ -409,48 +459,6 @@ watch(
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
-}
-
-.ex-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-3);
-}
-
-.ex-label {
-  color: var(--color-text-muted);
-  font-size: var(--text-xs);
-}
-
-.ex-value {
-  font-size: var(--text-lg);
-  font-weight: 600;
-}
-
-.ex-divider {
-  width: 1px;
-  height: 32px;
-  background: var(--color-border);
-}
-
-.ex-gate {
-  display: inline-flex;
-  align-items: center;
-  height: 26px;
-  padding: 0 10px;
-  border-radius: 999px;
-  font-size: var(--text-xs);
-}
-
-.ex-gate.ok {
-  background: var(--color-success-soft);
-  color: var(--color-success);
-}
-
-.ex-gate.todo {
-  background: var(--color-warning-soft);
-  color: var(--color-warning);
 }
 
 .ex-alert {
@@ -571,10 +579,15 @@ watch(
 }
 
 .ex-cols {
+  order: 1;
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
   gap: var(--space-4);
   align-items: start;
+}
+
+.ex-products-panel {
+  order: 2;
 }
 
 .range-list {
@@ -596,17 +609,52 @@ watch(
   gap: var(--space-2);
 }
 
-.version-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-1) 0;
-  border-bottom: 1px solid var(--color-border);
-  font-size: var(--text-sm);
+.version-card {
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
 }
 
-.version-row:last-child {
-  border-bottom: 0;
+.version-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.version-id {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.version-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.version-facts {
+  display: grid;
+  gap: 4px;
+  margin: var(--space-2) 0 0;
+}
+
+.version-facts > div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.version-facts dt {
+  color: var(--color-text-muted);
+}
+
+.version-facts dd {
+  margin: 0;
+  color: var(--color-text);
+  overflow-wrap: anywhere;
 }
 
 .ex-note {

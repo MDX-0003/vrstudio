@@ -972,14 +972,25 @@ def _merge_ranges(case: case_mod.Case, extracts: list[dict]) -> list[dict]:
     return list(groups.values())
 
 
+def _mtime_iso(path: Path) -> str | None:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(
+            timespec="seconds")
+    except OSError:
+        return None
+
+
 def _extracts(case: case_mod.Case) -> list[dict]:
     marker, result_name = _EXTRACT_FILES.get(case.flow, ("clip.json", "result.mp4"))
     vroot = case.dir(_ctx["cases_root"]) / "extracts"
     out = []
     if vroot.is_dir():
         for vdir in sorted(p for p in vroot.iterdir() if p.is_dir()):
+            marker_path = vdir / marker
+            extracted = marker_path.is_file()
             entry = {"version": vdir.name,
-                     "extracted": (vdir / marker).is_file(),
+                     "extracted": extracted,
+                     "extracted_at": _mtime_iso(marker_path) if extracted else None,
                      "has_result": (vdir / result_name).is_file()}
             geometry = _extract_geometry(case, vdir)
             if geometry:

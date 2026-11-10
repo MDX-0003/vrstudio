@@ -235,6 +235,8 @@ export interface MergeRange {
 export interface ExtractVersion {
   version: string
   extracted: boolean
+  /** 冻结文件（clip.json / image.json 等）的落盘时间。 */
+  extracted_at?: string | null
   has_result: boolean
   viewport?: Viewport
   inner?: Inner
