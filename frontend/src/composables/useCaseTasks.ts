@@ -8,6 +8,25 @@ function createdAt(task: TaskView): number {
 }
 
 /**
+ * 轮询每次都会返回新对象；latest 只在任务语义变化时换引用，避免页面
+ * watch(latest) 对同一条已完成任务反复弹“完成/失败”提示。
+ */
+function sameLatest(a: TaskView | null, b: TaskView | null): boolean {
+  if (!a || !b) return a === b
+  if (a.id !== b.id) return false
+  if (a.status !== b.status) return false
+  // 终态不再跟随 tail/queue 变化，提示只发一次。
+  if (a.status === 'done' || a.status === 'failed') return true
+  return (
+    a.queue_position === b.queue_position &&
+    a.error === b.error &&
+    a.error_kind === b.error_kind &&
+    a.tail.length === b.tail.length &&
+    a.tail.every((line, index) => line === b.tail[index])
+  )
+}
+
+/**
  * 单个 case 的任务轮询。caseName 可以是 ref；切换 case 时清空旧任务并重新拉取。
  * 每个页面只用一份，避免各页各写一个 setInterval。
  */
@@ -34,7 +53,8 @@ export function useCaseTasks(caseName: MaybeRef<string>, kinds?: string[]) {
         .filter((task) => !kinds || kinds.includes(task.kind))
         .sort((a, b) => createdAt(b) - createdAt(a))
       tasks.value = rows
-      latest.value = rows[0] ?? null
+      const next = rows[0] ?? null
+      if (!sameLatest(latest.value, next)) latest.value = next
       error.value = ''
       return rows
     } catch (err) {

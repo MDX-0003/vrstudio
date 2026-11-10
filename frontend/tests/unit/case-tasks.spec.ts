@@ -88,6 +88,39 @@ describe('useCaseTasks', () => {
     wrapper.unmount()
   })
 
+  it('keeps latest identity across repeated polls of a terminal task', async () => {
+    fetchTasksMock.mockResolvedValueOnce({
+      tasks: [task({ id: 'a-extract', case: 'A' })],
+    })
+    const { api, wrapper } = setup()
+    await api.refresh()
+    const first = api.latest.value
+
+    fetchTasksMock.mockResolvedValueOnce({
+      tasks: [task({ id: 'a-extract', case: 'A', tail: ['done line'] })],
+    })
+    await api.refresh()
+    expect(api.latest.value).toBe(first)
+    wrapper.unmount()
+  })
+
+  it('updates latest once when a running task finishes', async () => {
+    fetchTasksMock.mockResolvedValueOnce({
+      tasks: [task({ id: 'a-extract', case: 'A', status: 'running' })],
+    })
+    const { api, wrapper } = setup()
+    await api.refresh()
+    const first = api.latest.value
+
+    fetchTasksMock.mockResolvedValueOnce({
+      tasks: [task({ id: 'a-extract', case: 'A', status: 'done' })],
+    })
+    await api.refresh()
+    expect(api.latest.value).not.toBe(first)
+    expect(api.latest.value?.status).toBe('done')
+    wrapper.unmount()
+  })
+
   it('clears and reloads tasks when the case changes', async () => {
     fetchTasksMock.mockResolvedValueOnce({
       tasks: [task({ id: 'a-extract', case: 'A', created_at: '2026-10-24T00:00:00' })],
