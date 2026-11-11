@@ -97,12 +97,22 @@ def band_correlation(G: np.ndarray, B: np.ndarray, d: int = 0) -> float:
 
 
 def to_gray(frame: np.ndarray) -> np.ndarray:
-    """Luma as float32. Frames are BGR (ffmpeg bgr24), matching the rest of vrstudio."""
+    """Luma as float32 on the 0..255 scale, whatever the input depth is.
+
+    Frames are BGR (ffmpeg ``bgr48le``). 16-bit input is rescaled by 255/65535 so
+    every downstream threshold and report number keeps the meaning it had when the
+    pipeline was 8-bit.
+    """
     if frame.ndim == 2:
-        return frame.astype(np.float32)
-    if frame.shape[2] == 4:
-        frame = frame[:, :, :3]
-    return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        gray = frame
+    else:
+        if frame.shape[2] == 4:
+            frame = frame[:, :, :3]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    out = gray.astype(np.float32)
+    if gray.dtype == np.uint16:
+        out *= np.float32(255.0 / 65535.0)
+    return out
 
 
 def _mean_removed(a: np.ndarray) -> np.ndarray:

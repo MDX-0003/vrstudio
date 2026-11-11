@@ -249,7 +249,8 @@ def stitch_image(
     shift = applied_shift(reg, gate)
     if shift != reg.d_star:
         reg = replace(reg, d_star=shift)
-    out = finalize(recompose(canvas, replace(spec, d_star=shift)))
+    # 图片流仍是 8-bit PNG（决策 99 的范围只到视频），所以这一层的量化回到 uint8。
+    out = finalize(recompose(canvas, replace(spec, d_star=shift))).astype(np.uint8)
     metrics = seam_metrics(out, interior_band)
     status, reasons = verdict(metrics, None, max_wrap_percentile,
                               worst_interior_tol)

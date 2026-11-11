@@ -90,7 +90,7 @@ def fullredraw_case(tmp_path, monkeypatch) -> str:
         padded_name="seedance_input.mp4", mask_path="seedance_input_mask.png",
         mask_strategy="redundant_white", mask_feather_px=0,
         mask_png_compression=0, restore_interp="lanczos4",
-        video=VideoSettings("libx264", 18, "veryfast", "yuv420p", "copy", "copy"),
+        video=VideoSettings("libx265", 14, "slow", "yuv420p10le", "copy", "copy"),
         tool_version="0.1.0",
     )
     man.save(cdir / "seedance_input_pad.json")

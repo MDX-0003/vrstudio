@@ -189,7 +189,10 @@ def test_video_atmo_ranges_apply_only_inside_the_interval(tmp_path):
     plain = read_video(out_plain)
     assert len(got) == len(plain) == VN
     for index in (0, 1, 5):
-        assert np.array_equal(got[index], plain[index]), index
+        # 区间外的帧内容相同，但两条成片是分别编码的：10-bit 码流经帧间预测后解码
+        # 回 8-bit 可能差一级，这来自编码路径而不是区域逻辑。
+        diff = int(np.abs(got[index].astype(int) - plain[index].astype(int)).max())
+        assert diff <= 1, (index, diff)
     for index in (2, 3, 4):
         assert not np.array_equal(got[index], plain[index]), index
 

@@ -28,7 +28,7 @@ from vrstudio import config as config_mod
 from vrstudio.cli import app
 from vrstudio.media.binres import find_tool
 from vrstudio.media.imageio import write_png
-from vrstudio.media.videoio import FrameReader, FrameWriter, probe
+from vrstudio.media.videoio import u8_reader, FrameWriter, probe
 from vrstudio.relight.align import (
     MIN_STRUCTURE_CORRELATION,
     estimate_similarity,
@@ -590,7 +590,7 @@ def write_video(path: Path, frames: list[np.ndarray]) -> Path:
 
 def read_video(path: Path) -> list[np.ndarray]:
     conf = ffmpeg_video_conf()
-    with FrameReader(probe(path, conf), conf) as reader:
+    with u8_reader(probe(path, conf), conf) as reader:
         return [frame.copy() for frame in reader]
 
 

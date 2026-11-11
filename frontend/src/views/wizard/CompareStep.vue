@@ -97,8 +97,9 @@ const duration = ref(0)
 const playing = ref(false)
 const split = ref(50)
 const viewerError = ref('')
-// original = 播放原始分辨率（默认）；proxy = 播放代理，代理未就绪的路自动回落。
-const quality = ref<'proxy' | 'original'>('original')
+// proxy = 播放代理（默认）：成片是 HEVC Main10 10-bit，Chrome 不能保证解码；
+// original = 播放原始分辨率，留给已装 HEVC 解码器的环境。代理未就绪的路自动回落。
+const quality = ref<'proxy' | 'original'>('proxy')
 
 const wrap = ref<HTMLElement | null>(null)
 const videoA = ref<HTMLVideoElement | null>(null)

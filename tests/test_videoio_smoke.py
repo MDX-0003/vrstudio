@@ -108,7 +108,7 @@ def test_video_roundtrip_through_files(tmp_path):
 
     back = probe(final, conf)
     assert back.size == (W, H)
-    assert back.pix_fmt == "yuv420p"
+    assert back.pix_fmt == "yuv420p10le"
     assert len(out_frames) == N
 
     # pre_roll cancelled the rotation, so the delivered frames are the source again.
@@ -127,7 +127,7 @@ def test_video_roundtrip_through_files(tmp_path):
     # assertions live in test_roundtrip.py at the library boundary.
     worst = max(int(np.abs(a.astype(int) - b.astype(int)).max())
                 for a, b in zip(got, src_back))
-    assert worst <= 5, f"file round trip drifted by {worst} levels"
+    assert worst <= 5 * 257, f"file round trip drifted by {worst / 257:.2f} levels"
 
 
 def test_writer_writes_bt709_tags(tmp_path):
@@ -197,7 +197,7 @@ def test_cli_pad_and_recompose_and_verify(tmp_path):
             "--set", "video.preset=ultrafast", "--set", "video.crf=0")
     assert r.returncode == 0, r.stdout + r.stderr
     assert final.is_file()
-    assert probe(final, conf).pix_fmt == "yuv420p"
+    assert probe(final, conf).pix_fmt == "yuv420p10le"
     report = final.with_name(final.stem + "_recompose.json")
     assert report.is_file(), "recompose wrote no report"
     assert json.loads(report.read_text(encoding="utf-8"))["registration"]["verdict"] == "ok"

@@ -88,7 +88,7 @@ def test_fullredraw_end_to_end(tmp_path):
     vr("recompose", "--in", str(cdir / "result.mp4"), "--manifest", str(manifest),
        "--out", str(final), "--quiet", "--set", "video.preset=ultrafast")
     assert probe(final, conf).size == (W, H)
-    assert probe(final, conf).pix_fmt == "yuv420p"
+    assert probe(final, conf).pix_fmt == "yuv420p10le"
     assert final.with_name("manual_recompose.json").is_file()
 
     # 7) vrgen status 也该认账（同构台账）

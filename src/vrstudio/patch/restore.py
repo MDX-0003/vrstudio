@@ -215,7 +215,7 @@ def _encode_selected(video: str, n: int, src_fps: float, dst_fps: float,
 def restore_clip(ai_path: str | Path, out_path: str | Path,
                  target_frames: int, target_fps: float, *,
                  interpolator: Interpolator | None = None,
-                 crf: int = 14, preset: str = "medium",
+                 crf: int = 14, preset: str = "slow",
                  log=None) -> dict:
     """Write ``out_path``: the AI clip brought to exactly ``target_frames`` @
     ``target_fps`` (resolution untouched — merge owns resizing).

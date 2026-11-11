@@ -415,8 +415,8 @@ def merge(
     snapshots: str = typer.Option("", help="comma-separated frame indices to save as PNG"),
     feather: int = typer.Option(16, help="inner-rect boundary feather width"),
     levels: int = typer.Option(5, help="Laplacian pyramid levels"),
-    crf: int = typer.Option(18, help="x264 crf"),
-    preset: str = typer.Option("medium", help="x264 preset"),
+    crf: int = typer.Option(14, help="x265 crf"),
+    preset: str = typer.Option("slow", help="x265 preset"),
     report: Path = typer.Option(None, help="write a JSON run report here"),
     no_restore: bool = typer.Option(False, help="feed the raw AI clip to the "
                                                 "resampler even when it misses "

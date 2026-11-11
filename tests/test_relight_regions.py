@@ -18,7 +18,7 @@ from vrstudio import config as config_mod
 from vrstudio.cli import app
 from vrstudio.media.binres import find_tool
 from vrstudio.media.imageio import write_png
-from vrstudio.media.videoio import FrameReader, FrameWriter, probe
+from vrstudio.media.videoio import u8_reader, FrameWriter, probe
 from vrstudio.relight.align import work_size
 from vrstudio.relight.compose import light_compose, soft_clip
 from vrstudio.relight.fields import estimate_fields
@@ -583,7 +583,7 @@ def test_video_sample_at_with_regions(tmp_path):
 
     produced = cv2.imread(str(out_dir / "sample_000000.png"), cv2.IMREAD_COLOR)
     conf = _video_conf()
-    with FrameReader(probe(gt_path, conf), conf) as reader:
+    with u8_reader(probe(gt_path, conf), conf) as reader:
         decoded = next(iter(reader)).copy()
     # 区域中心（lon −40 → x≈100，lat 0 → y=64），离开边界足够远。
     assert np.array_equal(produced[64, 100], decoded[64, 100])
@@ -591,7 +591,7 @@ def test_video_sample_at_with_regions(tmp_path):
 
 def _read_video(path: Path) -> list[np.ndarray]:
     conf = _video_conf()
-    with FrameReader(probe(path, conf), conf) as reader:
+    with u8_reader(probe(path, conf), conf) as reader:
         return [frame.copy() for frame in reader]
 
 
@@ -696,7 +696,9 @@ def test_video_ranges_leave_outside_frames_bit_identical(tmp_path):
     plain = _read_video(out_plain)
     assert len(got) == len(plain) == 6
     for index in (0, 1, 5):
-        assert np.array_equal(got[index], plain[index]), index
+        # 同上：区间外内容相同，两个文件各自 10-bit 编码后回落到 8-bit 允许差一级。
+        diff = int(np.abs(got[index].astype(int) - plain[index].astype(int)).max())
+        assert diff <= 1, (index, diff)
     for index in (2, 3, 4):
         assert not np.array_equal(got[index], plain[index]), index
 

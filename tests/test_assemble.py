@@ -15,7 +15,7 @@ from typer.testing import CliRunner
 from vrstudio import config as config_mod
 from vrstudio.cli import assemble as asm
 from vrstudio.media.binres import find_tool
-from vrstudio.media.videoio import FrameReader, probe
+from vrstudio.media.videoio import u8_reader, probe
 from vrstudio.patch.sidecar import (
     InnerRect,
     Segment,
@@ -52,7 +52,7 @@ def _sidecar(path, start: int, end: int, fps: float = 10.0):
 
 def _read(path) -> list[np.ndarray]:
     info = probe(path, _conf())
-    with FrameReader(info, _conf()) as reader:
+    with u8_reader(info, _conf()) as reader:
         return list(reader)
 
 

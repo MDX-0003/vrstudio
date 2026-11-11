@@ -140,11 +140,11 @@ def recompose(canvas: np.ndarray, spec: RecomposeSpec) -> np.ndarray:
 
 
 def finalize(out: np.ndarray) -> np.ndarray:
-    """The single quantisation step: float64 -> uint8."""
-    return np.clip(np.rint(out), 0, 255).astype(np.uint8)
+    """The single quantisation step: float64 -> uint16 (0..65535)."""
+    return np.clip(np.rint(out), 0, 65535).astype(np.uint16)
 
 
-def recompose_u8(
+def recompose_out(
     canvas: np.ndarray,
     spec: RecomposeSpec,
     buffers: ComposeBuffers | None = None,
@@ -152,7 +152,7 @@ def recompose_u8(
     """``finalize(recompose(canvas, spec))`` without materialising ``R`` in float64.
 
     ``R`` is copied straight from the canvas and only the blend band is rounded,
-    which is what makes the video pass cheap: the region is already uint8 and its
+    which is what makes the video pass cheap: the region is already uint16 and its
     float64 round trip is an identity. The blend itself keeps the float64
     expression from :func:`blend_block`, so the output is bit-identical to the
     float path. ``buffers`` is reused across frames; without it a fresh set is
@@ -174,14 +174,14 @@ def recompose_u8(
                band, temp, shifted, ramp_px=spec.shift_ramp_px)
 
     np.rint(band, out=band)
-    np.clip(band, 0, 255, out=band)
-    band_u8 = buf.take("band_u8", B.shape, np.uint8)
-    band_u8[...] = band
+    np.clip(band, 0, 65535, out=band)
+    band_u16 = buf.take("band_u16", B.shape, np.uint16)
+    band_u16[...] = band
 
     out_shape = (B.shape[0], spec.W) + B.shape[2:]
-    out = buf.take("frame_u8", out_shape, np.uint8)
+    out = buf.take("frame_u16", out_shape, np.uint16)
     out[:, : spec.R_width] = R
-    out[:, spec.R_width :] = band_u8
+    out[:, spec.R_width :] = band_u16
     if out.shape[1] != spec.W:
         raise ValueError(f"recomposed width {out.shape[1]} != W {spec.W}")
     return out

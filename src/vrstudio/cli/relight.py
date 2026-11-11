@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable, Iterator
-from contextlib import closing, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -35,7 +35,7 @@ from .. import case as case_mod
 from .. import config as config_mod
 from ..case import CaseError, kind_of
 from ..media.imageio import ImageError, read_image, write_gray_png, write_png
-from ..media.videoio import FrameReader, FrameWriter, VideoIOError, probe
+from ..media.videoio import FrameReader, FrameWriter, VideoIOError, probe, to_u8
 from ..progress import Log, RateMeter
 from ..relight import cache as relight_cache
 from ..relight import regions as regions_mod
@@ -76,6 +76,19 @@ from ..relight.report import (
 )
 
 app = typer.Typer(add_completion=False, help=__doc__)
+
+
+@contextmanager
+def _u8_reader(*args, **kwargs):
+    """Wrap ``FrameReader`` so the still-8-bit relight engine sees uint8 frames.
+
+    The engine's maths, LUTs and thresholds are calibrated on 0..255; migrating
+    them to 16-bit is WP4 in ``docs/plan/video-10bit-plan.md``. Keeping the
+    conversion at this single entry point means the rest of the pump is 16-bit
+    and the later migration deletes one function.
+    """
+    with FrameReader(*args, **kwargs) as reader:
+        yield (to_u8(frame) for frame in reader)
 
 SCENE_PRESETS = {"night": (1.0, 0.35), "day": (0.8, 0.2)}
 """场景预设只给默认值：夜戏 1.0/0.35，日光 0.8/0.2（实测 strength 1.0 过曝 8.9%）。"""
@@ -508,11 +521,11 @@ def _read_atmo_frame(info, conf, index: int) -> np.ndarray | None:
     if index < 0:
         return None
     if info.fps_float > 0:
-        with FrameReader(info, conf, seek=index / info.fps_float, count=1) as reader:
+        with _u8_reader(info, conf, seek=index / info.fps_float, count=1) as reader:
             for frame in reader:
                 return np.array(frame, copy=True)
         return None
-    with FrameReader(info, conf) as reader:
+    with _u8_reader(info, conf) as reader:
         for current, frame in enumerate(reader):
             if current == index:
                 return np.array(frame, copy=True)
@@ -941,7 +954,7 @@ def _write_samples(out_dir: Path, info, conf, renderer: _SegmentRenderer,
         for index in indices:
             seek = index / info.fps_float if info.fps_float > 0 else 0.0
             decode_start = time.perf_counter()
-            with FrameReader(info, conf, seek=seek, count=1) as reader:
+            with _u8_reader(info, conf, seek=seek, count=1) as reader:
                 frame = next(iter(reader), None)
             decode += time.perf_counter() - decode_start
             if frame is None:
@@ -966,15 +979,15 @@ def _frame_opener(info, conf) -> Callable[..., Iterator[np.ndarray]]:
     """打开视频；传 ``index`` 时按帧号定位，只取一帧。"""
     def open_frames(index: int | None = None) -> Iterator[np.ndarray]:
         if index is None:
-            with FrameReader(info, conf) as reader:
+            with _u8_reader(info, conf) as reader:
                 yield from reader
             return
         if info.fps_float > 0:
-            with FrameReader(info, conf, seek=index / info.fps_float,
+            with _u8_reader(info, conf, seek=index / info.fps_float,
                              count=1) as reader:
                 yield from reader
             return
-        with FrameReader(info, conf) as reader:
+        with _u8_reader(info, conf) as reader:
             for current, frame in enumerate(reader):
                 if current == index:
                     yield frame
@@ -1125,7 +1138,7 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
     try:
         with FrameWriter(inputs.out, info.size, info.fps, video_cfg,
                          audio_from=inputs.gt, config=conf) as writer:
-            with FrameReader(info, conf) as reader:
+            with _u8_reader(info, conf) as reader:
                 reader_iter = iter(reader)
                 while True:
                     decode_start = time.perf_counter()
@@ -1325,8 +1338,8 @@ def _render_pair(inputs: RelightInputs, gt_info, atmo_info,
     try:
         with FrameWriter(inputs.out, gt_info.size, gt_info.fps, video_cfg,
                          audio_from=inputs.gt, config=conf) as writer:
-            with FrameReader(gt_info, conf) as gt_reader, \
-                    FrameReader(atmo_info, conf) as atmo_reader:
+            with _u8_reader(gt_info, conf) as gt_reader, \
+                    _u8_reader(atmo_info, conf) as atmo_reader:
                 gt_iter = iter(gt_reader)
                 atmo_iter = iter(atmo_reader)
                 index = -1

@@ -68,14 +68,14 @@ max_wrap_percentile = 95     # wrap 百分位高于此值判坏
 worst_interior_tol  = 1.0    # worst_interior 不得超过 before 的最差值 × (1+容忍)
 
 # ── 输出视频 ────────────────────────────────────────────────────────────
-# 全流程只产出一个编码档：H.264 8-bit yuv420p（浏览器可直接播放）。
-# Seedance 返回的就是 4:2:0，重新编码到 4:4:4 只会把上采样后的色度再存一遍，
-# 文件大数倍且 Chrome 解不了码；4:4:4 档已整体废弃（决策 19）。
+# 全流程只产出一个交付档：HEVC Main10 10-bit yuv420p10le（决策 99）。
+# 8-bit 的量化层次是大面积渐变出现色带的根因，降 crf 买不回来；帧泵因此按
+# 16-bit（bgr48le）搬运。浏览器预览代理是唯一保留的 H.264 8-bit 产物。
 [video]
-encoder  = "libx264"
-crf      = 18         # delivery 档；需要像素级对照时用 --set video.crf=0
-preset   = "veryfast"
-pix_fmt  = "yuv420p"  # 唯一合法值：浏览器可播 + 与 Seedance 返回一致
+encoder  = "libx265"
+crf      = 14         # delivery 档；需要像素级对照时用 --set video.crf=0
+preset   = "slow"
+pix_fmt  = "yuv420p10le"  # 唯一合法值：HEVC Main10 10-bit
 audio    = "copy"     # copy | none
 metadata = "copy"
 

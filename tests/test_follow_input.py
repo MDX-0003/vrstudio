@@ -21,7 +21,7 @@ from vrstudio.redraw.geometry import PadSpec, assert_closure, follow_input_plan,
 from vrstudio.redraw.image import pad_image, stitch_image
 from vrstudio.redraw.manifest import from_image_plan
 from vrstudio.redraw.padding import pad_horizontal
-from vrstudio.redraw.recompose_core import RecomposeSpec, recompose_u8
+from vrstudio.redraw.recompose_core import RecomposeSpec, recompose_out
 from vrstudio.redraw.registration import applied_shift
 from vrstudio.web import app as web_app
 
@@ -87,13 +87,13 @@ def test_scaled_recompose_is_a_rotation_at_the_scaled_geometry():
     case_plan = _case_plan()
     scaled = follow_input_plan(case_plan, (224, 96))
     assert scaled is not None
-    src = synthetic_erp(scaled.W, scaled.H, seed=11)
+    src = (synthetic_erp(scaled.W, scaled.H, seed=11).astype(np.uint16) * 257)
     canvas = pad_horizontal(src, scaled.P).astype(np.float64)
     spec = RecomposeSpec(
         W=scaled.W, Wc=scaled.Wc, P=scaled.P, L=scaled.L,
         endpoint_lock_px=max(1, endpoint_lock_px(scaled.L, 2.0)),
     )
-    out = recompose_u8(canvas, spec)
+    out = recompose_out(canvas, spec)
     assert out.shape == (scaled.H, scaled.W, 3)
     assert np.array_equal(out, np.roll(src, scaled.roll_delta, axis=1))
 

@@ -75,14 +75,19 @@ def has_audio(path: str) -> bool:
 
 
 class FfmpegSink:
-    """Streams BGR frames into ffmpeg/libx264, optionally muxing source audio.
+    """Streams BGR frames into ffmpeg/libx265, optionally muxing source audio.
+
+    Frames are uint16 (``bgr48le``); a uint8 caller is upscaled by 257 so the
+    patch flows that still read through OpenCV keep working while their internals
+    are migrated. The output profile follows the project standard: HEVC Main10
+    ``yuv420p10le``.
 
     Two passes when audio is requested: encode video-only, then remux the audio
     in with ``-c:v copy`` — see module docstring for why.
     """
 
-    def __init__(self, path, size, fps, crf=18, preset="medium",
-                 audio_from=None):
+    def __init__(self, path, size, fps, crf=14, preset="slow",
+                 audio_from=None, pix_fmt="yuv420p10le", encoder="libx265"):
         ff = ffmpeg_path()
         if not ff:
             raise RuntimeError("ffmpeg binary not found")
@@ -91,16 +96,24 @@ class FfmpegSink:
         self.tmp = (path + ".video-only.mp4") if audio_from else path
         gop = gop_frames(fps)
         cmd = [ff, "-y", "-hide_banner", "-loglevel", "warning",
-               "-f", "rawvideo", "-pix_fmt", "bgr24",
+               "-f", "rawvideo", "-pix_fmt", "bgr48le",
                "-s", f"{size[0]}x{size[1]}", "-r", f"{fps}",
                "-i", "-",
-               "-c:v", "libx264", "-crf", str(crf), "-preset", preset,
+               "-vf", "scale=in_range=full:out_range=tv:out_color_matrix=bt709",
+               "-c:v", encoder, "-crf", str(crf), "-preset", preset,
                "-g", str(gop), "-keyint_min", str(gop),
-               "-pix_fmt", "yuv420p", "-threads", "0", self.tmp]
+               "-pix_fmt", pix_fmt,
+               "-colorspace", "bt709", "-color_primaries", "bt709",
+               "-color_trc", "bt709", "-color_range", "tv",
+               "-x265-params",
+               "colorprim=bt709:transfer=bt709:colormatrix=bt709:log-level=error",
+               "-threads", "0", self.tmp]
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                                      stderr=subprocess.PIPE)
 
     def write(self, frame):
+        if frame.dtype == np.uint8:
+            frame = frame.astype(np.uint16) * 257
         self.proc.stdin.write(np.ascontiguousarray(frame).tobytes())
 
     def close(self):

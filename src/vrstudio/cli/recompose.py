@@ -28,7 +28,7 @@ from ..redraw.blend import endpoint_lock_px as lock_px_from_pct
 from ..redraw.geometry import follow_input_plan, restore_height
 from ..redraw.manifest import Manifest
 from ..progress import Log, RateMeter
-from ..redraw.recompose_core import (ComposeBuffers, RecomposeSpec, recompose_u8,
+from ..redraw.recompose_core import (ComposeBuffers, RecomposeSpec, recompose_out,
                                      restore_canvas, slice_regions)
 from ..redraw.registration import (band_correlation, circular_translate,
                                    gate_registration, to_gray)
@@ -348,12 +348,12 @@ def main(
                         ema = alpha * d_now + (1.0 - alpha) * ema
                         d_use = int(round(ema))
                         per_frame_d.append(d_use)
-                        u8 = recompose_u8(canvas, replace(spec_render, d_star=d_use),
-                                          buffers)
+                        u16 = recompose_out(canvas, replace(spec_render, d_star=d_use),
+                                            buffers)
                     else:
-                        u8 = recompose_u8(canvas, spec_render, buffers)
-                    acc.add(u8)
-                    writer.write(u8)
+                        u16 = recompose_out(canvas, spec_render, buffers)
+                    acc.add(u16)
+                    writer.write(u16)
                     meter.tick()
             written = writer.frames_written
     except Exception as exc:                                  # noqa: BLE001

@@ -70,10 +70,10 @@ _FALLBACK: dict = {
         "worst_interior_tol": 1.0,
     },
     "video": {
-        "encoder": "libx264",
-        "crf": 18,
-        "preset": "veryfast",
-        "pix_fmt": "yuv420p",
+        "encoder": "libx265",
+        "crf": 14,
+        "preset": "slow",
+        "pix_fmt": "yuv420p10le",
         "audio": "copy",
         "metadata": "copy",
     },
@@ -327,10 +327,11 @@ def _validate(data: dict) -> None:
         raise ConfigError("pad.on_aspect_conflict must be error | grow_canvas")
     if _value(video, "audio", "video.audio") not in ("copy", "none"):
         raise ConfigError("video.audio must be copy | none")
-    if _value(video, "pix_fmt", "video.pix_fmt") != "yuv420p":
+    if _value(video, "pix_fmt", "video.pix_fmt") != "yuv420p10le":
         raise ConfigError(
-            "video.pix_fmt must be yuv420p: the pipeline has a single "
-            "browser-playable profile (4:4:4 archives were dropped in decision 19)"
+            "video.pix_fmt must be yuv420p10le: the pipeline has a single "
+            "10-bit delivery profile (8-bit was retired in decision 99; the "
+            "browser proxy is the only 8-bit artifact and has its own constant)"
         )
 
     band = _value(verify, "interior_band", "verify.interior_band")

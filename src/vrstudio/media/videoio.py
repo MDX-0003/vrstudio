@@ -6,16 +6,17 @@ functions out), and this module owns the pipes.
 
 Two encoding details that are part of the pixel baseline:
 
-* frames move as ``bgr24`` rawvideo (OpenCV's native channel order, so no
-  conversion anywhere);
+* frames move as ``bgr48le`` rawvideo (16-bit per channel, OpenCV's channel order,
+  so no conversion anywhere);
 * audio is muxed in a **second pass** with ``-c:v copy``. Encoding with the audio
   input present can change the frame count, and a copied stream cannot.
 
-The only output profile is H.264 8-bit ``yuv420p`` (``video.pix_fmt``): the
-Seedance return is already 4:2:0, and Chrome's H.264 decoder rejects 4:4:4, so
-storing the deliverable as 4:4:4 used to buy a huge file that the console could
-not play. Pixel-baseline tests that need an exact round trip pin
-``video.crf = 0`` explicitly instead of relying on a lossless default.
+The only output profile is HEVC Main10 ``yuv420p10le`` (``video.pix_fmt``):
+8-bit quantisation is what produces banding in the smooth gradients this pipeline
+delivers, and no crf can buy those levels back (measured 2026-11-11: 8-bit stays at
+~60 luma levels in a flat sky at crf 10, 10-bit keeps ~230). Pixel-baseline tests
+that need an exact round trip pin ``video.crf = 0`` explicitly instead of relying
+on a lossless default.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -31,8 +33,30 @@ import numpy as np
 
 from .binres import ffmpeg, ffprobe
 
-FRAME_PIX_FMT = "bgr24"
+FRAME_PIX_FMT = "bgr48le"
+FRAME_DTYPE = np.uint16
+FRAME_MAX = 65535
 _BYTES_PER_PIXEL = 3
+_BYTES_PER_SAMPLE = 2
+
+
+def to_u8(frame: np.ndarray) -> np.ndarray:
+    """16-bit BGR frame -> 8-bit BGR, for the code that still runs at 8-bit.
+
+    The relight engine and the patch flows (OpenCV video I/O, RIFE PNGs) are
+    still 8-bit internally; they call this at their entry so the frame pump can
+    stay 16-bit everywhere else. Delete the call sites when those flows migrate.
+    """
+    if frame.dtype == np.uint8:
+        return frame
+    return (frame >> 8).astype(np.uint8)
+
+
+@contextmanager
+def u8_reader(*args, **kwargs):
+    """``FrameReader`` that yields 8-bit frames, for the still-8-bit flows/tests."""
+    with FrameReader(*args, **kwargs) as reader:
+        yield (to_u8(frame) for frame in reader)
 #: 管道分块读取的块大小。Windows 下实测 8K 帧整帧一次读 298 ms/帧，64 KB 分块
 #: 62 ms/帧；更大的块（4 MB）反而退化，所以固定在这里，不暴露成配置。
 _READ_CHUNK = 1 << 16
@@ -121,7 +145,7 @@ def probe(path: str | Path, config=None) -> VideoInfo:
 
 
 class FrameReader:
-    """Iterate decoded frames as ``(H, W, 3)`` uint8 BGR.
+    """Iterate decoded frames as ``(H, W, 3)`` uint16 BGR, values 0..65535.
 
     Stopping early is *not* an error: a caller that wants one frame out of a long
     clip closes the pipe, ffmpeg sees EPIPE and exits nonzero, and treating that as
@@ -148,7 +172,8 @@ class FrameReader:
         self._args = args
         self._proc: subprocess.Popen | None = None
         self._exhausted = False
-        self._frame_bytes = self.width * self.height * _BYTES_PER_PIXEL
+        self._frame_bytes = (self.width * self.height * _BYTES_PER_PIXEL
+                             * _BYTES_PER_SAMPLE)
 
     def __enter__(self) -> "FrameReader":
         self._proc = subprocess.Popen(self._args, stdout=subprocess.PIPE,
@@ -172,7 +197,8 @@ class FrameReader:
             if got < self._frame_bytes:
                 self._exhausted = True
                 break
-            yield frame.reshape(self.height, self.width, _BYTES_PER_PIXEL)
+            yield frame.view(FRAME_DTYPE).reshape(
+                self.height, self.width, _BYTES_PER_PIXEL)
             # 生成器在 yield 处挂起时会持有这一帧；先解引用，下一帧申请之前释放。
             frame = None
 
@@ -219,7 +245,7 @@ class FrameWriter:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.width % 2 or self.height % 2:
             raise VideoIOError(
-                f"yuv420p needs even dimensions, got {self.width}x{self.height}; "
+                f"10-bit delivery needs even dimensions, got {self.width}x{self.height}; "
                 f"trim or rescale the canvas before encoding"
             )
         encoder = str(self.video_cfg["encoder"])
@@ -241,6 +267,12 @@ class FrameWriter:
             # x264 只把前两项写进 VUI；primaries / transfer 要通过它自己的参数给。
             args += ["-x264-params",
                      "colorprim=bt709:transfer=bt709:colormatrix=bt709"]
+        elif encoder.startswith("libx265"):
+            params = "colorprim=bt709:transfer=bt709:colormatrix=bt709:log-level=error"
+            if float(self.video_cfg["crf"]) == 0:
+                # x265 的 crf 0 只是「近无损」；像素基线要的是逐位一致。
+                params = "lossless=1:" + params
+            args += ["-x265-params", params]
         args += ["-threads", "0", str(self.tmp)]
         self._proc = subprocess.Popen(args, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         return self
@@ -252,6 +284,14 @@ class FrameWriter:
                 f"frame {frame.shape[1]}x{frame.shape[0]} != declared "
                 f"{self.width}x{self.height}"
             )
+        if frame.dtype != FRAME_DTYPE:
+            if frame.dtype == np.uint8:
+                frame = frame.astype(np.uint16) * 257
+            else:
+                raise VideoIOError(
+                    f"frame dtype {frame.dtype} is not {FRAME_DTYPE}; the frame "
+                    f"pump is 16-bit bgr48le"
+                )
         # memoryview 直接写管道：8K 帧省掉 tobytes() 的 100 MB 复制。
         self._proc.stdin.write(np.ascontiguousarray(frame).data.cast("B"))
         self.frames_written += 1

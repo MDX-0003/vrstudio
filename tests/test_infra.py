@@ -60,7 +60,7 @@ def test_defaults_load_and_validate():
     assert conf.get("pad.pipeline.transforms") == ["pre_roll", "pad_h"]
     assert conf.get("recompose.d_star_mode") == "clip_median"
     assert conf.get("bin.allow_path_fallback") is False
-    assert conf.get("video.pix_fmt") == "yuv420p"   # 唯一编码档，浏览器可播
+    assert conf.get("video.pix_fmt") == "yuv420p10le"   # 唯一交付档：HEVC Main10
 
 
 def test_band_gate_default_is_relaxed_to_point_six():
@@ -168,7 +168,7 @@ def _manifest(tmp_path, frame, **kw):
         has_audio=True, write_hash=True, mask_path="src_mask.png",
         mask_strategy="redundant_white", mask_feather_px=0, mask_png_compression=0,
         restore_interp="lanczos4",
-        video=VideoSettings("libx264", 18, "veryfast", "yuv420p", "copy", "copy"),
+        video=VideoSettings("libx265", 14, "slow", "yuv420p10le", "copy", "copy"),
         tool_version="0.1.0",
     )
     defaults.update(kw)
