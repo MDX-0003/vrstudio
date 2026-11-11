@@ -94,7 +94,7 @@ uv run vrstudio serve --host 0.0.0.0 --port 8760
 src/vrstudio/cli/     # case/generate ★新增 + extract/merge/restore/pad/recompose/辅助 ←旧仓库迁入
 src/vrstudio/patch/   # ← vrpatch 核心库（投影/合成/时间对齐/缩放拟合）
 src/vrstudio/redraw/  # ← vrpad 核心库（几何/循环pad/混合/配准/重组）
-src/vrstudio/media/   # 统一 ffmpeg 封装（唯一编码档：H.264 8-bit yuv420p）
+src/vrstudio/media/   # 统一 ffmpeg 封装（唯一交付档：HEVC Main10 yuv420p10le）
 src/vrstudio/web/     # ← vrpatch web 骨架扩展（M4）
 cases/ sources/ logs/ bin/   # 运行期数据，gitignore
 ```
