@@ -71,6 +71,9 @@ class RecomposeReport:
     output_mode: str = "case"       # case | input
     output_size: tuple[int, int] = (0, 0)
     warnings: tuple[str, ...] = ()
+    #: 实际使用的编码参数（encoder/crf/preset/pix_fmt/audio/metadata）。
+    #: 决策 99 之后交付档是 HEVC Main10 10-bit，报告要能直接回答「这份成片用的什么」。
+    video: dict = field(default_factory=dict)
     schema: int = SCHEMA
     created_utc: str = field(default_factory=lambda: datetime.now(timezone.utc)
                              .strftime("%Y-%m-%dT%H:%M:%SZ"))
@@ -107,4 +110,5 @@ class RecomposeReport:
             output_mode=str(raw.get("output_mode", "case")),
             output_size=tuple(raw.get("output_size", (0, 0))),
             warnings=tuple(raw.get("warnings", ())),
+            video=dict(raw.get("video", {})),
         )

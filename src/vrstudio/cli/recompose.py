@@ -317,7 +317,7 @@ def main(
         _write_report(report_path, out, man, manifest, info, canvas_size, interp, reg,
                       spec, repair_px, {}, 0, aspect_drift,
                       output_mode=output_mode, output_size=(out_w, out_h),
-                      shift_ramp_px=shift_ramp)
+                      shift_ramp_px=shift_ramp, video=dict(conf.video))
         raise typer.Exit(1)
     if reg.verdict == "warn":
         log.warn("registration is not decisive (flat cost curve); "
@@ -376,7 +376,7 @@ def main(
     _write_report(report_path, out, man, manifest, info, canvas_size, interp, reg,
                   spec, repair_px, metrics.as_dict(), written, aspect_drift,
                   output_mode=output_mode, output_size=(out_w, out_h),
-                  shift_ramp_px=shift_ramp)
+                  shift_ramp_px=shift_ramp, video=dict(conf.video))
 
     print()
     print(f"final    {out}   {out_w}x{canvas_h}   {written} frames")
@@ -394,7 +394,7 @@ def _write_report(report_path, out: Path, man: Manifest, manifest: Path, info,
                   written: int, aspect_drift_pct: float = 0.0,
                   output_mode: str = "case",
                   output_size: tuple[int, int] = (0, 0),
-                  shift_ramp_px: int = 0) -> None:
+                  shift_ramp_px: int = 0, video: dict | None = None) -> None:
     path = report_path or out.with_name(out.stem + "_recompose.json")
     RecomposeReport(
         manifest_path=Path(manifest).name,
@@ -415,4 +415,5 @@ def _write_report(report_path, out: Path, man: Manifest, manifest: Path, info,
         output_mode=output_mode,
         output_size=output_size,
         warnings=man.warnings,
+        video=dict(video or {}),
     ).save(path)
