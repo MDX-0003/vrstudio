@@ -1301,6 +1301,7 @@ def _keyframe_state(case: case_mod.Case, details: list[dict] | None = None) -> d
         "detail_ref": "细节参考：只继承所指细节的外观，不取构图、背景与姿态。",
     }
     base = {"enabled": case.flow in ("patch", "gen"), "error": None,
+            "ratio": _keyframe_ratio_or_none(case),
             "refs": [], "refs_default": False,
             "first": None, "last": None,
             "extract": None, "stale": False, "complete": False,
@@ -3150,6 +3151,14 @@ def _keyframe_ratio(case: case_mod.Case) -> str:
     return "16:9"
 
 
+def _keyframe_ratio_or_none(case: case_mod.Case) -> str | None:
+    """给页面回显用：几何不合约时返回 None，不把 case info 整页打成错误。"""
+    try:
+        return _keyframe_ratio(case)
+    except CaseError:
+        return None
+
+
 #: 工作台的首尾原始帧：由 extract 写入当前版本目录，不是 ``[[assets]]``。
 RAW_FRAME_FILES = {"first_raw": "first_frame_raw.png",
                    "last_raw": "last_frame_raw.png"}
@@ -3169,13 +3178,13 @@ def _keyframe_step(value: object) -> str:
     return step
 
 
-def _current_session(name: str) -> int:
-    """图片生成按项目会话计费：读 generation.toml 的当前会话；读不到就报错。"""
+def _generation_snapshot(name: str) -> dict:
+    """读 generation.toml 的当前会话与图片模型能力；读不到就报错。"""
     payload = _vrgen_json(["params", "show", "--job", name,
                            "--workdir", str(_workdir())])
     if "error" in payload:
         raise CaseError(payload["error"])
-    return int((payload.get("current") or {}).get("session_id") or 0)
+    return payload
 
 
 def _keyframe_refs(case: case_mod.Case) -> tuple[keyframe_mod.State, list[keyframe_mod.Ref]]:
@@ -3259,21 +3268,42 @@ def _keyframe_argv(name: str, body: dict) -> list[str]:
     # 生成首帧只用到当前抽取的原始帧与三视图，旧定稿作废不影响它；
     # 生成尾帧由 _keyframe_inputs 自己按 stale 判「先重定首帧」。
     pairs = _keyframe_inputs(case, step, allow_stale=True)
-    session = _current_session(name)
+    snapshot = _generation_snapshot(name)
+    session = int((snapshot.get("current") or {}).get("session_id") or 0)
     if session <= 0:
         raise CaseError("图片生成按项目会话计费；先在底栏选择项目生成会话")
+    fixed = snapshot.get("fixed") or {}
+    effective_model = int(body["image_model_id"]
+                          if body.get("image_model_id") is not None
+                          else fixed.get("image_model_id") or 0)
+    caps = snapshot.get("image") or {}
+    # patch 的首尾帧视频最终要贴回 16:9 视口；比例只能跟着视口，不能自由选。
+    expected_ratio = _keyframe_ratio(case)
+    ratio = str(body.get("ratio") or expected_ratio)
+    if ratio != expected_ratio:
+        raise CaseError(f"首尾帧比例必须与 patch 视口一致（{expected_ratio}）")
+    caps_model = int(caps.get("model_id") or 0)
+    if caps_model == effective_model:
+        ratios = caps.get("ratios") or []
+        resolutions = caps.get("resolutions") or []
+        model_label = caps.get("name") or f"图片模型 {effective_model}"
+        if ratios and ratio not in ratios:
+            raise CaseError(f"{model_label} 不支持比例 {ratio}")
+        resolution = str(body.get("resolution") or "")
+        if resolution and resolutions and resolution not in resolutions:
+            raise CaseError(f"{model_label} 不支持分辨率 {resolution}")
     argv = [_vrgen_exe(), "image", "submit", "--job", name,
             "--template", KEYFRAME_TEMPLATES[step],
             "--vars-file", KEYFRAME_VARS,
             "--step", step,
             "--session-id", str(session),
-            "--ratio", _keyframe_ratio(case),
+            "--ratio", ratio,
             "--workdir", str(_workdir())]
     for path, role, note in pairs:
         argv += ["--image", str(path), "--image-role", role,
                  "--image-note", note]
-    if body.get("image_model_id") is not None:
-        argv += ["--image-model-id", str(body["image_model_id"])]
+    if effective_model > 0:
+        argv += ["--image-model-id", str(effective_model)]
     if body.get("resolution"):
         argv += ["--resolution", str(body["resolution"])]
     if body.get("num") is not None:

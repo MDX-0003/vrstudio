@@ -1,10 +1,12 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import SessionQuotaRow from '@/components/generate/SessionQuotaRow.vue'
 import SubmitBar from '@/components/common/SubmitBar.vue'
-import { KEYFRAME_MAX_CANDIDATES, KEYFRAME_RESOLUTIONS } from '@/constants/keyframe'
+import { KEYFRAME_MAX_CANDIDATES } from '@/constants/keyframe'
 import type { ModelOption } from '@/types/case-info'
 import type { EpisodeOption, ProjectOption, SessionOption } from '@/types/session'
 
+const ratio = defineModel<string>('ratio', { required: true })
 const resolution = defineModel<string>('resolution', { required: true })
 const num = defineModel<number>('num', { required: true })
 const imageModelId = defineModel<number | null>('imageModelId', { required: true })
@@ -12,11 +14,14 @@ const selectedProject = defineModel<string>('selectedProject', { required: true 
 const selectedEpisode = defineModel<string>('selectedEpisode', { required: true })
 const selectedSession = defineModel<string>('selectedSession', { required: true })
 
-defineProps<{
+const props = defineProps<{
   step: 'first' | 'last'
   imageModelOptions: ModelOption[]
   imageModelsError: string
   modelSaving: boolean
+  resolutionOptions: string[]
+  ratioOptions: string[]
+  maxNum: number
   projects: ProjectOption[]
   episodes: EpisodeOption[]
   sessions: SessionOption[]
@@ -37,7 +42,10 @@ const emit = defineEmits<{
   'refresh-sessions': []
 }>()
 
-const NUM_OPTIONS = Array.from({ length: KEYFRAME_MAX_CANDIDATES }, (_, index) => index + 1)
+const numOptions = computed(() => {
+  const max = Math.min(KEYFRAME_MAX_CANDIDATES, Math.max(1, props.maxNum))
+  return Array.from({ length: max }, (_, index) => index + 1)
+})
 </script>
 
 <template>
@@ -65,20 +73,33 @@ const NUM_OPTIONS = Array.from({ length: KEYFRAME_MAX_CANDIDATES }, (_, index) =
         </el-select>
       </label>
       <label class="ctl">
+        <span>比例</span>
+        <el-select
+          v-model="ratio"
+          size="small"
+          class="w-ratio"
+          title="patch 视口固定 16:9；只列所选图片模型支持且与视口一致的比例"
+        >
+          <el-option v-for="item in ratioOptions" :key="item" :label="item" :value="item" />
+          <el-option v-if="!ratioOptions.length" label="模型不支持视口比例" value="" disabled />
+        </el-select>
+      </label>
+      <label class="ctl">
         <span>分辨率</span>
-        <el-select v-model="resolution" size="small" class="w-resolution">
-          <el-option
-            v-for="item in KEYFRAME_RESOLUTIONS"
-            :key="item.value"
-            :label="item.label"
-            :value="item.value"
-          />
+        <el-select
+          v-model="resolution"
+          size="small"
+          class="w-resolution"
+          title="档位来自所选图片模型；实际像素由平台按比例决定"
+        >
+          <el-option v-for="item in resolutionOptions" :key="item" :label="item" :value="item" />
+          <el-option v-if="!resolutionOptions.length" label="暂无档位" value="" disabled />
         </el-select>
       </label>
       <label class="ctl">
         <span>候选张数</span>
         <el-select v-model="num" size="small" class="w-num">
-          <el-option v-for="item in NUM_OPTIONS" :key="item" :label="`${item} 张`" :value="item" />
+          <el-option v-for="item in numOptions" :key="item" :label="`${item} 张`" :value="item" />
         </el-select>
       </label>
       <span class="run-state bar-status">
@@ -119,6 +140,10 @@ const NUM_OPTIONS = Array.from({ length: KEYFRAME_MAX_CANDIDATES }, (_, index) =
 <style scoped>
 .kf-image-model {
   width: 190px;
+}
+
+.w-ratio {
+  width: 90px;
 }
 
 .w-resolution {

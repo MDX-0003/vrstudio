@@ -69,6 +69,16 @@ export interface ModelOption {
   description: string
 }
 
+export interface ImageModelCapabilities {
+  model_id: number
+  name?: string
+  ratios: string[]
+  resolutions: string[]
+  max_num?: number
+  default_num?: number
+  error?: string
+}
+
 export interface GenerationParams {
   output: OutputOption[]
   input: InputOption[]
@@ -77,6 +87,8 @@ export interface GenerationParams {
   models: ModelOption[]
   image_models: ModelOption[]
   image_models_error?: string | null
+  /** 当前图片模型的能力；详情读不到时可能只有 model_id/name 与 error。 */
+  image?: ImageModelCapabilities
   current: {
     resolution: string
     scale: string
@@ -412,6 +424,8 @@ export interface KeyframeRef {
 export interface KeyframeState {
   enabled: boolean
   error: string | null
+  /** 图片步输出比例；patch 由视口锁定，几何不合约时为 null。 */
+  ratio?: string | null
   refs: KeyframeRef[]
   refs_default: boolean
   role_help: Record<string, string>

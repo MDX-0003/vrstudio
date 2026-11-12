@@ -1734,7 +1734,8 @@ def test_keyframe_run_queues_image_argv(client, patch_case, tmp_path, monkeypatc
     monkeypatch.setattr(web_app.QUEUE, "submit",
                         lambda op, name, argv, **kwargs:
                         captured.append((op, name, argv)))
-    monkeypatch.setattr(web_app, "_current_session", lambda name: 123)
+    monkeypatch.setattr(web_app, "_generation_snapshot",
+                        lambda name: {"current": {"session_id": 123}, "image": {}})
     r = client.post("/api/case/p1/keyframe/run", json={
         "step": "first", "image_model_id": 44, "resolution": "2K"})
     assert r.status_code == 200, r.text
@@ -1756,6 +1757,44 @@ def test_keyframe_run_queues_image_argv(client, patch_case, tmp_path, monkeypatc
     assert r.status_code == 200, r.text
 
 
+def test_keyframe_run_validates_model_ratio_and_resolution(
+        client, patch_case, tmp_path, monkeypatch):
+    d = _mk_extract("p1", tmp_path, "v1")
+    (d / "first_frame_raw.png").write_bytes(b"first")
+    (d / "last_frame_raw.png").write_bytes(b"last")
+    case_mod.set_extract_current("p1", "v1", root=tmp_path)
+    _add_image("p1", tmp_path, "sheet", "subject_ref")
+    snapshot = {
+        "current": {"session_id": 123},
+        "image": {"model_id": 25, "name": "Seedream 4.5",
+                  "ratios": ["16:9", "21:9"], "resolutions": ["2K", "4K"]},
+    }
+    monkeypatch.setattr(web_app, "_generation_snapshot", lambda name: snapshot)
+
+    # 比例被 patch 视口锁死，不能跟着模型列表自由选。
+    r = client.post("/api/case/p1/keyframe/run", json={
+        "step": "first", "image_model_id": 25, "ratio": "21:9", "resolution": "2K"})
+    assert r.status_code == 400
+    assert "必须与 patch 视口一致" in r.json()["error"]
+
+    # 模型不支持的档位在起任务前就拒绝，不留给平台。
+    r = client.post("/api/case/p1/keyframe/run", json={
+        "step": "first", "image_model_id": 25, "ratio": "16:9", "resolution": "1K"})
+    assert r.status_code == 400
+    assert "不支持分辨率 1K" in r.json()["error"]
+
+    captured = []
+    monkeypatch.setattr(web_app.QUEUE, "submit",
+                        lambda op, name, argv, **kwargs:
+                        captured.append((op, name, argv)))
+    r = client.post("/api/case/p1/keyframe/run", json={
+        "step": "first", "image_model_id": 25, "ratio": "16:9", "resolution": "2K"})
+    assert r.status_code == 200, r.text
+    argv = captured[0][2]
+    assert argv[argv.index("--ratio") + 1] == "16:9"
+    assert argv[argv.index("--resolution") + 1] == "2K"
+
+
 def test_keyframe_run_includes_detail_refs_and_notes(
         client, patch_case, tmp_path, monkeypatch):
     d = _mk_extract("p1", tmp_path, "v1")
@@ -1773,7 +1812,8 @@ def test_keyframe_run_includes_detail_refs_and_notes(
     monkeypatch.setattr(web_app.QUEUE, "submit",
                         lambda op, name, argv, **kwargs:
                         captured.append((op, name, argv)))
-    monkeypatch.setattr(web_app, "_current_session", lambda name: 123)
+    monkeypatch.setattr(web_app, "_generation_snapshot",
+                        lambda name: {"current": {"session_id": 123}, "image": {}})
     r = client.post("/api/case/p1/keyframe/run", json={"step": "first"})
     assert r.status_code == 200, r.text
     argv = captured[0][2]
@@ -1791,7 +1831,8 @@ def test_keyframe_run_requires_project_session(client, patch_case, tmp_path, mon
     (d / "first_frame_raw.png").write_bytes(b"first")
     case_mod.set_extract_current("p1", "v1", root=tmp_path)
     _add_image("p1", tmp_path, "sheet", "subject_ref")
-    monkeypatch.setattr(web_app, "_current_session", lambda name: 0)
+    monkeypatch.setattr(web_app, "_generation_snapshot",
+                        lambda name: {"current": {"session_id": 0}, "image": {}})
     r = client.post("/api/case/p1/keyframe/run", json={"step": "first"})
     assert r.status_code == 400
     assert "项目生成会话" in r.json()["error"]
@@ -2094,7 +2135,9 @@ def test_keyframe_stale_only_blocks_what_depends_on_old_picks(client, patch_case
 
     # 首帧候选照常能生成：入参是当前抽取的原始首帧 + 三视图
     submitted = []
-    monkeypatch.setattr(web_app, "_current_session", lambda name: 2062569522605504)
+    monkeypatch.setattr(web_app, "_generation_snapshot",
+                        lambda name: {"current": {"session_id": 2062569522605504},
+                                      "image": {}})
     monkeypatch.setattr(web_app, "_keyframe_ratio", lambda case: "16:9")
     monkeypatch.setattr(web_app.QUEUE, "submit",
                         lambda op, name, argv, **kw: submitted.append((op, argv)))

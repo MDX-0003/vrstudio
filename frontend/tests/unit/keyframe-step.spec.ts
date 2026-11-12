@@ -200,6 +200,14 @@ function sessionInfo(): CaseInfo {
       { id: 46, name: '万能编辑2.1', description: '' },
     ],
     image_models_error: null,
+    image: {
+      model_id: 44,
+      name: '专业图片-2.5',
+      ratios: ['1:1', '9:16', '16:9', '3:2', '2:3', '3:4', '4:3', '21:9'],
+      resolutions: ['1K', '2K', '4K'],
+      max_num: 4,
+      default_num: 4,
+    },
   } as unknown as CaseInfo['generation_params']
   return data
 }
@@ -347,7 +355,7 @@ describe('KeyframeStep 候选批次折叠', () => {
 })
 
 describe('KeyframeStep 图片模型', () => {
-  it('switches the model from the candidate header and saves it', async () => {
+  it('switches the model from the bottom bar and saves it', async () => {
     vi.mocked(saveParams).mockResolvedValue(info())
     const wrapper = await mountStep()
     const select = wrapper.findComponent('.kf-image-model')
@@ -387,6 +395,68 @@ describe('KeyframeStep 底部常驻条', () => {
     wrapper.unmount()
   })
 
+  it('模型清单读不到时用详情里的名字，不退化成 id', async () => {
+    const data = sessionInfo()
+    data.generation_params!.image_models = []
+    const wrapper = await mountStep(data)
+    const bar = wrapper.findComponent(KeyframeSubmitBar)
+    expect(bar.props('imageModelOptions')).toEqual([
+      { id: 44, name: '专业图片-2.5', description: '不在当前清单里' },
+    ])
+    expect(wrapper.find('.submit-bar').text()).toContain('专业图片-2.5')
+    wrapper.unmount()
+  })
+
+  it('分辨率、比例与候选数跟随所选图片模型的能力', async () => {
+    const data = sessionInfo()
+    data.generation_params!.fixed.image_model_id = 25
+    data.generation_params!.image_models = [{ id: 25, name: 'Seedream 4.5', description: '' }]
+    data.generation_params!.image = {
+      model_id: 25,
+      name: 'Seedream 4.5',
+      ratios: ['16:9', '21:9'],
+      resolutions: ['2K', '4K'],
+      max_num: 2,
+      default_num: 2,
+    }
+    const wrapper = await mountStep(data)
+    const bar = wrapper.findComponent(KeyframeSubmitBar)
+    expect(bar.props('resolutionOptions')).toEqual(['2K', '4K'])
+    // patch 视口固定 16:9：模型支持 21:9 也不出现在下拉里。
+    expect(bar.props('ratioOptions')).toEqual(['16:9'])
+    expect(bar.props('maxNum')).toBe(2)
+    wrapper.unmount()
+  })
+
+  it('切换图片模型后按新模型重算档位', async () => {
+    const wrapper = await mountStep(sessionInfo())
+    const bar = wrapper.findComponent(KeyframeSubmitBar)
+    expect(bar.props('resolutionOptions')).toEqual(['1K', '2K', '4K'])
+
+    const next = sessionInfo()
+    next.generation_params!.fixed.image_model_id = 25
+    next.generation_params!.image_models = [{ id: 25, name: 'Seedream 4.5', description: '' }]
+    next.generation_params!.image = {
+      model_id: 25,
+      name: 'Seedream 4.5',
+      ratios: ['16:9', '21:9'],
+      resolutions: ['2K', '4K'],
+      max_num: 2,
+      default_num: 2,
+    }
+    vi.mocked(saveParams).mockResolvedValue(next)
+    bar.vm.$emit('update:imageModelId', 25)
+    bar.vm.$emit('model-change', 25)
+    await flushPromises()
+    await wrapper.setProps({ info: next })
+    await flushPromises()
+
+    expect(bar.props('resolutionOptions')).toEqual(['2K', '4K'])
+    expect(bar.props('ratioOptions')).toEqual(['16:9'])
+    expect(bar.props('maxNum')).toBe(2)
+    wrapper.unmount()
+  })
+
   it('切换会话后保存扣费会话，再从底栏提交候选', async () => {
     const data = sessionInfo()
     vi.mocked(saveParams).mockResolvedValue(data)
@@ -407,6 +477,7 @@ describe('KeyframeStep 底部常驻条', () => {
     })
     expect(keyframeApi.run).toHaveBeenCalledWith('p1', {
       step: 'first',
+      ratio: '16:9',
       resolution: '2K',
       num: 4,
       image_model_id: 44,

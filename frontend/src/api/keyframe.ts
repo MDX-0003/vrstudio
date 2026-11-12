@@ -19,6 +19,8 @@ export interface KeyframeRounds {
 
 export interface KeyframeRunPayload {
   step: 'first' | 'last'
+  /** 输出比例；patch 由视口锁定为 16:9，服务端会校验。 */
+  ratio?: string
   resolution?: string
   num?: number
   /** 首尾帧两步共用的图片模型；缺省时用 generation.toml 的值。 */

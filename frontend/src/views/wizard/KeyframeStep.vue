@@ -25,6 +25,7 @@ import VariableCard from '@/components/prompt/VariableCard.vue'
 import FileOpenLink from '@/components/common/FileOpenLink.vue'
 import KeyframeRoundBlock from '@/components/keyframe/KeyframeRoundBlock.vue'
 import { KEYFRAME_ROLE_OPTIONS } from '@/constants/assetRoles'
+import { KEYFRAME_MAX_CANDIDATES, KEYFRAME_RESOLUTIONS } from '@/constants/keyframe'
 import { taskStatusMeta } from '@/constants/taskStatus'
 import { buildPromptVariables, promptVariablesToRecord } from '@/utils/prompt'
 import type { CaseInfo, ModelOption, PromptPayload } from '@/types/case-info'
@@ -40,9 +41,36 @@ const emit = defineEmits<{
 
 type Step = 'first' | 'last'
 
+/** 图片模型能力：比例、分辨率、候选数由 params show 的 `image` 下发。 */
+const imageCaps = computed(() => props.info.generation_params?.image)
+const imageRatios = computed(() => imageCaps.value?.ratios ?? [])
+const imageResolutionValues = computed(() => {
+  const values = imageCaps.value?.resolutions ?? []
+  return values.length ? values : KEYFRAME_RESOLUTIONS.map((item) => item.value)
+})
+const imageMaxNum = computed(() => imageCaps.value?.max_num ?? KEYFRAME_MAX_CANDIDATES)
+/** patch 的视口比例由服务端下发；几何不合约时是 null。 */
+const caseRatio = computed(() => props.info.keyframe?.ratio ?? '16:9')
+/** 比例跟着视口走：只列模型支持且与视口一致的比例。 */
+const ratioOptions = computed(() => {
+  const fixed = caseRatio.value
+  const ratios = imageRatios.value
+  if (!fixed) return ratios
+  if (!ratios.length) return [fixed]
+  return ratios.includes(fixed) ? [fixed] : []
+})
+
 /** 4K 视口的首尾帧默认出 4K；1080p 视口仍默认 2K，控制额度。 */
-function defaultKeyframeResolution(info: CaseInfo): string {
-  return (info.viewport?.width ?? 0) >= 3840 ? '4K' : '2K'
+function defaultKeyframeResolution(info: CaseInfo, options: string[]): string {
+  const wanted = (info.viewport?.width ?? 0) >= 3840 ? '4K' : '2K'
+  if (!options.length || options.includes(wanted)) return wanted
+  const order: string[] = KEYFRAME_RESOLUTIONS.map((item) => item.value)
+  const wantedRank = order.indexOf(wanted)
+  const below = options.filter((value) => {
+    const rank = order.indexOf(value)
+    return rank >= 0 && rank <= wantedRank
+  })
+  return below.length ? below[below.length - 1] : options[0]
 }
 
 const step = ref<Step>('first')
@@ -60,8 +88,9 @@ const refsPanel = ref<HTMLElement | null>(null)
 const pickerOpen = ref(false)
 const taskOpen = ref(false)
 const olderOpen = ref(false)
-const resolution = ref(defaultKeyframeResolution(props.info))
-const num = ref(4)
+const resolution = ref(defaultKeyframeResolution(props.info, imageResolutionValues.value))
+const ratio = ref(caseRatio.value)
+const num = ref(Math.min(KEYFRAME_MAX_CANDIDATES, imageMaxNum.value))
 const noteDraft = ref<Record<string, string>>({})
 let startedAt = 0
 let syncing = true
@@ -105,6 +134,7 @@ const canRun = computed(() => {
   if (!ready.value?.ready) return false
   if (!primary.value) return false
   if (!sessionReady.value) return false
+  if (!ratioOptions.value.length) return false
   if (step.value === 'last' && !firstPick.value) return false
   return true
 })
@@ -112,6 +142,9 @@ const runReason = computed(() => {
   if (!ready.value?.ready) return ready.value?.reason || '先完成抽取并准备两张原始帧'
   if (!primary.value) return '先添加一张人物三视图并设为主三视图'
   if (!sessionReady.value) return '先在底栏选择项目生成会话；图片生成按项目会话计费'
+  if (!ratioOptions.value.length) {
+    return `所选图片模型不支持视口比例 ${caseRatio.value}；换一个图片模型`
+  }
   if (step.value === 'last' && !firstPick.value) return '先生成并挑选首帧定稿'
   return ''
 })
@@ -128,7 +161,7 @@ const targetLabel = computed(() => (step.value === 'first' ? '首帧定稿' : '�
 const refs = computed(() => keyframe.value.refs ?? [])
 const primary = computed(() => refs.value.find((ref) => ref.role === 'subject_ref') ?? null)
 const details = computed(() => refs.value.filter((ref) => ref.role === 'detail_ref'))
-/** 首尾帧共用一个图片模型：就放在候选批次的标题栏，保存进 generation.toml。 */
+/** 首尾帧共用一个图片模型：在固定底栏选择，保存进 generation.toml。 */
 const imageModelId = ref<number | null>(null)
 const imageModelSaving = ref(false)
 const imageModels = computed(() => props.info.generation_params?.image_models ?? [])
@@ -137,7 +170,9 @@ const imageModelChoices = computed<ModelOption[]>(() => {
   const options = imageModels.value
   const id = imageModelId.value
   if (id == null || id <= 0 || options.some((item) => item.id === id)) return options
-  return [{ id, name: `模型 #${id}`, description: '不在当前清单里' }, ...options]
+  // 列表读不到时至少用详情里的名字；两者都没有才退回 id。
+  const name = imageCaps.value?.name?.trim() || `图片模型 #${id}`
+  return [{ id, name, description: '不在当前清单里' }, ...options]
 })
 
 function syncImageModel(): void {
@@ -409,11 +444,13 @@ async function run(): Promise<void> {
   try {
     const payload: {
       step: Step
+      ratio?: string
       resolution?: string
       num?: number
       image_model_id?: number
     } = {
       step: step.value,
+      ratio: ratio.value,
       resolution: resolution.value,
       num: num.value,
     }
@@ -639,6 +676,23 @@ watch(
 )
 
 watch([selectedProject, selectedEpisode, selectedSession], scheduleSessionSave)
+
+watch(imageResolutionValues, (options) => {
+  if (!options.length) return
+  if (!options.includes(resolution.value)) {
+    resolution.value = defaultKeyframeResolution(props.info, options)
+  }
+})
+
+watch(ratioOptions, (options) => {
+  if (!options.length || options.includes(ratio.value)) return
+  ratio.value = options[0]
+})
+
+watch(imageMaxNum, (max) => {
+  const capped = Math.min(KEYFRAME_MAX_CANDIDATES, Math.max(1, max))
+  if (num.value > capped) num.value = capped
+})
 
 onMounted(() => {
   syncImageModel()
@@ -927,6 +981,7 @@ onUnmounted(() => {
     </section>
 
     <KeyframeSubmitBar
+      v-model:ratio="ratio"
       v-model:resolution="resolution"
       v-model:num="num"
       v-model:image-model-id="imageModelId"
@@ -937,6 +992,9 @@ onUnmounted(() => {
       :image-model-options="imageModelChoices"
       :image-models-error="imageModelsError"
       :model-saving="imageModelSaving"
+      :resolution-options="imageResolutionValues"
+      :ratio-options="ratioOptions"
+      :max-num="imageMaxNum"
       :projects="projects"
       :episodes="episodes"
       :sessions="sessions"
