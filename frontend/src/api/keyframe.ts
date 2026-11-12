@@ -68,7 +68,7 @@ export function saveKeyframePrompt(
 
 export interface KeyframeRefInput {
   asset: string
-  role: 'subject_ref' | 'detail_ref'
+  role: 'subject_ref' | 'detail_ref' | 'lighting_ref'
   note: string
 }
 

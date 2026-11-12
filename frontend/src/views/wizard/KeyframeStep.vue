@@ -19,18 +19,15 @@ import type { KeyframeRefInput, KeyframeRound } from '@/api/keyframe'
 import { useCaseTasks } from '@/composables/useCaseTasks'
 import { useCaseSaveQueue } from '@/composables/useCaseSaveQueue'
 import AssetPickerDialog from '@/components/assets/AssetPickerDialog.vue'
-import AssetReferenceList from '@/components/assets/AssetReferenceList.vue'
 import KeyframeSubmitBar from '@/components/generate/KeyframeSubmitBar.vue'
 import VariableCard from '@/components/prompt/VariableCard.vue'
-import FileOpenLink from '@/components/common/FileOpenLink.vue'
 import KeyframeRoundBlock from '@/components/keyframe/KeyframeRoundBlock.vue'
-import { KEYFRAME_ROLE_OPTIONS } from '@/constants/assetRoles'
-import { KEYFRAME_MAX_CANDIDATES, KEYFRAME_RESOLUTIONS } from '@/constants/keyframe'
+import KeyframeInputCards from '@/components/keyframe/KeyframeInputCards.vue'
+import { KEYFRAME_MAX_CANDIDATES, KEYFRAME_RESOLUTIONS, keyframeMaxRefs } from '@/constants/keyframe'
 import { taskStatusMeta } from '@/constants/taskStatus'
 import { buildPromptVariables, promptVariablesToRecord } from '@/utils/prompt'
 import type { CaseInfo, ModelOption, PromptPayload } from '@/types/case-info'
 import type { PromptVariable } from '@/types/case'
-import type { ReferenceRow } from '@/types/reference'
 import type { EpisodeOption, ProjectOption, SessionOption } from '@/types/session'
 
 const props = defineProps<{ caseName: string; info: CaseInfo }>()
@@ -84,8 +81,9 @@ const running = ref(false)
 const picking = ref<string | null>(null)
 const handoffBusy = ref(false)
 const refsSaving = ref(false)
-const refsPanel = ref<HTMLElement | null>(null)
 const pickerOpen = ref(false)
+const promptRefreshing = ref(false)
+const candidatesPanel = ref<HTMLElement | null>(null)
 const taskOpen = ref(false)
 const olderOpen = ref(false)
 const resolution = ref(defaultKeyframeResolution(props.info, imageResolutionValues.value))
@@ -95,6 +93,7 @@ const noteDraft = ref<Record<string, string>>({})
 let startedAt = 0
 let syncing = true
 let promptTimer: ReturnType<typeof setTimeout> | null = null
+let promptSeq = 0
 let noteTimer: ReturnType<typeof setTimeout> | null = null
 let roundsTimer: ReturnType<typeof setInterval> | null = null
 let pendingRefs: KeyframeRefInput[] | null = null
@@ -132,35 +131,48 @@ const olderRounds = computed(() => {
 })
 const canRun = computed(() => {
   if (!ready.value?.ready) return false
-  if (!primary.value) return false
   if (!sessionReady.value) return false
   if (!ratioOptions.value.length) return false
+  if (overLimit.value) return false
   if (step.value === 'last' && !firstPick.value) return false
   return true
 })
 const runReason = computed(() => {
   if (!ready.value?.ready) return ready.value?.reason || '先完成抽取并准备两张原始帧'
-  if (!primary.value) return '先添加一张人物三视图并设为主三视图'
   if (!sessionReady.value) return '先在底栏选择项目生成会话；图片生成按项目会话计费'
   if (!ratioOptions.value.length) {
     return `所选图片模型不支持视口比例 ${caseRatio.value}；换一个图片模型`
+  }
+  if (overLimit.value) {
+    const suffix = step.value === 'last' ? '尾帧要同时带上图1 底图与首帧定稿' : '首帧要带上图1 底图'
+    return `${suffix}，参考图最多 ${maxRefs.value} 张；当前 ${refs.value.length} 张，共 ${submittedCount.value} 张，超过 10 张上限；先移除 ${refs.value.length - maxRefs.value} 张`
   }
   if (step.value === 'last' && !firstPick.value) return '先生成并挑选首帧定稿'
   return ''
 })
 const handoffReason = computed(() => {
   if (keyframe.value.stale) return '抽取版本已更新，需要重新定稿'
+  if (overLimit.value) return '当前步骤参考图超过 10 张上限'
   if (!firstPick.value) return '首帧未定稿'
   if (!lastPick.value) return '尾帧未定稿'
   return ''
 })
 
 const rawFrame = computed(() => (step.value === 'first' ? rawFirst.value : rawLast.value))
-const rawLabel = computed(() => (step.value === 'first' ? '原始首帧' : '原始尾帧'))
-const targetLabel = computed(() => (step.value === 'first' ? '首帧定稿' : '尾帧定稿'))
-const refs = computed(() => keyframe.value.refs ?? [])
-const primary = computed(() => refs.value.find((ref) => ref.role === 'subject_ref') ?? null)
-const details = computed(() => refs.value.filter((ref) => ref.role === 'detail_ref'))
+const refs = computed(() =>
+  (keyframe.value.refs ?? []).map((ref) => ({
+    ...ref,
+    note: noteDraft.value[ref.asset] ?? ref.note,
+  })),
+)
+const maxRefs = computed(() => keyframeMaxRefs(step.value))
+const submittedCount = computed(
+  () => 1 + refs.value.length + (step.value === 'last' && firstPick.value ? 1 : 0),
+)
+const overLimit = computed(() => refs.value.length > maxRefs.value)
+const targetUrl = computed(() => (stepPick.value ? pickedUrl(stepPick.value) : ''))
+const targetName = computed(() => stepPick.value?.file?.name || '待定稿')
+const targetIsRaw = computed(() => stepPick.value?.source === 'raw')
 /** 首尾帧共用一个图片模型：在固定底栏选择，保存进 generation.toml。 */
 const imageModelId = ref<number | null>(null)
 const imageModelSaving = ref(false)
@@ -307,55 +319,8 @@ const barTone = computed(() => {
           ? 'running'
           : ''
 })
-const anchorNumber = computed(() =>
-  step.value === 'last' && firstPick.value && primary.value ? 3 : null,
-)
-const refRows = computed<ReferenceRow[]>(() => {
-  const rows: ReferenceRow[] = []
-  if (primary.value) {
-    rows.push({
-      asset: primary.value.asset,
-      role: 'subject_ref',
-      note: primary.value.note,
-      number: 2,
-      file: primary.value.file,
-      url: primary.value.url,
-      exists: primary.value.exists,
-      locked: true,
-      roleLabel: '人物三视图（主图）',
-      noteLabel: '主三视图',
-    })
-  }
-  if (step.value === 'last' && firstPick.value && primary.value) {
-    rows.push({
-      asset: firstPick.value.asset,
-      role: 'first_frame',
-      number: 3,
-      file: firstPick.value.file ?? null,
-      url: pickedUrl(firstPick.value),
-      exists: true,
-      locked: true,
-      roleLabel: '首帧定稿',
-      noteLabel: '尾帧批次自动追加',
-    })
-  }
-  const start = rows.length && anchorNumber.value ? 4 : 3
-  details.value.forEach((ref, index) => {
-    rows.push({
-      asset: ref.asset,
-      role: ref.role,
-      note: noteDraft.value[ref.asset] ?? ref.note,
-      number: start + index,
-      file: ref.file,
-      url: ref.url,
-      exists: ref.exists,
-    })
-  })
-  return rows
-})
-
-function focusRefs(): void {
-  refsPanel.value?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+function focusCandidates(): void {
+  candidatesPanel.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
 function assetUrl(assetId: string | null | undefined): string {
@@ -379,10 +344,18 @@ function applyPrompt(data: PromptPayload): void {
 }
 
 async function loadPrompt(current: Step = step.value): Promise<void> {
+  const seq = ++promptSeq
+  promptRefreshing.value = true
   try {
-    applyPrompt(await fetchKeyframePrompt(props.caseName, current))
+    const data = await fetchKeyframePrompt(props.caseName, current)
+    if (seq !== promptSeq) return
+    applyPrompt(data)
   } catch (err) {
-    promptError.value = err instanceof Error ? err.message : '读取首尾帧提示词失败'
+    if (seq === promptSeq) {
+      promptError.value = err instanceof Error ? err.message : '读取首尾帧提示词失败'
+    }
+  } finally {
+    if (seq === promptSeq) promptRefreshing.value = false
   }
 }
 
@@ -399,9 +372,11 @@ async function flushPrompt(): Promise<boolean> {
     promptTimer = null
   }
   const vars = promptVariablesToRecord(promptVars.value)
+  const seq = ++promptSeq
   promptSaving.value = true
   try {
-    applyPrompt(await saveKeyframePrompt(props.caseName, step.value, vars))
+    const data = await saveKeyframePrompt(props.caseName, step.value, vars)
+    if (seq === promptSeq) applyPrompt(data)
     return true
   } catch (err) {
     promptError.value = err instanceof Error ? err.message : '保存首尾帧提示词失败'
@@ -522,7 +497,7 @@ function currentRefs(): KeyframeRefInput[] {
   return refs.value.map((ref) => ({
     asset: ref.asset,
     role: ref.role,
-    note: noteDraft.value[ref.asset] ?? ref.note,
+    note: ref.note,
   }))
 }
 
@@ -536,6 +511,8 @@ async function saveRefs(next: KeyframeRefInput[]): Promise<void> {
     const data = await setKeyframeRefs(props.caseName, next)
     noteDraft.value = {}
     emit('updated', data)
+    // 参考图变了，提示词里的【参考图分工】也要跟着变；只更新 info 会留下旧预览。
+    if (!pendingRefs) await loadPrompt()
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : '保存参考图清单失败')
   } finally {
@@ -550,37 +527,33 @@ async function saveRefs(next: KeyframeRefInput[]): Promise<void> {
 
 async function addRefs(ids: string[]): Promise<void> {
   const current = currentRefs()
-  let hasPrimary = current.some((ref) => ref.role === 'subject_ref')
-  const next = [...current]
-  for (const id of ids) {
-    if (next.some((ref) => ref.asset === id)) continue
-    if (!hasPrimary) {
-      next.unshift({ asset: id, role: 'subject_ref', note: '' })
-      hasPrimary = true
-    } else {
-      next.push({ asset: id, role: 'detail_ref', note: '' })
-    }
+  const used = new Set(current.map((ref) => ref.asset))
+  const unique = ids.filter((id) => !used.has(id))
+  const remaining = Math.max(0, maxRefs.value - current.length)
+  const accepted = unique.slice(0, remaining)
+  if (accepted.length < unique.length) {
+    ElMessage.warning(
+      `本步参考图最多 ${maxRefs.value} 张；只加入前 ${accepted.length} 张，其余未加入`,
+    )
   }
   pickerOpen.value = false
+  if (!accepted.length) return
+  const next = [
+    ...current,
+    ...accepted.map((id) => ({ asset: id, role: 'detail_ref' as const, note: '' })),
+  ]
   await saveRefs(next)
 }
 
 async function changeRefRole(asset: string, role: string): Promise<void> {
-  if (role !== 'subject_ref' && role !== 'detail_ref') return
+  if (role !== 'subject_ref' && role !== 'detail_ref' && role !== 'lighting_ref') return
   const current = currentRefs()
   const target = current.find((ref) => ref.asset === asset)
-  if (!target) return
+  if (!target || target.role === role) return
   if (role === 'subject_ref') {
-    if (target.role === 'subject_ref') return
     const oldPrimary = current.find((ref) => ref.role === 'subject_ref')
     if (oldPrimary) oldPrimary.role = 'detail_ref'
-    target.role = 'subject_ref'
-    await saveRefs([target, ...current.filter((ref) => ref.asset !== asset)])
-    return
-  }
-  if (target.role === 'subject_ref') {
-    ElMessage.warning('先指定另一张人物三视图，再改这张的角色')
-    return
+    target.note = ''
   }
   target.role = role
   await saveRefs(current)
@@ -588,21 +561,18 @@ async function changeRefRole(asset: string, role: string): Promise<void> {
 
 async function moveRef(asset: string, delta: number): Promise<void> {
   const current = currentRefs()
-  const editable = current.filter((ref) => ref.role === 'detail_ref')
-  const index = editable.findIndex((ref) => ref.asset === asset)
+  const index = current.findIndex((ref) => ref.asset === asset)
   const target = index + delta
-  if (index < 0 || target < 0 || target >= editable.length) return
-  const nextDetails = [...editable]
-  const [moved] = nextDetails.splice(index, 1)
-  nextDetails.splice(target, 0, moved)
-  const primaryRef = current.find((ref) => ref.role === 'subject_ref')
-  await saveRefs(primaryRef ? [primaryRef, ...nextDetails] : nextDetails)
+  if (index < 0 || target < 0 || target >= current.length) return
+  const next = [...current]
+  const [moved] = next.splice(index, 1)
+  next.splice(target, 0, moved)
+  await saveRefs(next)
 }
 
 async function removeRef(asset: string): Promise<void> {
   const current = currentRefs()
-  const target = current.find((ref) => ref.asset === asset)
-  if (!target || target.role === 'subject_ref') return
+  if (!current.some((ref) => ref.asset === asset)) return
   await saveRefs(current.filter((ref) => ref.asset !== asset))
 }
 
@@ -617,7 +587,7 @@ function onPickerUpdated(data: CaseInfo): void {
 }
 
 async function handoff(): Promise<void> {
-  if (handoffBusy.value) return
+  if (handoffBusy.value || handoffReason.value) return
   handoffBusy.value = true
   try {
     const data = await handoffKeyframe(props.caseName)
@@ -723,7 +693,7 @@ onUnmounted(() => {
       <span class="spacer" />
       <el-button
         type="primary"
-        :disabled="!keyframe.complete || handoffBusy"
+        :disabled="Boolean(handoffReason) || handoffBusy"
         :loading="handoffBusy"
         @click="handoff"
       >
@@ -732,149 +702,29 @@ onUnmounted(() => {
       <span v-if="handoffReason" class="kf-reason">{{ handoffReason }}</span>
     </div>
 
-    <section class="panel">
-      <div class="panel-head">
-        <h2 class="panel-title">图片步输入</h2>
-        <span class="muted">
-          编号由下方参考图清单生成；图1 是当前步骤的原始帧，图2 起是参考图；
-          尾帧步骤在人物三视图后插入首帧定稿。
-        </span>
-      </div>
-      <div class="panel-body">
-        <div class="kf-slots">
-          <figure class="kf-slot">
-            <figcaption class="kf-slot-cap">
-              <span class="kf-slot-no">图1</span>
-              <span>{{ rawLabel }}</span>
-              <span class="kf-slot-state" :class="rawFrame?.exists ? 'ok' : 'bad'">
-                {{ rawFrame?.exists ? '已就绪' : '缺图' }}
-              </span>
-            </figcaption>
-            <div class="kf-shot">
-              <img v-if="rawFrame?.exists" :src="rawFrame.url" :alt="rawLabel" />
-              <div v-else class="kf-shot-empty">
-                <span>缺{{ rawLabel }}</span>
-              </div>
-              <FileOpenLink :file="rawFrame" :label="`打开${rawLabel}`" class="card-open" />
-            </div>
-            <div class="kf-slot-file mono">{{ rawFrame?.name || '—' }}</div>
-            <div v-if="rawFrame?.width" class="kf-slot-file mono">
-              {{ rawFrame.width }}×{{ rawFrame.height }}
-              <template v-if="rawFrame.size">
-                · {{ (rawFrame.size / 1048576).toFixed(1) }} MB
-              </template>
-            </div>
-          </figure>
+    <KeyframeInputCards
+      :case-name="caseName"
+      :step="step"
+      :raw-frame="rawFrame ?? null"
+      :refs="refs"
+      :first-pick="firstPick"
+      :target-url="targetUrl"
+      :target-name="targetName"
+      :target-is-raw="targetIsRaw"
+      :max-refs="maxRefs"
+      :submitted-count="submittedCount"
+      :over-limit="overLimit"
+      :disabled="refsSaving"
+      @add="pickerOpen = true"
+      @remove="removeRef"
+      @move="moveRef"
+      @role="changeRefRole"
+      @note="changeRefNote"
+      @use-raw="useRawFrame"
+      @focus-candidates="focusCandidates"
+    />
 
-          <figure class="kf-slot">
-            <figcaption class="kf-slot-cap">
-              <span class="kf-slot-no">{{ primary ? '图2' : '—' }}</span>
-              <span>参考图组</span>
-              <el-button link type="primary" size="small" class="kf-slot-action" @click="focusRefs">
-                编辑参考图
-              </el-button>
-            </figcaption>
-            <div class="kf-shot contain">
-              <img v-if="primary" :src="primary.url || assetUrl(primary.asset)" alt="人物三视图" />
-              <div v-else class="kf-shot-empty"><span>还没有人物三视图</span></div>
-              <span v-if="refs.length > 1" class="kf-stack">共 {{ refs.length }} 张</span>
-              <FileOpenLink
-                v-if="primary?.file"
-                :file="primary.file"
-                label="打开三视图"
-                class="card-open"
-              />
-            </div>
-            <div class="kf-slot-file mono">{{ primary?.file?.name || '—' }}</div>
-          </figure>
-
-          <figure class="kf-slot">
-            <figcaption class="kf-slot-cap">
-              <span class="kf-slot-no">{{ anchorNumber ?? '—' }}</span>
-              <span>首帧定稿</span>
-              <span class="kf-slot-note">{{ anchorNumber ? '自动追加' : '尾帧步骤插入' }}</span>
-            </figcaption>
-            <div v-if="step === 'last' && firstPick && primary" class="kf-shot">
-              <img :src="pickedUrl(firstPick)" alt="首帧定稿" />
-              <FileOpenLink :file="firstPick.file" label="打开首帧定稿" class="card-open" />
-            </div>
-            <div v-else class="kf-shot kf-shot-empty">
-              <span>生成并定稿首帧后填入</span>
-            </div>
-            <div class="kf-slot-file mono">
-              {{ step === 'last' && firstPick?.file ? firstPick.file.name : '—' }}
-            </div>
-          </figure>
-
-          <figure class="kf-slot">
-            <figcaption class="kf-slot-cap">
-              <span class="kf-slot-no">目标</span>
-              <span>{{ targetLabel }}</span>
-              <el-button
-                link
-                type="primary"
-                size="small"
-                class="kf-slot-action"
-                :loading="rawUsing"
-                :disabled="!rawFrame?.exists"
-                :title="
-                  rawFrame?.exists
-                    ? '不重绘，直接把当前抽取的原始帧当定稿（不花额度）'
-                    : '当前抽取版本没有这张原始帧；先重新抽取'
-                "
-                @click="useRawFrame"
-              >
-                直接用原始帧
-              </el-button>
-            </figcaption>
-            <div v-if="stepPick" class="kf-shot">
-              <img :src="pickedUrl(stepPick)" :alt="targetLabel" />
-              <FileOpenLink :file="stepPick.file" :label="`打开${targetLabel}`" class="card-open" />
-            </div>
-            <div v-else class="kf-shot kf-shot-target"><span>从下方候选里挑一张</span></div>
-            <div class="kf-slot-file mono">
-              {{ stepPick?.file?.name || '待定稿' }}
-              <template v-if="stepPick?.source === 'raw'">（原始帧，未重绘）</template>
-            </div>
-          </figure>
-        </div>
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-head">
-        <h2 class="panel-title">参考图清单</h2>
-        <span class="spacer" />
-        <span class="muted">{{ refs.length }} 张参考图</span>
-      </div>
-      <div ref="refsPanel" class="panel-body">
-        <el-alert
-          v-if="!primary"
-          type="warning"
-          :closable="false"
-          title="缺少人物三视图；先添加一张并设为主三视图"
-        />
-        <AssetReferenceList
-          :rows="refRows"
-          :role-options="KEYFRAME_ROLE_OPTIONS"
-          :role-help="keyframe.role_help || {}"
-          :disabled="refsSaving"
-          show-note
-          add-label="添加参考图"
-          empty-text="还没有参考图"
-          @add="pickerOpen = true"
-          @remove="removeRef"
-          @move="moveRef"
-          @role="changeRefRole"
-          @note="changeRefNote"
-        />
-        <p class="kf-refs-note muted">
-          编号与提示词里的图N 一致；第一张人物三视图固定在图2，尾帧步骤的首帧定稿自动插在它后面。
-        </p>
-      </div>
-    </section>
-
-    <section class="panel">
+    <section ref="candidatesPanel" class="panel">
       <div class="panel-head">
         <h2 class="panel-title">{{ step === 'first' ? '首帧候选' : '尾帧候选' }}</h2>
         <span class="spacer" />
@@ -956,6 +806,9 @@ onUnmounted(() => {
       <div class="panel-head">
         <h2 class="panel-title">图片步提示词</h2>
         <el-tag v-if="promptSaving" size="small" type="warning" effect="light">保存中</el-tag>
+        <el-tag v-if="promptRefreshing" size="small" type="info" effect="light">
+          参考图已改，提示词刷新中
+        </el-tag>
         <span class="spacer" />
         <span class="muted">{{ step === 'first' ? '只生成首帧' : '用首帧定稿作身份锚点' }}</span>
       </div>
@@ -1042,138 +895,6 @@ onUnmounted(() => {
   font-size: var(--text-xs);
 }
 
-.kf-slots {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--space-3);
-}
-
-.kf-slot {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  min-width: 0;
-  margin: 0;
-}
-
-.kf-slot-cap {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-  font-size: var(--text-xs);
-}
-
-.kf-slot-no {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  height: 18px;
-  padding: 0 6px;
-  border-radius: var(--radius-sm);
-  background: var(--color-primary-soft);
-  color: var(--color-primary);
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.kf-slot-state {
-  margin-left: auto;
-  font-size: 11px;
-}
-
-.kf-slot-state.ok {
-  color: var(--color-success);
-}
-
-.kf-slot-state.bad {
-  color: var(--color-danger);
-}
-
-.kf-slot-note {
-  margin-left: auto;
-  color: var(--color-text-faint);
-  font-size: 11px;
-  white-space: nowrap;
-}
-
-.kf-slot-action {
-  margin-left: auto;
-}
-
-.kf-shot {
-  position: relative;
-  overflow: hidden;
-  border-radius: var(--radius-md);
-  background: var(--color-video-bg);
-  aspect-ratio: 16 / 9;
-}
-
-.kf-shot img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.kf-shot.contain {
-  background: var(--color-surface-muted);
-}
-
-.kf-shot.contain img {
-  object-fit: contain;
-}
-
-.kf-shot-empty,
-.kf-shot-target {
-  display: grid;
-  place-items: center;
-  padding: var(--space-2);
-  text-align: center;
-  font-size: 11px;
-  line-height: 1.5;
-}
-
-.kf-shot-empty {
-  background: var(--color-surface-muted);
-  border: 1px dashed var(--color-border-strong);
-  color: var(--color-text-faint);
-}
-
-.kf-shot-target {
-  background: var(--color-primary-soft);
-  border: 1px dashed var(--color-primary);
-  color: var(--color-primary);
-}
-
-.kf-slot-file {
-  overflow: hidden;
-  color: var(--color-text-muted);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.kf-stack {
-  position: absolute;
-  right: 6px;
-  bottom: 6px;
-  display: inline-flex;
-  align-items: center;
-  height: 20px;
-  padding: 0 7px;
-  border-radius: 999px;
-  background: rgba(15, 23, 42, 0.78);
-  color: #fff;
-  font-size: 11px;
-}
-
-.kf-refs-note {
-  margin: var(--space-3) 0 0;
-  font-size: var(--text-xs);
-  line-height: 1.6;
-}
-
 .kf-prompt-full {
   grid-column: 1 / -1;
   font-size: var(--text-sm);
@@ -1196,17 +917,6 @@ onUnmounted(() => {
   font-size: var(--text-xs);
   line-height: 1.65;
   white-space: pre-wrap;
-}
-
-.card-open {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  z-index: 1;
-  padding: 2px 6px;
-  border-radius: 999px;
-  background: rgba(15, 23, 42, 0.7);
-  color: #fff;
 }
 
 .round-list {
@@ -1256,23 +966,8 @@ onUnmounted(() => {
   grid-column: 1 / -1;
 }
 
-.kf-drawer-note {
-  margin: 0 0 var(--space-3);
-  font-size: var(--text-xs);
-}
-
 @media (max-width: 1280px) {
-  .kf-slots {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .kf-vars {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-@media (max-width: 900px) {
-  .kf-slots {
     grid-template-columns: minmax(0, 1fr);
   }
 }

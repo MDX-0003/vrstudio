@@ -8,9 +8,11 @@ vrgen 的台账契约。图片步的参考图由它和原始帧解析；视频�
 
 - ``extract``：这一对定稿基于哪个抽取版本；与当前版本不一致时视为过期。
 - ``refs``：图片步的有序参考图清单，每项含 ``asset`` / ``role`` / ``note``。
-  ``role`` 只能是 ``subject_ref``（人物三视图，恰好一张）或 ``detail_ref``
-  （细节参考，任意多张）。旧格式的单值 ``sheet`` 读取时视为只有一项
-  ``subject_ref`` 的清单。
+  ``role`` 只能是 ``subject_ref``（人物三视图，最多一张）或 ``detail_ref``
+  （细节参考，任意多张）或 ``lighting_ref``（氛围与光影参考，任意多张）。
+  旧格式的单值 ``sheet`` 读取时视为只有一项 ``subject_ref`` 的清单。
+  用户明确清空清单时写 ``refs = []``；没有 ``refs`` 键表示从未配置，读取时
+  仍按旧 ``sheet`` 与素材库里唯一一张三视图兼容。
 - ``[first]`` / ``[last]``：轮次目录名、候选序号（1 起）、落进素材库的 id。
 """
 
@@ -22,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 FILE = "keyframe.toml"
-ROLES = ("subject_ref", "detail_ref")
+ROLES = ("subject_ref", "detail_ref", "lighting_ref")
 NOTE_LIMIT = 80
 
 
@@ -48,6 +50,8 @@ class Ref:
 class State:
     extract: str | None = None
     refs: list[Ref] = field(default_factory=list)
+    #: 文件里写了 ``refs = []``；为假时才允许走旧的自动绑定。
+    refs_explicit: bool = False
     first: Pick | None = None
     last: Pick | None = None
 
@@ -125,11 +129,13 @@ def load(case_dir: str | Path) -> State:
         raise KeyframeError(f"{target}: {exc}") from exc
     extract = str(data.get("extract") or "").strip() or None
     refs = _refs(data.get("refs"))
-    if not refs:
+    # 只有“显式空数组”需要和“从未配置”区分；非空清单自然不需要自动绑定。
+    refs_explicit = "refs" in data and not refs
+    if not refs and not refs_explicit:
         sheet = str(data.get("sheet") or "").strip()
         if sheet:
             refs = [Ref(asset=sheet, role="subject_ref", note="")]
-    return State(extract=extract, refs=refs,
+    return State(extract=extract, refs=refs, refs_explicit=refs_explicit,
                  first=_pick(data.get("first"), "first"),
                  last=_pick(data.get("last"), "last"))
 
@@ -142,6 +148,8 @@ def save(case_dir: str | Path, state: State) -> Path:
     lines: list[str] = []
     if state.extract:
         lines.append(_str("extract", state.extract))
+    if not state.refs and state.refs_explicit:
+        lines.append("refs = []")
     for ref in state.refs:
         if lines:
             lines.append("")
@@ -171,6 +179,9 @@ def remove_asset(case_dir: str | Path, asset_id: str) -> bool:
     refs = [ref for ref in state.refs if ref.asset != asset_id]
     changed = len(refs) != len(state.refs)
     state.refs = refs
+    if changed:
+        # 素材被删后清单是用户明确的结果，不能让下一次读取再自动绑一张三视图。
+        state.refs_explicit = True
     if state.first is not None and state.first.asset == asset_id:
         state.first = None
         changed = True

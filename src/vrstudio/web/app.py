@@ -1299,6 +1299,7 @@ def _keyframe_state(case: case_mod.Case, details: list[dict] | None = None) -> d
     role_help = {
         "subject_ref": "人物三视图：唯一外观依据。",
         "detail_ref": "细节参考：只继承所指细节的外观，不取构图、背景与姿态。",
+        "lighting_ref": "氛围与光影参考：只读光源位置、色温、明暗对比与空气质感，不取构图、背景与画面内容。",
     }
     base = {"enabled": case.flow in ("patch", "gen"), "error": None,
             "ratio": _keyframe_ratio_or_none(case),
@@ -1317,7 +1318,7 @@ def _keyframe_state(case: case_mod.Case, details: list[dict] | None = None) -> d
     by_id = {d["id"]: d for d in details}
     raw_refs = list(state.refs)
     default = False
-    if not raw_refs:
+    if not raw_refs and not state.refs_explicit:
         sheets = [d for d in details
                   if d["kind"] == "image" and d["role"] == "subject_ref" and d.get("exists")]
         if len(sheets) == 1:
@@ -1836,8 +1837,6 @@ def _gates(case: case_mod.Case, extracts: list[dict],
             kf = _keyframe_state(case, details)
             raw_ok = all((cur / name).is_file()
                          for name in ("first_frame_raw.png", "last_frame_raw.png"))
-            primary = next((row for row in kf["refs"]
-                            if row["role"] == "subject_ref" and row["exists"]), None)
             missing_refs = [row["asset"] for row in kf["refs"] if not row["exists"]]
             if not extracted:
                 kf_reason = "先完成选区并运行抽取；首尾帧来自 clip 的首末帧"
@@ -1849,15 +1848,13 @@ def _gates(case: case_mod.Case, extracts: list[dict],
                 kf_reason = "抽取版本已更新，需要重新定稿两帧"
             elif missing_refs:
                 kf_reason = f"参考图文件不存在：{'、'.join(missing_refs)}；重新加入或删除"
-            elif primary is None:
-                kf_reason = "参考图清单缺少人物三视图；在首尾帧页加入一张并设为主三视图"
             elif not kf["first"]:
                 kf_reason = "首帧还没定稿；在首尾帧步骤生成并挑选一张"
             elif not kf["last"]:
                 kf_reason = "首帧已定，接着生成并挑选尾帧"
             else:
                 kf_reason = ""
-            kf_ok = bool(extracted and raw_ok and primary is not None
+            kf_ok = bool(extracted and raw_ok
                          and not missing_refs and kf["complete"])
             steps["keyframe"] = {"ok": kf_ok, "ready": extracted and raw_ok,
                                  "reason": kf_reason,
@@ -3169,6 +3166,8 @@ RAW_PICK_ROUND = "extract"
 
 KEYFRAME_VARS = "keyframe-vars.toml"
 KEYFRAME_TEMPLATES = {"first": "keyframe-first", "last": "keyframe-last"}
+#: 图片步单次最多 10 张输入图：底图 + 参考图 +（尾帧）首帧定稿。
+KEYFRAME_MAX_IMAGES = 10
 
 
 def _keyframe_step(value: object) -> str:
@@ -3188,13 +3187,17 @@ def _generation_snapshot(name: str) -> dict:
 
 
 def _keyframe_refs(case: case_mod.Case) -> tuple[keyframe_mod.State, list[keyframe_mod.Ref]]:
-    """读 refs，并把“素材库恰好一张 subject_ref”当作未写入的默认清单。"""
+    """读 refs，并把“素材库恰好一张 subject_ref”当作未写入的默认清单。
+
+    ``keyframe.toml`` 里有 ``refs`` 键（包括 ``refs = []``）就表示用户编辑过
+    清单；此时 0 张是明确结果，不再自动绑定素材库里的三视图。
+    """
     try:
         state = keyframe_mod.load(case.dir(_ctx["cases_root"]))
     except keyframe_mod.KeyframeError as exc:
         raise CaseError(str(exc)) from exc
     refs = list(state.refs)
-    if not refs:
+    if not refs and not state.refs_explicit:
         sheets = [a for a in case.assets
                   if a.kind == "image" and a.role == "subject_ref"]
         if len(sheets) == 1:
@@ -3205,12 +3208,14 @@ def _keyframe_refs(case: case_mod.Case) -> tuple[keyframe_mod.State, list[keyfra
 def _keyframe_inputs(case: case_mod.Case, step: str, *,
                      require_first: bool = True,
                      allow_stale: bool = False) -> list[tuple[Path, str, str]]:
-    """图片步的最终参考图顺序：原始帧、主三视图、（尾帧）首帧定稿、细节图。
+    """图片步的最终参考图顺序：原始帧、参考图（按清单顺序）、（尾帧）首帧定稿。
 
     这里不读 ``[submit]``：视频提交清单与图片步是两份独立的输入声明。
+    参考图允许 0 张；``subject_ref`` 最多一张，也可以不在第一位。首帧定稿
+    固定在所有参考图之后，所以同一张参考图在首尾两步的编号不变。
 
     ``allow_stale`` 放行的场景只有「不依赖旧定稿」的两处：提示词的看与改、
-    以及首帧候选的生成——它们只用到当前抽取的原始帧与三视图。尾帧生成与
+    以及首帧候选的生成——它们只用到当前抽取的原始帧与参考图。尾帧生成与
     交接依赖首帧定稿，旧定稿属于旧抽取，必须先在当前抽取上重新定稿。
     """
     state, refs = _keyframe_refs(case)
@@ -3218,12 +3223,6 @@ def _keyframe_inputs(case: case_mod.Case, step: str, *,
                  and state.extract != case.extract_current)
     if stale and not allow_stale:
         raise CaseError("抽取版本已更新，需要重新定稿两帧")
-    primary = [ref for ref in refs if ref.role == "subject_ref"]
-    if len(primary) != 1:
-        raise CaseError(
-            "参考图清单只能有一张人物三视图；先加入一张并设为主三视图"
-            if primary else
-            "参考图清单缺少人物三视图；先加入一张并设为主三视图")
     if not case.extract_current:
         raise CaseError("工作台需要 patch 的当前 extract（首尾原始帧随 extract 产出）")
     raw_dir = case.dir(_ctx["cases_root"]) / "extracts" / case.extract_current
@@ -3241,7 +3240,15 @@ def _keyframe_inputs(case: case_mod.Case, step: str, *,
             raise CaseError(f"参考图不存在：{path}")
         return path
 
-    pairs.append((resolved(primary[0]), "subject_ref", ""))
+    for ref in refs:
+        if ref.role == "subject_ref":
+            pairs.append((resolved(ref), "subject_ref", ""))
+        elif ref.role == "detail_ref":
+            pairs.append((resolved(ref), "detail_ref", ref.note))
+        elif ref.role == "lighting_ref":
+            pairs.append((resolved(ref), "lighting_ref", ref.note))
+        else:
+            raise CaseError(f"图片步参考图角色不合法：{ref.role}")
     if step == "last":
         # 旧抽取上定稿的首帧不能当尾帧参考：它画的是旧版本的画面。
         first = None if stale else state.first
@@ -3254,9 +3261,6 @@ def _keyframe_inputs(case: case_mod.Case, step: str, *,
             if not first_path.is_file():
                 raise CaseError(f"首帧定稿不存在：{first_path}")
             pairs.append((first_path, "first_frame", ""))
-    for ref in refs:
-        if ref.role == "detail_ref":
-            pairs.append((resolved(ref), "detail_ref", ref.note))
     return pairs
 
 
@@ -3268,6 +3272,11 @@ def _keyframe_argv(name: str, body: dict) -> list[str]:
     # 生成首帧只用到当前抽取的原始帧与三视图，旧定稿作废不影响它；
     # 生成尾帧由 _keyframe_inputs 自己按 stale 判「先重定首帧」。
     pairs = _keyframe_inputs(case, step, allow_stale=True)
+    if len(pairs) > KEYFRAME_MAX_IMAGES:
+        suffix = "与首帧定稿" if step == "last" else ""
+        raise CaseError(
+            f"图片步单次最多 {KEYFRAME_MAX_IMAGES} 张输入图；当前 {len(pairs)} 张"
+            f"（含底图{suffix}）。先移除参考图再提交。")
     snapshot = _generation_snapshot(name)
     session = int((snapshot.get("current") or {}).get("session_id") or 0)
     if session <= 0:
@@ -3467,13 +3476,15 @@ async def api_keyframe_refs(request):
                                 status_code=400)
         refs.append(keyframe_mod.Ref(
             asset=str(item.get("asset") or "").strip(),
-            role=str(item.get("role") or "subject_ref").strip(),
+            role=str(item.get("role") or "detail_ref").strip(),
             note=str(item.get("note") or "").strip()))
     image_ids = {asset.id for asset in case.assets if asset.kind == "image"}
     try:
         refs = keyframe_mod.validate_refs(refs, image_ids)
         state = keyframe_mod.load(case.dir(_ctx["cases_root"]))
         state.refs = refs
+        # 用户提交清单就是明确表态；空数组也要落成 refs = []，不能再自动绑定。
+        state.refs_explicit = True
         keyframe_mod.save(case.dir(_ctx["cases_root"]), state)
     except (keyframe_mod.KeyframeError, OSError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)

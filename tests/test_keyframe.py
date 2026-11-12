@@ -24,6 +24,53 @@ def test_legacy_sheet_becomes_primary_ref(tmp_path):
         'extract = "v1"\nsheet = "i1"\n', encoding="utf-8")
     loaded = keyframe.load(tmp_path)
     assert loaded.refs == [keyframe.Ref("i1", "subject_ref", "")]
+    assert loaded.refs_explicit is False
+
+
+def test_explicit_empty_refs_roundtrip(tmp_path):
+    state = keyframe.State(
+        extract="v1", refs=[], refs_explicit=True,
+        first=keyframe.Pick("img-a", 1, "i2"))
+    keyframe.save(tmp_path, state)
+    text = (tmp_path / "keyframe.toml").read_text(encoding="utf-8")
+    assert "refs = []" in text
+    loaded = keyframe.load(tmp_path)
+    assert loaded.refs == []
+    assert loaded.refs_explicit is True
+    assert loaded.first == keyframe.Pick("img-a", 1, "i2")
+
+
+def test_explicit_empty_refs_wins_over_legacy_sheet(tmp_path):
+    (tmp_path / "keyframe.toml").write_text(
+        'refs = []\nsheet = "i1"\n', encoding="utf-8")
+    loaded = keyframe.load(tmp_path)
+    assert loaded.refs == []
+    assert loaded.refs_explicit is True
+
+
+def test_lighting_ref_roundtrip(tmp_path):
+    state = keyframe.State(
+        refs=[keyframe.Ref("i4", "lighting_ref", "暖色侧光")])
+    keyframe.save(tmp_path, state)
+    loaded = keyframe.load(tmp_path)
+    assert loaded.refs == [keyframe.Ref("i4", "lighting_ref", "暖色侧光")]
+
+
+def test_remove_last_ref_writes_explicit_empty(tmp_path):
+    state = keyframe.State(refs=[keyframe.Ref("i1", "subject_ref")])
+    keyframe.save(tmp_path, state)
+    assert keyframe.remove_asset(tmp_path, "i1") is True
+    loaded = keyframe.load(tmp_path)
+    assert loaded.refs == []
+    assert loaded.refs_explicit is True
+    assert "refs = []" in (tmp_path / "keyframe.toml").read_text(encoding="utf-8")
+
+
+def test_validate_refs_accepts_lighting_ref():
+    refs = keyframe.validate_refs(
+        [keyframe.Ref("i1", "subject_ref"), keyframe.Ref("i4", "lighting_ref", "侧光")],
+        {"i1", "i4"})
+    assert [ref.role for ref in refs] == ["subject_ref", "lighting_ref"]
 
 
 def test_refs_reject_two_primary_images(tmp_path):

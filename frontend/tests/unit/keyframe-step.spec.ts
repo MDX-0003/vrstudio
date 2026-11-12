@@ -74,8 +74,10 @@ vi.mock('@/composables/useCaseTasks', async () => {
 
 import KeyframeStep from '@/views/wizard/KeyframeStep.vue'
 import KeyframeSubmitBar from '@/components/generate/KeyframeSubmitBar.vue'
+import AssetPickerDialog from '@/components/assets/AssetPickerDialog.vue'
 import { saveParams } from '@/api/case'
-import type { CaseInfo, FileInfo, KeyframePick, RawFrame } from '@/types/case-info'
+import { fetchKeyframePrompt } from '@/api/keyframe'
+import type { CaseInfo, FileInfo, KeyframePick, KeyframeRef, RawFrame } from '@/types/case-info'
 
 const LinkStub = defineComponent({
   props: { href: String, target: String },
@@ -133,26 +135,11 @@ function info(overrides: Partial<CaseInfo['keyframe']> = {}): CaseInfo {
       role_help: {
         subject_ref: '人物三视图：唯一外观依据。',
         detail_ref: '细节参考：只继承所指细节的外观。',
+        lighting_ref: '氛围与光影参考：只读光线。',
       },
       refs: [
-        {
-          asset: 'i1',
-          role: 'subject_ref',
-          note: '',
-          label: 'i1_大臣_三视图.png',
-          url: '/img/asset/p1/i1',
-          exists: true,
-          file: frameFile('i1_大臣_三视图.png'),
-        },
-        {
-          asset: 'i3',
-          role: 'detail_ref',
-          note: '头冠纹样',
-          label: 'i3_detail.png',
-          url: '/img/asset/p1/i3',
-          exists: true,
-          file: frameFile('i3_detail.png'),
-        },
+        keyframeRef('i1', 'subject_ref'),
+        keyframeRef('i3', 'detail_ref', '头冠纹样'),
       ],
       first: pick(1, 'i2', 'i2_keyframe-1.png'),
       last: null,
@@ -170,6 +157,28 @@ function info(overrides: Partial<CaseInfo['keyframe']> = {}): CaseInfo {
     submit_roles: null,
     role_help: {},
   } as unknown as CaseInfo
+}
+
+function keyframeRef(
+  asset: string,
+  role: KeyframeRef['role'],
+  note = '',
+): KeyframeRef {
+  return {
+    asset,
+    role,
+    note,
+    label: `${asset}.png`,
+    url: `/img/asset/p1/${asset}`,
+    exists: true,
+    file: frameFile(`${asset}.png`),
+  }
+}
+
+function manyRefs(count: number): KeyframeRef[] {
+  return Array.from({ length: count }, (_, index) =>
+    keyframeRef(`r${index + 1}`, index === 0 ? 'subject_ref' : 'detail_ref'),
+  )
 }
 
 async function mountStep(data: CaseInfo = info()) {
@@ -238,13 +247,17 @@ function round(name: string, step: string, count = 1) {
 beforeEach(() => {
   keyframeApi.rounds = []
   keyframeApi.run.mockClear()
+  keyframeApi.setRefs.mockReset()
+  keyframeApi.setRefs.mockResolvedValue(info())
+  vi.mocked(fetchKeyframePrompt).mockReset()
+  vi.mocked(fetchKeyframePrompt).mockResolvedValue(promptPayload)
   vi.mocked(saveParams).mockClear()
 })
 
-describe('KeyframeStep 四格输入', () => {
+describe('KeyframeStep 输入卡片带', () => {
   it('links the current raw frame with name and rel path in the tooltip', async () => {
     const wrapper = await mountStep()
-    const link = wrapper.findAll('.kf-slot')[0].find('a')
+    const link = wrapper.findAll('.cards .card')[0].find('a')
     expect(link.attributes('href')).toBe(
       '/file?root=cases&p=p1%2Fextracts%2Fv1%2Ffirst_frame_raw.png',
     )
@@ -254,49 +267,133 @@ describe('KeyframeStep 四格输入', () => {
     wrapper.unmount()
   })
 
-  it('shows the bound sheet thumbnail from the asset route', async () => {
+  it('numbers the base frame as 图1 and references from 图2', async () => {
     const wrapper = await mountStep()
-    const sheet = wrapper.findAll('.kf-slot')[1]
-    expect(sheet.find('img').attributes('src')).toBe('/img/asset/p1/i1')
-    expect(sheet.text()).toContain('i1_大臣_三视图.png')
+    const numbers = wrapper.findAll('.cards .card .no').map((item) => item.text())
+    expect(numbers.slice(0, 3)).toEqual(['图1', '图2', '图3'])
+    const refs = wrapper.findAll('.cards .card:not(.locked):not(.add)')
+    expect(refs).toHaveLength(2)
+    expect(refs[0].text()).toContain('人物三视图')
+    expect(refs[0].find('.role-select').exists()).toBe(true)
+    expect((refs[1].find('input:not([readonly])').element as HTMLInputElement).value).toBe(
+      '头冠纹样',
+    )
     wrapper.unmount()
   })
 
-  it('renders the reference list with a locked primary and an editable detail row', async () => {
+  it('shows no anchor in the first step and appends it as the last number in the tail step', async () => {
     const wrapper = await mountStep()
-    const rows = wrapper.findAll('.ref-row')
-    expect(rows).toHaveLength(2)
-    expect(rows.map((row) => row.find('.ref-no').text())).toEqual(['2', '3'])
-    expect(rows[0].text()).toContain('人物三视图（主图）')
-    expect(rows[0].find('.role-select').exists()).toBe(false)
-    expect(rows[1].find('.role-select').exists()).toBe(true)
-    expect((rows[1].find('.ref-note input').element as HTMLInputElement).value).toBe('头冠纹样')
-    wrapper.unmount()
-  })
+    expect(wrapper.findAll('.cards .card.locked')).toHaveLength(1)
 
-  it('keeps 图3 for the last step only and shows the first pick as the target', async () => {
-    const wrapper = await mountStep()
-    const slots = wrapper.findAll('.kf-slot')
-    expect(slots[2].text()).toContain('生成并定稿首帧后填入')
-    expect(slots[3].find('img').attributes('src')).toBe('/img/asset/p1/i2')
-    wrapper.unmount()
-  })
-
-  it('switches the input strip and target when the last step is selected', async () => {
-    const wrapper = await mountStep()
     const radios = wrapper.findAll('input[type="radio"]')
-    expect(radios).toHaveLength(2)
     await radios[1].setValue(true)
     await flushPromises()
-    const slots = wrapper.findAll('.kf-slot')
-    expect(slots[0].text()).toContain('原始尾帧')
-    expect(slots[0].find('img').attributes('src')).toBe('/img/asset/p1/last_frame_raw')
-    expect(slots[2].find('img').attributes('src')).toBe('/img/asset/p1/i2')
-    expect(slots[3].text()).toContain('从下方候选里挑一张')
-    expect(wrapper.findAll('.ref-row').map((row) => row.find('.ref-no').text())).toEqual([
-      '2',
-      '3',
-      '4',
+    const locked = wrapper.findAll('.cards .card.locked')
+    expect(locked).toHaveLength(2)
+    expect(locked[1].find('.no').text()).toBe('图4')
+    expect(locked[1].find('img').attributes('src')).toBe('/img/asset/p1/i2')
+    expect(wrapper.find('.output-row .card-name').text()).toContain('待定稿')
+    wrapper.unmount()
+  })
+
+  it('allows 0 references, warns instead of blocking generate', async () => {
+    const data = sessionInfo()
+    data.keyframe.refs = []
+    const wrapper = await mountStep(data)
+    expect(wrapper.find('.summary').text()).toContain('本次提交 1 / 10 张')
+    expect(wrapper.text()).toContain('没有人物三视图')
+    const add = wrapper.find('.card.add')
+    expect(add.attributes('disabled')).toBeUndefined()
+    const generate = wrapper.findAll('button').find((item) => item.text().includes('生成首帧候选'))!
+    expect(generate.attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('reaches the 10-image cap at 9 refs and overflows the tail step', async () => {
+    const data = sessionInfo()
+    data.keyframe.refs = manyRefs(9)
+    keyframeApi.setRefs.mockResolvedValue(data)
+    const wrapper = await mountStep(data)
+    expect(wrapper.find('.summary').text()).toContain('本次提交 10 / 10 张')
+    expect(wrapper.find('.card.add').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('.el-alert--error').exists()).toBe(false)
+
+    await wrapper.findAll('input[type="radio"]')[1].setValue(true)
+    await flushPromises()
+    expect(wrapper.find('.summary').text()).toContain('本次提交 11 / 10 张')
+    expect(wrapper.text()).toContain('超过 10 张上限')
+    expect(wrapper.findAll('.cards .card.locked')[1].find('.no').text()).toBe('图11')
+    const generate = wrapper.findAll('button').find((item) => item.text().includes('生成尾帧候选'))!
+    expect(generate.attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
+  it('marks the 10th reference as 图11 when the first step already overflows', async () => {
+    const data = sessionInfo()
+    data.keyframe.refs = manyRefs(10)
+    const wrapper = await mountStep(data)
+    expect(wrapper.find('.summary').text()).toContain('本次提交 11 / 10 张')
+    expect(wrapper.text()).toContain('首帧要带上图1 底图')
+    expect(wrapper.findAll('.cards .card.over').map((item) => item.find('.no').text())).toEqual([
+      '图11',
+    ])
+    const generate = wrapper.findAll('button').find((item) => item.text().includes('生成首帧候选'))!
+    expect(generate.attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
+  it('reloads the prompt after a reference is removed', async () => {
+    const data = sessionInfo()
+    const promptMock = vi.mocked(fetchKeyframePrompt)
+    promptMock.mockReset()
+    promptMock.mockResolvedValueOnce(promptPayload)
+    promptMock.mockResolvedValueOnce({
+      ...promptPayload,
+      rendered: '图1 = 首帧原始图。\n图2 = 人物三视图。',
+    })
+    keyframeApi.setRefs.mockResolvedValue(data)
+    const wrapper = await mountStep(data)
+    expect(promptMock).toHaveBeenCalledTimes(1)
+
+    const remove = wrapper.findAll('button').find((item) => item.text() === '移除')!
+    await remove.trigger('click')
+    await flushPromises()
+    expect(keyframeApi.setRefs).toHaveBeenCalled()
+    expect(promptMock.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(wrapper.text()).toContain('图2 = 人物三视图。')
+    wrapper.unmount()
+  })
+
+  it('keeps the note draft while typing', async () => {
+    const wrapper = await mountStep()
+    const note = wrapper.find('.cards .card:not(.locked):not(.add) input:not([readonly])')
+    await note.setValue('新的细节')
+    expect((note.element as HTMLInputElement).value).toBe('新的细节')
+    wrapper.unmount()
+  })
+
+  it('adds new references as detail_ref by default', async () => {
+    const wrapper = await mountStep()
+    const picker = wrapper.findComponent(AssetPickerDialog)
+    picker.vm.$emit('confirm', ['i9'])
+    await flushPromises()
+    expect(keyframeApi.setRefs).toHaveBeenCalledWith('p1', [
+      { asset: 'i1', role: 'subject_ref', note: '' },
+      { asset: 'i3', role: 'detail_ref', note: '头冠纹样' },
+      { asset: 'i9', role: 'detail_ref', note: '' },
+    ])
+    wrapper.unmount()
+  })
+
+  it('changes a detail reference to lighting_ref in place', async () => {
+    const wrapper = await mountStep()
+    const selects = wrapper.findAllComponents({ name: 'ElSelect' })
+    const detailSelect = selects.find((item) => item.props('modelValue') === 'detail_ref')!
+    detailSelect.vm.$emit('change', 'lighting_ref')
+    await flushPromises()
+    expect(keyframeApi.setRefs).toHaveBeenCalledWith('p1', [
+      { asset: 'i1', role: 'subject_ref', note: '' },
+      { asset: 'i3', role: 'lighting_ref', note: '头冠纹样' },
     ])
     wrapper.unmount()
   })

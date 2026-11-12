@@ -1826,6 +1826,89 @@ def test_keyframe_run_includes_detail_refs_and_notes(
     assert argv.count("--image") == 3
 
 
+def test_keyframe_run_allows_zero_refs(client, patch_case, tmp_path, monkeypatch):
+    d = _mk_extract("p1", tmp_path, "v1")
+    (d / "first_frame_raw.png").write_bytes(b"first")
+    (d / "last_frame_raw.png").write_bytes(b"last")
+    case_mod.set_extract_current("p1", "v1", root=tmp_path)
+    captured = []
+    monkeypatch.setattr(web_app.QUEUE, "submit",
+                        lambda op, name, argv, **kwargs:
+                        captured.append((op, name, argv)))
+    monkeypatch.setattr(web_app, "_generation_snapshot",
+                        lambda name: {"current": {"session_id": 123}, "image": {}})
+    r = client.post("/api/case/p1/keyframe/run", json={"step": "first"})
+    assert r.status_code == 200, r.text
+    argv = captured[0][2]
+    roles = [argv[index + 1] for index, item in enumerate(argv)
+             if item == "--image-role"]
+    assert roles == ["first_frame_raw"]
+    assert argv.count("--image") == 1
+
+
+def test_keyframe_run_orders_refs_and_appends_anchor(
+        client, patch_case, tmp_path, monkeypatch):
+    d = _mk_extract("p1", tmp_path, "v1")
+    (d / "first_frame_raw.png").write_bytes(b"first")
+    (d / "last_frame_raw.png").write_bytes(b"last")
+    case_mod.set_extract_current("p1", "v1", root=tmp_path)
+    _add_image("p1", tmp_path, "sheet", "subject_ref")
+    _add_image("p1", tmp_path, "detail", "subject_ref")
+    _add_image("p1", tmp_path, "light", "subject_ref")
+    _add_image("p1", tmp_path, "first_pick", "first_frame")
+    keyframe.save(tmp_path / "p1", keyframe.State(
+        extract="v1",
+        refs=[keyframe.Ref("i2", "detail_ref", "头冠纹样"),
+              keyframe.Ref("i1", "subject_ref", ""),
+              keyframe.Ref("i3", "lighting_ref", "暖色侧光")],
+        first=keyframe.Pick("img-a", 1, "i4")))
+    captured = []
+    monkeypatch.setattr(web_app.QUEUE, "submit",
+                        lambda op, name, argv, **kwargs:
+                        captured.append((op, name, argv)))
+    monkeypatch.setattr(web_app, "_generation_snapshot",
+                        lambda name: {"current": {"session_id": 123}, "image": {}})
+    r = client.post("/api/case/p1/keyframe/run", json={"step": "last"})
+    assert r.status_code == 200, r.text
+    argv = captured[0][2]
+    roles = [argv[index + 1] for index, item in enumerate(argv)
+             if item == "--image-role"]
+    notes = [argv[index + 1] for index, item in enumerate(argv)
+             if item == "--image-note"]
+    assert roles == ["last_frame_raw", "detail_ref", "subject_ref",
+                     "lighting_ref", "first_frame"]
+    assert notes == ["", "头冠纹样", "", "暖色侧光", ""]
+
+
+def test_keyframe_run_rejects_more_than_ten_images(
+        client, patch_case, tmp_path, monkeypatch):
+    d = _mk_extract("p1", tmp_path, "v1")
+    (d / "first_frame_raw.png").write_bytes(b"first")
+    (d / "last_frame_raw.png").write_bytes(b"last")
+    case_mod.set_extract_current("p1", "v1", root=tmp_path)
+    for index in range(10):
+        _add_image("p1", tmp_path, f"ref{index}", "subject_ref")
+    refs = [{"asset": "i1", "role": "subject_ref", "note": ""}]
+    refs += [{"asset": f"i{index}", "role": "detail_ref", "note": ""}
+             for index in range(2, 11)]
+    r = client.put("/api/case/p1/keyframe/refs", json={"refs": refs})
+    assert r.status_code == 200, r.text
+    monkeypatch.setattr(web_app, "_generation_snapshot",
+                        lambda name: {"current": {"session_id": 123}, "image": {}})
+    r = client.post("/api/case/p1/keyframe/run", json={"step": "first"})
+    assert r.status_code == 400
+    assert "最多 10 张" in r.json()["error"]
+
+
+def test_keyframe_refs_empty_is_explicit(client, patch_case, tmp_path):
+    _add_image("p1", tmp_path, "sheet", "subject_ref")
+    r = client.put("/api/case/p1/keyframe/refs", json={"refs": []})
+    assert r.status_code == 200, r.text
+    assert client.get("/api/case/p1/keyframe/refs").json()["refs"] == []
+    text = (tmp_path / "p1" / "keyframe.toml").read_text(encoding="utf-8")
+    assert "refs = []" in text
+
+
 def test_keyframe_run_requires_project_session(client, patch_case, tmp_path, monkeypatch):
     d = _mk_extract("p1", tmp_path, "v1")
     (d / "first_frame_raw.png").write_bytes(b"first")

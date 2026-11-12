@@ -413,7 +413,7 @@ export interface KeyframePick {
 
 export interface KeyframeRef {
   asset: string
-  role: 'subject_ref' | 'detail_ref'
+  role: 'subject_ref' | 'detail_ref' | 'lighting_ref'
   note: string
   label: string
   url: string | null
