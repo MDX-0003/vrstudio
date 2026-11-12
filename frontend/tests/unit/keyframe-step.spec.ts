@@ -4,32 +4,57 @@ import ElementPlus from 'element-plus'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@/api/case', () => ({ fetchCase: vi.fn(), saveParams: vi.fn() }))
+vi.mock('@/api/sessions', () => ({
+  fetchSessions: vi.fn(async () => ({
+    fetched_at: '',
+    projects: [
+      {
+        id: 1,
+        name: '项目 A',
+        episodes: [
+          {
+            no: 1,
+            id: 1,
+            name: '第一集',
+            sessions: [
+              { id: 10, name: '会话 A' },
+              { id: 11, name: '会话 B' },
+            ],
+          },
+        ],
+      },
+    ],
+  })),
+}))
 
 const keyframeApi = vi.hoisted(() => ({
   rounds: [] as unknown[],
   pick: vi.fn(),
   setRefs: vi.fn(),
+  run: vi.fn(),
 }))
 
+const promptPayload = {
+  template: 'keyframe-first',
+  available: [],
+  template_text: '',
+  placeholders: [],
+  geometry_keys: [],
+  computed_keys: [],
+  labels: {},
+  help: {},
+  vars: {},
+  rendered: '',
+  render_error: null,
+}
+
 vi.mock('@/api/keyframe', () => ({
-  fetchKeyframePrompt: vi.fn(async () => ({
-    template: 'keyframe-first',
-    available: [],
-    template_text: '',
-    placeholders: [],
-    geometry_keys: [],
-    computed_keys: [],
-    labels: {},
-    help: {},
-    vars: {},
-    rendered: '',
-    render_error: null,
-  })),
+  fetchKeyframePrompt: vi.fn(async () => promptPayload),
   fetchKeyframeRounds: vi.fn(async () => ({ rounds: keyframeApi.rounds })),
   handoffKeyframe: vi.fn(),
   pickKeyframe: keyframeApi.pick,
-  runKeyframe: vi.fn(),
-  saveKeyframePrompt: vi.fn(),
+  runKeyframe: keyframeApi.run,
+  saveKeyframePrompt: vi.fn(async () => promptPayload),
   setKeyframeRefs: keyframeApi.setRefs,
 }))
 
@@ -48,6 +73,7 @@ vi.mock('@/composables/useCaseTasks', async () => {
 })
 
 import KeyframeStep from '@/views/wizard/KeyframeStep.vue'
+import KeyframeSubmitBar from '@/components/generate/KeyframeSubmitBar.vue'
 import { saveParams } from '@/api/case'
 import type { CaseInfo, FileInfo, KeyframePick, RawFrame } from '@/types/case-info'
 
@@ -155,6 +181,29 @@ async function mountStep(data: CaseInfo = info()) {
   return wrapper
 }
 
+/** 带扣费会话与图片模型清单的 case：底栏要能读回已选会话。 */
+function sessionInfo(): CaseInfo {
+  const data = info()
+  data.generation_params = {
+    current: {
+      resolution: '1080p',
+      scale: 'auto',
+      mode: 'firstLastFrame',
+      aspect_ratio: '16:9',
+      session_id: 10,
+      project_id: 1,
+      episode: 1,
+    },
+    fixed: { video_model_id: 37, image_model_id: 44, duration_s: 10, num: 1 },
+    image_models: [
+      { id: 44, name: '专业图片-2.5', description: '' },
+      { id: 46, name: '万能编辑2.1', description: '' },
+    ],
+    image_models_error: null,
+  } as unknown as CaseInfo['generation_params']
+  return data
+}
+
 function round(name: string, step: string, count = 1) {
   return {
     round: name,
@@ -180,6 +229,7 @@ function round(name: string, step: string, count = 1) {
 
 beforeEach(() => {
   keyframeApi.rounds = []
+  keyframeApi.run.mockClear()
   vi.mocked(saveParams).mockClear()
 })
 
@@ -306,6 +356,61 @@ describe('KeyframeStep 图片模型', () => {
     select.vm.$emit('change', 25)
     await flushPromises()
     expect(saveParams).toHaveBeenCalledWith('p1', { image_model_id: 25 })
+    wrapper.unmount()
+  })
+})
+
+describe('KeyframeStep 底部常驻条', () => {
+  it('不再在候选标题栏放生成参数，参数只出现在固定底栏', async () => {
+    const wrapper = await mountStep()
+    const candidate = wrapper
+      .findAll('.panel')
+      .find((panel) => panel.find('.panel-title').text() === '首帧候选')!
+
+    expect(candidate.find('.panel-head').text()).not.toContain('图片模型')
+    expect(candidate.find('.panel-head').text()).not.toContain('候选张数')
+    expect(candidate.find('.kf-image-model').exists()).toBe(false)
+    expect(candidate.find('.panel-head').text()).toContain('刷新批次')
+    expect(wrapper.find('.submit-bar .kf-image-model').exists()).toBe(true)
+    expect(wrapper.find('.submit-bar').text()).toContain('生成首帧候选')
+    wrapper.unmount()
+  })
+
+  it('未选项目会话时禁用生成并说明原因', async () => {
+    const wrapper = await mountStep()
+    const generate = wrapper.findAll('button').find((item) => item.text().includes('生成首帧候选'))!
+    expect(generate.attributes('disabled')).toBeDefined()
+    expect(wrapper.find('.submit-bar').text()).toContain('未选项目会话')
+    expect(wrapper.find('.submit-bar').text()).toContain(
+      '先在底栏选择项目生成会话；图片生成按项目会话计费',
+    )
+    wrapper.unmount()
+  })
+
+  it('切换会话后保存扣费会话，再从底栏提交候选', async () => {
+    const data = sessionInfo()
+    vi.mocked(saveParams).mockResolvedValue(data)
+    const wrapper = await mountStep(data)
+    const bar = wrapper.findComponent(KeyframeSubmitBar)
+    bar.vm.$emit('update:selectedSession', '11')
+    await flushPromises()
+
+    const generate = wrapper.findAll('button').find((item) => item.text().includes('生成首帧候选'))!
+    expect(generate.attributes('disabled')).toBeUndefined()
+    await generate.trigger('click')
+    await flushPromises()
+
+    expect(saveParams).toHaveBeenCalledWith('p1', {
+      session_id: 11,
+      project_id: 1,
+      episode: 1,
+    })
+    expect(keyframeApi.run).toHaveBeenCalledWith('p1', {
+      step: 'first',
+      resolution: '2K',
+      num: 4,
+      image_model_id: 44,
+    })
     wrapper.unmount()
   })
 })

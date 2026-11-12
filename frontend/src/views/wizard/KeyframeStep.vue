@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import { fetchCase, saveParams } from '@/api/case'
+import type { SaveParamsPayload } from '@/api/case'
+import { fetchSessions } from '@/api/sessions'
 import {
   fetchKeyframePrompt,
   fetchKeyframeRounds,
@@ -15,18 +17,20 @@ import {
 } from '@/api/keyframe'
 import type { KeyframeRefInput, KeyframeRound } from '@/api/keyframe'
 import { useCaseTasks } from '@/composables/useCaseTasks'
+import { useCaseSaveQueue } from '@/composables/useCaseSaveQueue'
 import AssetPickerDialog from '@/components/assets/AssetPickerDialog.vue'
 import AssetReferenceList from '@/components/assets/AssetReferenceList.vue'
+import KeyframeSubmitBar from '@/components/generate/KeyframeSubmitBar.vue'
 import VariableCard from '@/components/prompt/VariableCard.vue'
 import FileOpenLink from '@/components/common/FileOpenLink.vue'
 import KeyframeRoundBlock from '@/components/keyframe/KeyframeRoundBlock.vue'
 import { KEYFRAME_ROLE_OPTIONS } from '@/constants/assetRoles'
-import { KEYFRAME_MAX_CANDIDATES, KEYFRAME_RESOLUTIONS } from '@/constants/keyframe'
 import { taskStatusMeta } from '@/constants/taskStatus'
 import { buildPromptVariables, promptVariablesToRecord } from '@/utils/prompt'
 import type { CaseInfo, ModelOption, PromptPayload } from '@/types/case-info'
 import type { PromptVariable } from '@/types/case'
 import type { ReferenceRow } from '@/types/reference'
+import type { EpisodeOption, ProjectOption, SessionOption } from '@/types/session'
 
 const props = defineProps<{ caseName: string; info: CaseInfo }>()
 const emit = defineEmits<{
@@ -60,6 +64,7 @@ const resolution = ref(defaultKeyframeResolution(props.info))
 const num = ref(4)
 const noteDraft = ref<Record<string, string>>({})
 let startedAt = 0
+let syncing = true
 let promptTimer: ReturnType<typeof setTimeout> | null = null
 let noteTimer: ReturnType<typeof setTimeout> | null = null
 let roundsTimer: ReturnType<typeof setInterval> | null = null
@@ -99,12 +104,14 @@ const olderRounds = computed(() => {
 const canRun = computed(() => {
   if (!ready.value?.ready) return false
   if (!primary.value) return false
+  if (!sessionReady.value) return false
   if (step.value === 'last' && !firstPick.value) return false
   return true
 })
 const runReason = computed(() => {
   if (!ready.value?.ready) return ready.value?.reason || '先完成抽取并准备两张原始帧'
   if (!primary.value) return '先添加一张人物三视图并设为主三视图'
+  if (!sessionReady.value) return '先在底栏选择项目生成会话；图片生成按项目会话计费'
   if (step.value === 'last' && !firstPick.value) return '先生成并挑选首帧定稿'
   return ''
 })
@@ -153,6 +160,118 @@ async function changeImageModel(value: number | null): Promise<void> {
     imageModelSaving.value = false
   }
 }
+
+/** 扣费额度与视频页共用 generation.toml；首尾帧运行时由服务端读取会话。 */
+const projects = ref<ProjectOption[]>([])
+const selectedProject = ref('')
+const selectedEpisode = ref('')
+const selectedSession = ref('0')
+const sessionsLoading = ref(false)
+const sessionError = ref('')
+const lastRefreshed = ref('')
+const sessionSaving = ref(false)
+
+const currentProject = computed(() =>
+  projects.value.find((item) => String(item.id) === selectedProject.value),
+)
+const episodes = computed<EpisodeOption[]>(() => currentProject.value?.episodes ?? [])
+const currentEpisode = computed(() =>
+  episodes.value.find((item) => String(item.no) === selectedEpisode.value),
+)
+const sessions = computed<SessionOption[]>(() => currentEpisode.value?.sessions ?? [])
+/** 图片生成按项目会话计费；'0' 是个人额度，这里不算选中项目会话。 */
+const sessionReady = computed(() => {
+  const value = selectedSession.value
+  return value !== '' && value !== '0' && Number.isFinite(Number(value))
+})
+
+function sessionBody(): Pick<SaveParamsPayload, 'session_id' | 'project_id' | 'episode'> {
+  if (selectedSession.value === '') return {}
+  const sessionId = Number(selectedSession.value)
+  if (sessionId) {
+    return {
+      session_id: sessionId,
+      project_id: Number(selectedProject.value) || 0,
+      episode: Number(selectedEpisode.value) || 0,
+    }
+  }
+  return { session_id: 0, project_id: 0, episode: 0 }
+}
+
+function syncSession(): void {
+  const current = props.info.generation_params?.current
+  if (!current) return
+  selectedSession.value = String(current.session_id || 0)
+  selectedProject.value = String(current.project_id || '')
+  selectedEpisode.value = String(current.episode || '')
+}
+
+async function loadSessions(): Promise<void> {
+  sessionsLoading.value = true
+  sessionError.value = ''
+  try {
+    const data = await fetchSessions()
+    if (data.error) throw new Error(data.error)
+    projects.value = data.projects ?? []
+    if (!projects.value.some((item) => String(item.id) === selectedProject.value)) {
+      selectedProject.value = projects.value.length ? String(projects.value[0].id) : ''
+    }
+    lastRefreshed.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+  } catch (err) {
+    sessionError.value = err instanceof Error ? err.message : '读取会话失败'
+  } finally {
+    sessionsLoading.value = false
+  }
+}
+
+const sessionSaveQueue = useCaseSaveQueue<SaveParamsPayload>(
+  async (entry) => {
+    if (entry.caseName !== props.caseName) return
+    sessionSaving.value = true
+    try {
+      emit('updated', await saveParams(entry.caseName, entry.payload))
+    } finally {
+      if (entry.caseName === props.caseName) sessionSaving.value = false
+    }
+  },
+  { delayMs: 300 },
+)
+
+function scheduleSessionSave(): void {
+  if (syncing || !props.caseName) return
+  sessionSaveQueue.schedule(props.caseName, 'session', { ...sessionBody() })
+}
+
+async function flushSessionSave(): Promise<boolean> {
+  if (!sessionSaveQueue.has(props.caseName)) return true
+  const ok = await sessionSaveQueue.flush(props.caseName)
+  if (!ok) ElMessage.error('保存项目会话失败')
+  return ok
+}
+
+const barStatus = computed(() => {
+  if (running.value) return '生成中'
+  if (sessionsLoading.value) return '读取会话中'
+  if (!sessionReady.value) return '未选项目会话'
+  const task = latest.value
+  return task ? taskStatusMeta(task.status).text : '就绪'
+})
+const barTone = computed(() => {
+  if (running.value) return 'queued'
+  if (!sessionReady.value) return 'stale'
+  const task = latest.value
+  if (!task) return ''
+  const type = taskStatusMeta(task.status).type
+  return type === 'success'
+    ? 'done'
+    : type === 'danger'
+      ? 'failed'
+      : type === 'warning'
+        ? 'queued'
+        : type === 'primary'
+          ? 'running'
+          : ''
+})
 const anchorNumber = computed(() =>
   step.value === 'last' && firstPick.value && primary.value ? 3 : null,
 )
@@ -284,6 +403,7 @@ async function run(): Promise<void> {
     return
   }
   if (!(await flushPrompt())) return
+  if (!(await flushSessionSave())) return
   running.value = true
   startedAt = Date.now()
   try {
@@ -497,16 +617,45 @@ watch(latest, async (task) => {
 
 watch(() => props.info.generation_params?.fixed?.image_model_id, syncImageModel)
 
+watch(
+  episodes,
+  (list) => {
+    if (!list.some((item) => String(item.no) === selectedEpisode.value)) {
+      selectedEpisode.value = list.length ? String(list[0].no) : ''
+    }
+  },
+  { immediate: true },
+)
+
+watch(
+  sessions,
+  (list) => {
+    if (selectedSession.value === '0') return
+    if (!list.some((item) => String(item.id) === selectedSession.value)) {
+      selectedSession.value = '0'
+    }
+  },
+  { immediate: true },
+)
+
+watch([selectedProject, selectedEpisode, selectedSession], scheduleSessionSave)
+
 onMounted(() => {
   syncImageModel()
+  syncSession()
+  void nextTick(() => {
+    syncing = false
+  })
   void loadPrompt()
   void loadRounds()
+  void loadSessions()
 })
 
 onUnmounted(() => {
   if (roundsTimer) clearInterval(roundsTimer)
   if (promptTimer) clearTimeout(promptTimer)
   if (noteTimer) clearTimeout(noteTimer)
+  void sessionSaveQueue.flush()
 })
 </script>
 
@@ -675,57 +824,11 @@ onUnmounted(() => {
       <div class="panel-head">
         <h2 class="panel-title">{{ step === 'first' ? '首帧候选' : '尾帧候选' }}</h2>
         <span class="spacer" />
-        <div class="kf-head-actions">
-          <span class="kf-image-model-label muted">图片模型</span>
-          <el-select
-            v-model="imageModelId"
-            size="small"
-            class="kf-image-model"
-            placeholder="选择图片模型"
-            :loading="imageModelSaving"
-            :title="imageModelsError || '首尾帧两步共用这一个图片模型，切换后写入 generation.toml'"
-            @change="changeImageModel"
-          >
-            <el-option
-              v-for="item in imageModelChoices"
-              :key="item.id"
-              :label="item.name"
-              :value="item.id"
-              :title="`${item.name}（#${item.id}）${item.description ? '：' + item.description : ''}`"
-            />
-            <el-option v-if="!imageModelChoices.length" label="清单不可用" :value="-1" disabled />
-          </el-select>
-          <el-select v-model="resolution" size="small" style="width: 104px">
-            <el-option
-              v-for="item in KEYFRAME_RESOLUTIONS"
-              :key="item.value"
-              :label="item.label"
-              :value="item.value"
-            />
-          </el-select>
-          <el-input-number v-model="num" :min="1" :max="KEYFRAME_MAX_CANDIDATES" size="small" />
-          <el-button
-            link
-            type="primary"
-            :icon="Refresh"
-            :loading="roundsLoading"
-            @click="loadRounds"
-          >
-            刷新
-          </el-button>
-          <el-button
-            type="primary"
-            size="small"
-            :loading="running"
-            :disabled="!canRun"
-            @click="run"
-          >
-            {{ step === 'first' ? '生成首帧候选' : '生成尾帧候选' }}
-          </el-button>
-        </div>
+        <el-button link type="primary" :icon="Refresh" :loading="roundsLoading" @click="loadRounds">
+          刷新批次
+        </el-button>
       </div>
       <div class="panel-body">
-        <p v-if="runReason" class="kf-reason">{{ runReason }}</p>
         <div v-if="!stepRounds.length" class="empty">
           <el-empty
             :description="step === 'first' ? '还没有首帧批次' : '还没有尾帧批次'"
@@ -822,6 +925,34 @@ onUnmounted(() => {
         />
       </div>
     </section>
+
+    <KeyframeSubmitBar
+      v-model:resolution="resolution"
+      v-model:num="num"
+      v-model:image-model-id="imageModelId"
+      v-model:selected-project="selectedProject"
+      v-model:selected-episode="selectedEpisode"
+      v-model:selected-session="selectedSession"
+      :step="step"
+      :image-model-options="imageModelChoices"
+      :image-models-error="imageModelsError"
+      :model-saving="imageModelSaving"
+      :projects="projects"
+      :episodes="episodes"
+      :sessions="sessions"
+      :sessions-loading="sessionsLoading"
+      :session-error="sessionError"
+      :params-saving="sessionSaving"
+      :last-refreshed="lastRefreshed"
+      :status="barStatus"
+      :status-tone="barTone"
+      :running="running"
+      :can-run="canRun"
+      :run-reason="runReason"
+      @model-change="changeImageModel"
+      @run="run"
+      @refresh-sessions="loadSessions"
+    />
 
     <AssetPickerDialog
       v-model="pickerOpen"
@@ -1018,22 +1149,6 @@ onUnmounted(() => {
   border-radius: 999px;
   background: rgba(15, 23, 42, 0.7);
   color: #fff;
-}
-
-.kf-head-actions {
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.kf-image-model-label {
-  font-size: var(--text-xs);
-  white-space: nowrap;
-}
-
-.kf-image-model {
-  width: 190px;
 }
 
 .round-list {

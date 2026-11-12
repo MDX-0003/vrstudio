@@ -198,6 +198,44 @@ select {
   white-space: pre-wrap;
 }
 
+.submit-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.submit-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-left: auto;
+}
+
+.run-state {
+  display: inline-flex;
+  align-items: center;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+.run-detail {
+  margin-left: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+
+.gate-reason {
+  padding: var(--space-1) 0 var(--space-2);
+  color: var(--color-warning);
+  font-size: var(--text-xs);
+}
+
+.status-dot.stale {
+  background: var(--color-warning);
+}
+
 .empty {
   padding: var(--space-3);
 }

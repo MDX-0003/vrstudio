@@ -271,7 +271,12 @@ watch(caseName, (_next, previous) => {
 </script>
 
 <template>
-  <div class="page wizard-page" :class="{ 'gen-step': activeStep === 'generate' && !isLibrary }">
+  <div
+    class="page wizard-page"
+    :class="{
+      'gen-step': ['generate', 'keyframe'].includes(activeStep) && !isLibrary,
+    }"
+  >
     <div class="wizard-head">
       <div>
         <div class="crumbs muted">Case / {{ caseName }}</div>
