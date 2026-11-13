@@ -8,7 +8,8 @@
 帧数、fps、源片身份，任何一项不合约都直接报错，不静默重采样、不输出半成品。
 整片区间（frame_start == 0 且 frame_end 是末帧）不需要拼接，命令直接返回。
 
-视频统一 H.264 8-bit yuv420p（决策 19）；音频从源片复用。流式逐帧写，不把整片
+视频统一走项目标准档（决策 99）：libx265 HEVC Main10 10-bit yuv420p10le，
+crf/preset 缺省取 ``[video]``；音频从源片复用。流式逐帧写，不把整片
 驻留内存。
 """
 
@@ -18,11 +19,12 @@ import json
 import time
 from pathlib import Path
 
-import cv2
 import typer
 
 from .. import case as case_mod
+from .. import config as config_mod
 from ..media.ffmpeg import FfmpegSink, has_audio
+from ..media.videoio import FrameReader, frame_count, probe, seek_for_frame
 from ..patch.case import load_sidecar_single_segment
 from ..progress import PhaseLog as Log
 from ..progress import PhaseRateMeter as RateMeter
@@ -32,15 +34,23 @@ app = typer.Typer(add_completion=False, help=__doc__)
 
 
 class VideoFacts:
-    def __init__(self, path: Path):
-        cap = cv2.VideoCapture(str(path))
-        if not cap.isOpened():
-            raise typer.Exit(f"cannot open video: {path}")
-        self.width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-        cap.release()
+    """Container facts plus the ``VideoInfo`` FrameReader needs.
+
+    ffprobe is the single source: the frame count and fps used for the splice
+    contract must be the same values the decoder's seek lands on, otherwise the
+    prefix/segment/suffix frame arithmetic silently drifts by one.
+    """
+
+    def __init__(self, path: Path, config=None):
+        try:
+            self.info = probe(path, config)
+        except Exception as exc:                              # noqa: BLE001
+            raise typer.Exit(f"cannot open video: {path} ({exc})") from exc
+        self.width, self.height = self.info.size
+        self.frames = frame_count(self.info)
+        if self.frames <= 0:
+            raise typer.Exit(f"cannot determine the frame count: {path}")
+        self.fps = self.info.fps_float
 
     @property
     def size(self) -> tuple[int, int]:
@@ -84,8 +94,10 @@ def assemble(
     space: Path = typer.Option(None, "--space", help="空间合并段 mp4（merge 的输出）"),
     sidecar: Path = typer.Option(None, help="clip.json (single segment)"),
     output: Path = typer.Option(None, help="output full-length mp4"),
-    crf: int = typer.Option(14, help="x265 crf"),
-    preset: str = typer.Option("slow", help="x265 preset"),
+    crf: int = typer.Option(None, help="x265 crf（缺省取 [video].crf）"),
+    preset: str = typer.Option(None, help="x265 preset（缺省取 [video].preset）"),
+    overrides: list[str] = typer.Option([], "--set",
+                                        help="config 覆盖 key=value，可重复"),
     report: Path = typer.Option(None, help="run report JSON（缺省写到输出旁边）"),
     progress_every: int = typer.Option(0),
     quiet: bool = typer.Option(False, "-q"),
@@ -100,6 +112,14 @@ def assemble(
         raise typer.Exit("assemble: --extract 只用于 --case 模式")
     elif not (input_video and space and sidecar and output):
         raise typer.Exit("assemble: 需要 --case，或完整的 --input/--space/--sidecar/--output")
+    try:
+        conf = config_mod.load(overrides=overrides)
+    except (config_mod.ConfigError, OSError, ValueError) as exc:
+        raise typer.Exit(f"配置错误：{exc}") from exc
+    video = conf.video
+    eff_crf = video["crf"] if crf is None else crf
+    eff_preset = video["preset"] if preset is None else preset
+    eff_encoder = str(video["encoder"])
 
     t_start = time.time()
     fh, log_path = open_log_file(f"assemble_{output.stem}")
@@ -109,7 +129,7 @@ def assemble(
     seg = load_sidecar_single_segment(sidecar)
     with open(sidecar, encoding="utf-8") as f:
         sidecar_fps = float(json.load(f)["fps"])
-    src = VideoFacts(input_video)
+    src = VideoFacts(input_video, conf)
     n_seg = seg.frame_end - seg.frame_start + 1
     log.phase(f"segment {seg.id}: frames {seg.frame_start}..{seg.frame_end} "
               f"({n_seg} frames) @ {sidecar_fps:.2f}fps; source {src.frames} frames "
@@ -129,7 +149,7 @@ def assemble(
     if not Path(space).is_file():
         raise typer.Exit(f"空间合并段不存在：{space}——先跑 vrstudio merge")
 
-    mid = VideoFacts(space)
+    mid = VideoFacts(space, conf)
     if mid.frames != n_seg:
         raise typer.Exit(
             f"空间合并段 {mid.frames} 帧，契约要求 {n_seg} 帧：{space}")
@@ -146,12 +166,9 @@ def assemble(
     log.phase(f"assembling: {prefix_n} prefix + {n_seg} segment + {suffix_n} suffix "
               f"= {src.frames} frames")
 
-    cap = cv2.VideoCapture(str(input_video))
-    space_cap = cv2.VideoCapture(str(space))
-    if not cap.isOpened() or not space_cap.isOpened():
-        raise typer.Exit(f"cannot open input: {input_video} 或 {space}")
     audio_from = str(input_video) if has_audio(str(input_video)) else None
-    sink = FfmpegSink(str(output), src.size, sidecar_fps, crf, preset, audio_from)
+    sink = FfmpegSink(str(output), src.size, sidecar_fps, crf, preset,
+                      audio_from, video=video)
     meter = RateMeter(src.frames)
     written = 0
 
@@ -164,24 +181,31 @@ def assemble(
         meter.tick()
         log.progress(meter, "assembling")
 
-    for i in range(prefix_n):
-        ok, frame = cap.read()
-        _write(frame if ok else None, f"源片前段第 {i} 帧")
-    for i in range(n_seg):
-        ok, frame = space_cap.read()
-        _write(frame if ok else None, f"空间合并段第 {i} 帧")
-    # 跳到源片中段之后；seek 失败时逐帧丢弃同样安全（顺序解码）。
-    if not cap.set(cv2.CAP_PROP_POS_FRAMES, seg.frame_end + 1):
-        for _ in range(n_seg):
-            cap.grab()
-    for i in range(suffix_n):
-        ok, frame = cap.read()
-        _write(frame if ok else None, f"源片后段第 {i} 帧")
+    def _take(reader, n: int, what: str) -> None:
+        it = iter(reader)
+        for i in range(n):
+            try:
+                frame = next(it)
+            except StopIteration:
+                frame = None
+            _write(frame, f"{what}第 {i} 帧")
+
+    # 三段各自开一个 16-bit FrameReader：前段从头读；中段是 merge 的成片；后段
+    # 用 seek_for_frame 落在 frame_end+1 的半帧之前，accurate seek 的第一帧就是
+    # 契约要求的帧（不是逐帧 discard，8K 长片不必再解一遍中段）。
+    if prefix_n:
+        with FrameReader(src.info, conf, count=prefix_n) as reader:
+            _take(reader, prefix_n, "源片前段")
+    with FrameReader(mid.info, conf, count=n_seg) as reader:
+        _take(reader, n_seg, "空间合并段")
+    if suffix_n:
+        suffix_seek = seek_for_frame(seg.frame_end + 1, src.info.fps)
+        with FrameReader(src.info, conf, seek=suffix_seek,
+                         count=suffix_n) as reader:
+            _take(reader, suffix_n, "源片后段")
 
     log.done()
     sink.close()
-    cap.release()
-    space_cap.release()
 
     if written != src.frames:
         raise typer.Exit(f"只写出 {written} 帧，契约要求 {src.frames} 帧")
@@ -200,7 +224,8 @@ def assemble(
         "frames_prefix": prefix_n, "frames_segment": n_seg,
         "frames_suffix": suffix_n, "frames_written": written,
         "frames_expected": src.frames, "fps": sidecar_fps,
-        "encoder": "ffmpeg/libx264", "crf": crf, "preset": preset,
+        "encoder": f"ffmpeg/{eff_encoder}", "crf": eff_crf,
+        "preset": eff_preset,
         "audio_from_source": bool(audio_from),
         "elapsed_s": round(elapsed, 1),
     }, indent=2), encoding="utf-8")

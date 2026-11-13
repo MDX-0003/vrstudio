@@ -70,7 +70,12 @@ class SegmentMaps:
                            self.x0 + u.shape[1], self.y0 + v.shape[0])
 
     def composite_frame(self, erp_frame, ai_frame, levels=5):
-        """Blend one AI frame into one ERP frame; returns a new uint8 ERP frame.
+        """Blend one AI frame into one ERP frame; returns a new ERP frame.
+
+        The output keeps the input frame's dtype: uint16 in the video frame
+        pump (quantised to 0..65535), uint8 for the 8-bit still-image flows
+        (patchimg), which must stay 8-bit PNGs. Clamping to the dtype's max is
+        what keeps a 16-bit blend from wrapping.
 
         Only the viewport footprint is touched: pixels outside `cover` are copied
         through unchanged, so the panorama outside the viewport is bit-identical.
@@ -88,8 +93,12 @@ class SegmentMaps:
         sub = out[self.y0:self.y0 + patch.shape[0],
                   self.x0:self.x0 + patch.shape[1]].astype(np.float32)
         sub[self.cover] = patch[self.cover]
+        # 16-bit 帧泵的上限是 65535；8-bit 静图流程仍是 255，两者都按各自 dtype
+        # 收口，避免把 16-bit 值截断进 uint8 或反之。
+        max_value = 65535 if out.dtype == np.uint16 else 255
         out[self.y0:self.y0 + patch.shape[0],
-            self.x0:self.x0 + patch.shape[1]] = np.clip(sub, 0, 255).astype(np.uint8)
+            self.x0:self.x0 + patch.shape[1]] = np.clip(
+                sub, 0, max_value).astype(out.dtype)
         return out
 
     def paste_inner(self, erp_frame, ai_frame, levels=5):

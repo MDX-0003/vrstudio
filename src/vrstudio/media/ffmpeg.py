@@ -4,13 +4,17 @@ Everything here is lazy: nothing runs until a merge actually needs to encode.
 
 ffmpeg resolution order: the project's own ``bin/ffmpeg.exe`` first (ships
 with the distribution package, so recipients never touch PATH), then whatever
-is on PATH as a fallback. Pin the build used in bin/ (see docs/knowledge) —
-the encode parameters are byte-compatible with the project's verified baseline
-(see docs/knowledge/verification.md): rawvideo bgr24 stdin -> libx264
-crf/preset -> yuv420p, audio carried over in a second ``-c copy`` remux pass
-(remuxing a copied stream cannot change the frame count; encoding with the
-audio input present can). Keyframes are pinned to ``KEYFRAME_INTERVAL_S``
-instead of x264's 250-frame default so 8K deliverables stay seekable.
+is on PATH as a fallback. Pin the build used in bin/ (see docs/knowledge).
+
+Encoding follows the single project standard (decision 99): rawvideo
+``bgr48le`` stdin (16-bit per channel) -> ``libx265`` -> ``yuv420p10le``
+Main10, with the BT.709 tags written explicitly. The default crf/preset/encoder
+come from ``[video]`` in the config so one ``--set video.crf`` reaches every
+middleware that uses this sink; explicit arguments still override them. Audio
+is carried over in a second ``-c copy`` remux pass (remuxing a copied stream
+cannot change the frame count; encoding with the audio input present can).
+Keyframes are pinned to ``KEYFRAME_INTERVAL_S`` instead of x265's default so 8K
+deliverables stay seekable.
 """
 
 from __future__ import annotations
@@ -74,6 +78,17 @@ def has_audio(path: str) -> bool:
     return "Audio:" in probe.stderr
 
 
+def video_defaults() -> dict:
+    """The ``[video]`` table: the single source of encoding defaults.
+
+    Imported lazily so this module stays importable before the config layer is
+    built (and so tests may pass a config through ``FfmpegSink(video=...)``
+    instead of having it re-read from disk).
+    """
+    from ..config import load
+    return load().video
+
+
 class FfmpegSink:
     """Streams BGR frames into ffmpeg/libx265, optionally muxing source audio.
 
@@ -82,15 +97,25 @@ class FfmpegSink:
     are migrated. The output profile follows the project standard: HEVC Main10
     ``yuv420p10le``.
 
+    ``crf``/``preset``/``pix_fmt``/``encoder`` default to ``[video]``
+    (``video=`` may carry an already-loaded table, e.g. one built with ``--set``
+    overrides). Explicit arguments still win, so callers that need a different
+    profile keep the override.
+
     Two passes when audio is requested: encode video-only, then remux the audio
     in with ``-c:v copy`` — see module docstring for why.
     """
 
-    def __init__(self, path, size, fps, crf=14, preset="slow",
-                 audio_from=None, pix_fmt="yuv420p10le", encoder="libx265"):
+    def __init__(self, path, size, fps, crf=None, preset=None,
+                 audio_from=None, pix_fmt=None, encoder=None, video=None):
         ff = ffmpeg_path()
         if not ff:
             raise RuntimeError("ffmpeg binary not found")
+        defaults = dict(video) if video is not None else video_defaults()
+        self.crf = defaults["crf"] if crf is None else crf
+        self.preset = defaults["preset"] if preset is None else preset
+        self.pix_fmt = defaults["pix_fmt"] if pix_fmt is None else pix_fmt
+        self.encoder = defaults["encoder"] if encoder is None else encoder
         self.path = path
         self.audio_from = audio_from
         self.tmp = (path + ".video-only.mp4") if audio_from else path
@@ -100,14 +125,21 @@ class FfmpegSink:
                "-s", f"{size[0]}x{size[1]}", "-r", f"{fps}",
                "-i", "-",
                "-vf", "scale=in_range=full:out_range=tv:out_color_matrix=bt709",
-               "-c:v", encoder, "-crf", str(crf), "-preset", preset,
+               "-c:v", self.encoder, "-crf", str(self.crf), "-preset", self.preset,
                "-g", str(gop), "-keyint_min", str(gop),
-               "-pix_fmt", pix_fmt,
+               "-pix_fmt", self.pix_fmt,
                "-colorspace", "bt709", "-color_primaries", "bt709",
-               "-color_trc", "bt709", "-color_range", "tv",
-               "-x265-params",
-               "colorprim=bt709:transfer=bt709:colormatrix=bt709:log-level=error",
-               "-threads", "0", self.tmp]
+               "-color_trc", "bt709", "-color_range", "tv"]
+        if str(self.encoder).startswith("libx264"):
+            cmd += ["-x264-params",
+                    "colorprim=bt709:transfer=bt709:colormatrix=bt709"]
+        else:
+            params = "colorprim=bt709:transfer=bt709:colormatrix=bt709:log-level=error"
+            if float(self.crf) == 0:
+                # x265 的 crf 0 只是「近无损」；像素基线要的是逐位一致。
+                params = "lossless=1:" + params
+            cmd += ["-x265-params", params]
+        cmd += ["-threads", "0", self.tmp]
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                                      stderr=subprocess.PIPE)
 

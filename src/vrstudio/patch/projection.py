@@ -56,7 +56,9 @@ def _direction_to_erp_px(d, w, h):
 def erp_to_rect(erp, yaw, pitch, fov_h, out_w, out_h):
     """Extract a rectilinear viewport from an ERP image.
 
-    Returns uint8 image of shape (out_h, out_w, C) matching `erp` dtype.
+    Returns an image of shape (out_h, out_w, C) with the same dtype as `erp`:
+    ``cv2.remap`` supports 8U and 16U, so a 16-bit frame pump keeps all 65536
+    levels through the projection instead of being truncated to 8-bit.
     """
     h, w = erp.shape[:2]
     f = focal_from_fov(fov_h, out_w)

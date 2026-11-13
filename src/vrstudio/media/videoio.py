@@ -26,6 +26,7 @@ import os
 import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Iterator
 
@@ -50,6 +51,21 @@ def to_u8(frame: np.ndarray) -> np.ndarray:
     if frame.dtype == np.uint8:
         return frame
     return (frame >> 8).astype(np.uint8)
+
+
+def to_u16(frame: np.ndarray) -> np.ndarray:
+    """8-bit BGR -> 16-bit BGR by ``* 257`` (0..255 maps onto 0..65535).
+
+    The inverse of :func:`to_u8`'s high-byte truncation. Used where an 8-bit
+    source has to enter the 16-bit domain: an OpenCV decode, or a PNG emitted
+    by the external RIFE tool. Multiplying by 257 (not 256) keeps 255 -> 65535
+    and stays bit-exact on the way back through ``>> 8``.
+    """
+    if frame.dtype == np.uint16:
+        return frame
+    if frame.dtype == np.uint8:
+        return frame.astype(np.uint16) * 257
+    raise ValueError(f"expected uint8 or uint16 BGR, got {frame.dtype}")
 
 
 @contextmanager
@@ -87,13 +103,52 @@ class VideoIOError(RuntimeError):
     pass
 
 
+def frame_count(info: VideoInfo) -> int:
+    """Video frame count for index arithmetic.
+
+    ``probe`` fills ``frames`` from ``nb_frames`` when present, otherwise from a
+    demux-only packet count, so this is normally exact. The ``duration * fps``
+    fallback only covers containers that report neither; a caller that still
+    gets 0 must not invent a frame count.
+    """
+    if info.frames > 0:
+        return info.frames
+    if info.duration_s > 0 and info.fps_float > 0:
+        return max(1, int(round(info.duration_s * info.fps_float)))
+    return 0
+
+
+def seek_for_frame(frame_index: int, fps) -> float:
+    """Seconds to pass to ffmpeg's input ``-ss`` so ``frame_index`` comes first.
+
+    Half a frame before the target timestamp: ffmpeg's accurate seek (the
+    default) outputs the first frame whose pts is >= the position, so landing
+    strictly between frame-1 and frame keeps the target frame even when the
+    rational fps is not exactly representable as a decimal float. A plain
+    ``frame_index / fps`` can round *past* the target and drop it. ``fps`` may
+    be a float or a rational string like ``"30000/1001"``.
+    """
+    try:
+        rate = float(Fraction(str(fps)))
+    except (ValueError, ZeroDivisionError):
+        return 0.0
+    if rate <= 0:
+        return 0.0
+    return max(0.0, (frame_index - 0.5) / rate)
+
+
 def _run(args: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(args, capture_output=True, text=True,
                           encoding="utf-8", errors="replace")
 
 
 def probe(path: str | Path, config=None) -> VideoInfo:
-    """Metadata via ffprobe. ``frames == 0`` means "not reported", not "empty"."""
+    """Metadata via ffprobe.
+
+    ``frames`` comes from ``nb_frames`` when the container writes it, else from
+    a demux-only packet count; it is 0 only when neither is available, which
+    means "unknown", not "empty".
+    """
     path = str(path)
     if not Path(path).is_file():
         raise VideoIOError(f"no such file: {path}")
@@ -121,6 +176,18 @@ def probe(path: str | Path, config=None) -> VideoInfo:
         frames = int(frames_raw)
     except (TypeError, ValueError):
         frames = 0
+    if frames == 0:
+        # 容器不写 nb_frames（分片 / 刚写完的 mp4 常见）时按包数补：-count_packets
+        # 只解复用、不解码，所以 8K 长片也不会因为要一个精确帧数而多花一次全片
+        # 解码。帧号/拼接算术都依赖这个数，不能只按 duration*fps 猜。
+        counted = _run([ffprobe(config), "-v", "error", "-select_streams", "v:0",
+                        "-count_packets", "-show_entries", "stream=nb_read_packets",
+                        "-of", "csv=p=0", path])
+        token = (counted.stdout or "").strip().splitlines()
+        try:
+            frames = int(token[0].strip(", \r")) if token else 0
+        except (ValueError, IndexError):
+            frames = 0
 
     try:
         duration = float(payload.get("format", {}).get("duration", 0.0) or 0.0)

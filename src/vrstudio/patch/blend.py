@@ -49,7 +49,9 @@ def _reconstruct(pyr):
 def multiband_blend(orig, ai, mask, levels=5):
     """Blend `ai` over `orig` weighted by `mask` (float [0,1], 1 == ai).
 
-    orig/ai are (H,W,C) uint8 or float; returns float32 (H,W,C).
+    orig/ai may be uint8 or uint16 (or float); the pyramid runs in float32, so
+    the blend is bit-depth agnostic and 16-bit input keeps its resolution up to
+    the float32 mantissa. Returns float32 (H,W,C) in the input value range.
     """
     origf = orig.astype(np.float32)
     aif = ai.astype(np.float32)

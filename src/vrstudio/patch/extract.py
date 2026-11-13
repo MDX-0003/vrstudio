@@ -6,8 +6,8 @@ region to regenerate) is described in the sidecar, not cropped away here.
 """
 
 import numpy as np
-import cv2
 
+from ..media.videoio import FrameReader, probe as probe_video, to_u16
 from .projection import erp_to_rect
 from .sidecar import Segment
 
@@ -24,7 +24,12 @@ def extract_viewport_frame(erp_frame, viewport):
 
 
 def extract_segment(erp_frames, segment: Segment) -> np.ndarray:
-    """erp_frames: (T,H,W,C) uint8 array (or list). Returns (n,Hv,Wv,C) uint8."""
+    """erp_frames: (T,H,W,C) uint8 or uint16 array (or list).
+
+    Returns (n,Hv,Wv,C) in the input dtype: ``cv2.remap`` carries 8U and 16U
+    through unchanged, so the viewport crop follows the frame pump's bit depth
+    instead of forcing one.
+    """
     erp_frames = np.asarray(erp_frames)
     out = [
         extract_viewport_frame(erp_frames[t], segment.viewport)
@@ -34,35 +39,41 @@ def extract_segment(erp_frames, segment: Segment) -> np.ndarray:
 
 
 class _FfmpegWriter:
-    """Minimal write/release facade over FfmpegSink for the streaming loop."""
+    """Minimal write/release facade over FfmpegSink for the streaming loop.
 
-    def __init__(self, path, fps, size):
+    The sink takes ``bgr48le``; frames coming out of the OpenCV ERP decode are
+    8-bit, so they are lifted by ``to_u16`` here — the explicit handoff point
+    between the still-8-bit source decode and the 16-bit frame pump.
+    """
+
+    def __init__(self, path, fps, size, video=None):
         from ..media.ffmpeg import FfmpegSink
-        self._sink = FfmpegSink(path, size, fps, crf=14)
+        self._sink = FfmpegSink(path, size, fps, video=video)
 
     def write(self, frame):
-        self._sink.write(frame)
+        self._sink.write(to_u16(frame))
 
     def release(self):
         self._sink.close()
 
 
-def open_writer(path, fps, size):
+def open_writer(path, fps, size, video=None):
     """Open an mp4 writer for streaming frames one at a time.
 
-    libx264 crf14, not OpenCV's mp4v: this file is the AI tool's input, and a
-    lossy first generation should not be the softest link in the redraw chain
-    (measured 2026-09-21: mp4v 37.2 dB vs crf14 38.9 dB on viewport content).
-    crf14/preset medium matches restore's AI-facing encode. Needs the ffmpeg
-    binary (same prerequisite as merge).
+    Encodes through the project standard (libx265 / yuv420p10le, crf from
+    ``[video]``) rather than OpenCV's mp4v: this file is the AI tool's input,
+    and a lossy first generation should not be the softest link in the redraw
+    chain (measured 2026-09-21: mp4v 37.2 dB vs crf14 38.9 dB on viewport
+    content). Needs the ffmpeg binary (same prerequisite as merge).
     """
-    return _FfmpegWriter(path, fps, size)
+    return _FfmpegWriter(path, fps, size, video=video)
 
 
 def write_clip(frames, path, fps, progress=None):
-    """Write a (T,H,W,C) uint8 BGR array to an mp4 file via cv2.
+    """Write a (T,H,W,C) BGR array to an mp4 file through the 16-bit sink.
 
-    `progress(i, t)` is called after each frame if given, for progress reporting.
+    Accepts uint8 or uint16 frames; ``progress(i, t)`` is called after each
+    frame if given, for progress reporting.
     """
     frames = np.asarray(frames)
     t, h, w, c = frames.shape
@@ -75,15 +86,17 @@ def write_clip(frames, path, fps, progress=None):
 
 
 def read_clip(path):
-    """Read an mp4 into a (T,H,W,C) uint8 BGR array."""
-    cap = cv2.VideoCapture(path)
-    frames = []
-    while True:
-        ok, f = cap.read()
-        if not ok:
-            break
-        frames.append(f)
-    cap.release()
+    """Read an mp4 into a (T,H,W,C) uint16 BGR array.
+
+    Uses the shared ``media.videoio`` frame pump (``bgr48le``) instead of
+    ``cv2.VideoCapture``: the latter can only hand back 8-bit, which would
+    truncate every frame before the patch math ever sees it.
+    """
+    info = probe_video(path)
+    with FrameReader(info) as reader:
+        frames = list(reader)
+    if not frames:
+        raise ValueError(f"no decodable frames in {path}")
     return np.stack(frames)
 
 

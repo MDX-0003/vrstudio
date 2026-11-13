@@ -21,6 +21,7 @@ from ..progress import PhaseLog as Log, open_log_file
 from ..patch.rife import DEFAULT_MODEL, RifeInterpolator, find_rife
 from ..patch.restore import (aligned_is_current, aligned_path_for, needs_restore,
                        probe_clip, restore_clip, restore_plan, sidecar_target)
+from .. import config as config_mod
 
 app = typer.Typer(add_completion=False, help=__doc__)
 
@@ -32,12 +33,18 @@ def restore(
     output: Path = typer.Option(None, help="default: <ai stem>_aligned.mp4 next to it"),
     model: str = typer.Option(DEFAULT_MODEL, help="rife-ncnn-vulkan model dir name"),
     gpu: int = typer.Option(None, help="Vulkan device index (default: device 0)"),
-    crf: int = typer.Option(14, help="x265 crf for the aligned intermediate"),
-    preset: str = typer.Option("slow", help="x265 preset"),
+    crf: int = typer.Option(None, help="x265 crf（缺省取 [video].crf）"),
+    preset: str = typer.Option(None, help="x265 preset（缺省取 [video].preset）"),
+    overrides: list[str] = typer.Option([], "--set",
+                                        help="config 覆盖 key=value，可重复"),
     force: bool = typer.Option(False, help="re-run even if the contract is already met"),
     progress_every: int = typer.Option(0),
     quiet: bool = typer.Option(False, "-q"),
 ):
+    try:
+        video = config_mod.load(overrides=overrides).video
+    except (config_mod.ConfigError, OSError, ValueError) as exc:
+        raise typer.Exit(f"配置错误：{exc}") from exc
     seg = load_sidecar_single_segment(sidecar)  # R5 guard, loud
     n, fps = sidecar_target(sidecar)
     out = output or aligned_path_for(ai)
@@ -71,7 +78,7 @@ def restore(
             interpolator = RifeInterpolator(exe, model, gpu)
 
         restore_clip(ai, out, n, fps, interpolator=interpolator,
-                     crf=crf, preset=preset, log=log)
+                     crf=crf, preset=preset, video=video, log=log)
     finally:
         fh.close()
 

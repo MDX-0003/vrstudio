@@ -1,10 +1,10 @@
 """vrstudio merge: paste the regenerated AI viewport clip back into the ERP video.
 
 Streaming (read -> composite -> encode, one frame at a time) — a full-video
-in-memory shape peaks near 48 GB on a 6K canvas. Encode parameters match the
-verified pixel baseline exactly (libx264 crf/preset via media.FfmpegSink,
-two-pass audio remux; see docs/knowledge/verification.md), which is what the
-pixel regression gate relies on.
+in-memory shape peaks near 48 GB on a 6K canvas. Encoding goes through
+media.FfmpegSink with the project's single profile (libx265 / yuv420p10le,
+crf/preset from ``[video]``, two-pass audio remux; decision 99), which is what
+the pixel regression gate relies on.
 
 R5: single-segment only, enforced loudly (case.load_sidecar_single_segment).
 """
@@ -24,6 +24,7 @@ from ..patch.case import load_sidecar_single_segment
 from ..patch.composite import SegmentMaps, normalize_ai_frame
 from ..patch.framealign import index_map, short_by
 from ..media.ffmpeg import FfmpegSink, ffmpeg_path, has_audio
+from ..media.videoio import FrameReader, frame_count, probe, seek_for_frame
 from ..media.imageio import read_image, write_png
 from ..progress import PhaseLog as Log, PhaseRateMeter as RateMeter, format_duration, open_log_file
 from ..patch.restore import resolve_ai_clip
@@ -75,7 +76,8 @@ def resolve_case_inputs(case_name: str, cases_dir,
 class AiFrameSource:
     """Yields the AI clip's frames resampled to the segment's frame count.
 
-    Reads the source clip sequentially and keeps only the current frame; the
+    Reads the source clip sequentially through the 16-bit frame pump
+    (``media.videoio.FrameReader``) and keeps only the current frame; the
     target->source index map is monotonic (framealign.index_map), so each source
     frame is decoded at most once and only decoded frames are resized.
     `correction` (optional 2x3, from scalefit) warps each frame onto the clip's
@@ -83,16 +85,18 @@ class AiFrameSource:
     """
 
     def __init__(self, path, target_size, dst_fps, n, log, correction=None,
-                 allow_crop=False):
+                 allow_crop=False, config=None):
         self.path = path
         self.target_size = target_size
-        self.cap = cv2.VideoCapture(path)
-        if not self.cap.isOpened():
-            raise typer.Exit(f"cannot open AI clip: {path}")
-        self.src_fps = self.cap.get(cv2.CAP_PROP_FPS) or dst_fps
-        self.src_n = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.src_size = (int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                         int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+        info = probe(path, config)
+        self.info = info
+        self.src_fps = info.fps_float or dst_fps
+        self.src_n = frame_count(info)
+        if self.src_n <= 0:
+            raise typer.Exit(
+                f"cannot determine the AI clip's frame count: {path} "
+                f"(ffprobe reported neither nb_frames nor a duration)")
+        self.src_size = info.size
         self.n = n
         self.idx = index_map(n, self.src_fps, dst_fps, self.src_n)
         self._raw = None
@@ -112,6 +116,9 @@ class AiFrameSource:
                 f"(aspect {src_aspect:.4f}) but the viewport is "
                 f"{target_size[0]}x{target_size[1]} (aspect {target_aspect:.4f}); "
                 f"pass --allow-crop to centre-crop the AI clip")
+        self._reader = FrameReader(info, config)
+        self._reader.__enter__()
+        self._frames = iter(self._reader)
 
         log.info(f"ai clip : {self.src_n} frames, {self.src_size[0]}x"
                  f"{self.src_size[1]} @ {self.src_fps:.2f}fps -> resample to "
@@ -123,8 +130,9 @@ class AiFrameSource:
     def frame(self, i):
         want = int(self.idx[i])
         while self._raw_i < want:
-            ok, f = self.cap.read()
-            if not ok:
+            try:
+                f = next(self._frames)
+            except StopIteration:
                 break
             self._raw = f
             self._raw_i += 1
@@ -143,7 +151,7 @@ class AiFrameSource:
         return self._scaled
 
     def close(self):
-        self.cap.release()
+        self._reader.__exit__(None, None, None)
 
 
 def _merge_image(case, cases_dir, *, feather: int, levels: int,
@@ -415,8 +423,10 @@ def merge(
     snapshots: str = typer.Option("", help="comma-separated frame indices to save as PNG"),
     feather: int = typer.Option(16, help="inner-rect boundary feather width"),
     levels: int = typer.Option(5, help="Laplacian pyramid levels"),
-    crf: int = typer.Option(14, help="x265 crf"),
-    preset: str = typer.Option("slow", help="x265 preset"),
+    crf: int = typer.Option(None, help="x265 crf（缺省取 [video].crf）"),
+    preset: str = typer.Option(None, help="x265 preset（缺省取 [video].preset）"),
+    overrides: list[str] = typer.Option([], "--set",
+                                        help="config 覆盖 key=value，可重复"),
     report: Path = typer.Option(None, help="write a JSON run report here"),
     no_restore: bool = typer.Option(False, help="feed the raw AI clip to the "
                                                 "resampler even when it misses "
@@ -466,6 +476,15 @@ def merge(
         raise typer.Exit("merge: --follow-input 只用于 fullRedrawImg 的 --case 拼接")
     elif not (input_video and ai and sidecar and output):
         raise typer.Exit("merge: 需要 --case，或完整的 --input/--ai/--sidecar/--output")
+    try:
+        conf = config_mod.load(overrides=overrides)
+    except (config_mod.ConfigError, OSError, ValueError) as exc:
+        raise typer.Exit(f"配置错误：{exc}") from exc
+    video = conf.video
+    # 显式 --crf/--preset 覆盖 [video]；报告与日志写最终生效值。
+    eff_crf = video["crf"] if crf is None else crf
+    eff_preset = video["preset"] if preset is None else preset
+    eff_encoder = str(video["encoder"])
     t_start = time.time()
     fh, log_path = open_log_file(f"merge_{output.stem}")
     log = Log(every=progress_every, quiet=quiet, fh=fh)
@@ -489,22 +508,28 @@ def merge(
     if max_frames and max_frames < n:
         n = max_frames
         log.info(f"preview: writing {n} of {n_seg} frames (--max-frames {max_frames})")
+    sidecar_fps = sidecar_fps_value(sidecar)
+
+    # ---- 2. source video -----------------------------------------------------
+    # Probe and decode go through media.videoio so the frames are the same
+    # ``bgr48le`` uint16 the frame pump delivers; cv2 could only hand back 8-bit
+    # and silently truncate the whole patch deliverable.
+    try:
+        src_info = probe(input_video, conf)
+    except Exception as exc:                                  # noqa: BLE001
+        raise typer.Exit(f"cannot open source video: {input_video} ({exc})") from exc
+    src_w, src_h = src_info.size
+    src_frames = frame_count(src_info)
+    if src_frames <= 0:
+        raise typer.Exit(
+            f"cannot determine the source video's frame count: {input_video}")
     log.info(f"segment {seg.id}: frames {seg.frame_start}..{seg.frame_end} "
-             f"({n_seg} frames) @ {fps_of(input_video):.2f}fps")
-    log.info(f"erp {erp_size(input_video)[0]}x{erp_size(input_video)[1]}, "
+             f"({n_seg} frames) @ {src_info.fps_float:.2f}fps")
+    log.info(f"erp {src_w}x{src_h}, "
              f"viewport {vp.width}x{vp.height} yaw={vp.yaw_deg} "
              f"pitch={vp.pitch_deg} fov={vp.fov_h_deg}")
     log.info(f"inner: x={seg.inner.x} y={seg.inner.y} "
              f"w={seg.inner.width} h={seg.inner.height}")
-
-    # ---- 2. source video -----------------------------------------------------
-    cap = cv2.VideoCapture(str(input_video))
-    if not cap.isOpened():
-        raise typer.Exit(f"cannot open source video: {input_video}")
-    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    src_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    sidecar_fps = sidecar_fps_value(sidecar)
     if seg.frame_end >= src_frames:
         log.info(f"WARNING: segment ends at frame {seg.frame_end} but the source "
                  f"has {src_frames} frames; truncating to what exists.")
@@ -531,7 +556,8 @@ def merge(
         raise typer.Exit(f"cannot open AI clip: {ai}")
     try:
         use_ai, restored = resolve_ai_clip(str(ai), n_seg, sidecar_fps,
-                                           no_restore=no_restore, log=log)
+                                           no_restore=no_restore, log=log,
+                                           video=video)
     except FileNotFoundError as e:
         raise typer.Exit(str(e))
     correction = None
@@ -545,7 +571,8 @@ def merge(
         if fit.applied:
             correction = fit.matrix32()
     ai_src = AiFrameSource(use_ai, (vp.width, vp.height), sidecar_fps, n_seg,
-                           log, correction=correction, allow_crop=allow_crop)
+                           log, correction=correction, allow_crop=allow_crop,
+                           config=conf)
     if ai_src.short:
         log.info(f"WARNING: AI clip is {ai_src.short} frames short; the last "
                  f"decodable frame is reused to fill the gap.")
@@ -558,39 +585,42 @@ def merge(
     audio_from = None
     if has_audio(str(input_video)):
         audio_from = str(input_video)
-        log.info("encoder: ffmpeg/libx264 + source audio (video-only encode, "
-                 "then audio muxed in with -c:v copy)")
+        log.info(f"encoder: ffmpeg/{eff_encoder} + source audio (video-only "
+                 f"encode, then audio muxed in with -c:v copy)")
     else:
-        log.info("encoder: ffmpeg/libx264 (source has no audio track to keep)")
+        log.info(f"encoder: ffmpeg/{eff_encoder} (source has no audio track to keep)")
 
     # ---- 6. stream -----------------------------------------------------------
     log.phase(f"compositing {n} frames")
-    if not cap.set(cv2.CAP_PROP_POS_FRAMES, seg.frame_start):
-        log.info("WARNING: could not seek; decoding from the start instead.")
-
+    # Input seek, not a frame-by-frame discard: ``seek_for_frame`` lands half a
+    # frame before the segment's first frame so accurate seek emits exactly that
+    # frame (frame-number alignment with the sidecar contract).
+    seek = seek_for_frame(seg.frame_start, src_info.fps)
     sink = FfmpegSink(str(output), (src_w, src_h), sidecar_fps, crf, preset,
-                      audio_from)
+                      audio_from, video=video)
     meter = RateMeter(n)
     snap = {int(v) for v in snapshots.split(",") if v.strip()}
     written = 0
-    for i in range(n):
-        ok, frame = cap.read()
-        if not ok:
-            log.info(f"source ended early at output frame {i}; writing {written}.")
-            break
-        out = maps.composite_frame(frame, ai_src.frame(i), levels)
-        if i in snap:
-            p = output.with_name(output.stem + f"_f{i}.png")
-            cv2.imwrite(str(p), out)
-            log.info(f"snapshot -> {p}")
-        sink.write(out)
-        written += 1
-        meter.tick()
-        log.progress(meter, "compositing")
+    with FrameReader(src_info, conf, seek=seek, count=n) as reader:
+        it = iter(reader)
+        for i in range(n):
+            try:
+                frame = next(it)
+            except StopIteration:
+                log.info(f"source ended early at output frame {i}; writing {written}.")
+                break
+            out = maps.composite_frame(frame, ai_src.frame(i), levels)
+            if i in snap:
+                p = output.with_name(output.stem + f"_f{i}.png")
+                cv2.imwrite(str(p), out)
+                log.info(f"snapshot -> {p}")
+            sink.write(out)
+            written += 1
+            meter.tick()
+            log.progress(meter, "compositing")
 
     log.done()
     sink.close()
-    cap.release()
     ai_src.close()
 
     size_mb = output.stat().st_size / 1e6 if output.exists() else 0
@@ -607,8 +637,9 @@ def merge(
             "scale_fit": (fit.to_dict() if scale_fit.strip().lower() != "off"
                           else {"mode": "off"}),
             "output": str(output), "frames_written": written,
-            "frames_expected": n, "encoder": "ffmpeg/libx264",
-            "crf": crf, "preset": preset, "feather": feather, "levels": levels,
+            "frames_expected": n, "encoder": f"ffmpeg/{eff_encoder}",
+            "crf": eff_crf, "preset": eff_preset, "feather": feather,
+            "levels": levels,
             "allow_crop": bool(allow_crop),
             "inner": [seg.inner.x, seg.inner.y, seg.inner.width, seg.inner.height],
             "warnings": (["ai clip short by %d" % ai_src.short] if ai_src.short else []),
@@ -617,25 +648,6 @@ def merge(
         typer.echo(f"report -> {report}")
 
     fh.close()
-
-
-def fps_of(path) -> float:
-    cap = cv2.VideoCapture(str(path))
-    if not cap.isOpened():
-        raise typer.Exit(f"cannot open video: {path}")
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    cap.release()
-    return float(fps)
-
-
-def erp_size(path):
-    cap = cv2.VideoCapture(str(path))
-    if not cap.isOpened():
-        raise typer.Exit(f"cannot open video: {path}")
-    size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
-    cap.release()
-    return size
 
 
 def sidecar_fps_value(path) -> float:

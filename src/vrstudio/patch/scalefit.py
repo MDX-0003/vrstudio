@@ -256,6 +256,11 @@ def fit_videos(clip_path, ai_path, inner, size, frame_start: int, n_seg: int,
     def grab(cap, i):
         cap.set(cv2.CAP_PROP_POS_FRAMES, i)
         ok, fr = cap.read()
+        # Registration deliberately stays on OpenCV 8-bit gray: findTransformECC
+        # and matchTemplate require 8U or 32F input, and the fit is sub-pixel
+        # geometry, not colour fidelity. This is independent of the frame pump's
+        # bit depth; the correction matrix is applied to whatever dtype the
+        # frames arrive as.
         return cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY) if ok else None
 
     pairs = []

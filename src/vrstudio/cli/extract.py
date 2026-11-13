@@ -43,10 +43,12 @@ def _sha256_file(path: Path) -> str:
 
 
 def _stream_extract(cap, fps, seg: Segment, clip_path: Path, sidecar_path: Path,
-                    mask_path: Path, erp_size: tuple[int, int], log: Log):
+                    mask_path: Path, erp_size: tuple[int, int], log: Log,
+                    video: dict | None = None):
     n = seg.frame_end - seg.frame_start + 1
     meter = RateMeter(n)
-    writer = open_writer(str(clip_path), fps, (seg.viewport.width, seg.viewport.height))
+    writer = open_writer(str(clip_path), fps,
+                         (seg.viewport.width, seg.viewport.height), video=video)
     written = 0
     for _ in range(n):
         ok, frame = cap.read()
@@ -96,12 +98,24 @@ def _write_raw_frames(clip: Path, out_dir: Path, log: Log) -> None:
               f"{count or '?'} frames)")
 
 
+def _video_settings(overrides: list[str]) -> dict:
+    """[video] 编码档；--set 在这里解析，未知键按配置错误退出（码 2）。"""
+    try:
+        return config_mod.load(overrides=overrides).video
+    except (config_mod.ConfigError, OSError, ValueError) as exc:
+        typer.secho(f"配置错误：{exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+
+
 @app.command("case")
 def from_case(
     case_file: Path = typer.Argument(..., exists=True, help="case.toml path"),
     out_dir: Path = typer.Option(None, help="default: <case dir>/derived"),
+    overrides: list[str] = typer.Option([], "--set",
+                                        help="config 覆盖 key=value，可重复"),
 ):
     """Extract using a case.toml (verifies the source hash first)."""
+    video = _video_settings(overrides)
     case: Case = load_case(case_file)  # raises on hash mismatch
     out = out_dir or (case_file.parent / "derived")
     out.mkdir(parents=True, exist_ok=True)
@@ -129,7 +143,7 @@ def from_case(
         vdir.mkdir(parents=True, exist_ok=True)
         _stream_extract(cap, fps, seg, vdir / "clip.mp4", vdir / "clip.json",
                         vdir / "clip_mask.png",
-                        (case.erp_width, case.erp_height), log)
+                        (case.erp_width, case.erp_height), log, video=video)
         cap.release()
         _write_raw_frames(vdir / "clip.mp4", vdir, log)
         geometry_sha = _sha256_file(vdir / "clip.json")
@@ -225,6 +239,8 @@ def from_case_name(
     cases_dir: Path = typer.Option(None, help="default: <repo>/cases"),
     preset: str = typer.Option(None, "--preset",
                                help="patch/patchimg 的 preset id；缺省用 [pick] active"),
+    overrides: list[str] = typer.Option([], "--set",
+                                        help="config 覆盖 key=value，可重复"),
 ):
     """Extract by unified case name: 选中的 preset 冻结进 extracts/<版本>。
 
@@ -264,6 +280,12 @@ def from_case_name(
                 f"补齐 {need} 并点保存", fg=typer.colors.RED, err=True)
             raise typer.Exit(2)
     src = case_mod.check_source(case, cases_dir)
+    try:
+        conf = config_mod.load(overrides=overrides)
+    except (config_mod.ConfigError, OSError, ValueError) as exc:
+        typer.secho(f"配置错误：{exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+    video = conf.video
 
     fh, log_path = open_log_file(f"extract_{case.name}")
     log = Log(fh=fh)
@@ -281,8 +303,7 @@ def from_case_name(
             return
         if case.flow == "fullRedrawImg":
             try:
-                _extract_full_redraw_img(case, src, cases_dir, log,
-                                         config_mod.load())
+                _extract_full_redraw_img(case, src, cases_dir, log, conf)
             except (ImageFlowError, ImageError, ValueError, TypeError) as exc:
                 typer.secho(f"extract: {exc}", fg=typer.colors.RED, err=True)
                 raise typer.Exit(2) from exc
@@ -304,7 +325,8 @@ def from_case_name(
         vdir = case.dir(cases_dir) / "extracts" / version
         vdir.mkdir(parents=True, exist_ok=True)
         _stream_extract(cap, fps, seg, vdir / "clip.mp4", vdir / "clip.json",
-                        vdir / "clip_mask.png", (erp_w, erp_h), log)
+                        vdir / "clip_mask.png", (erp_w, erp_h), log,
+                        video=video)
         cap.release()
         _write_raw_frames(vdir / "clip.mp4", vdir, log)
         geometry_sha = _sha256_file(vdir / "clip.json")
@@ -333,8 +355,11 @@ def from_args(
     vph: int = typer.Option(..., help="viewport height px"),
     inner: str = typer.Option(..., help="X,Y,W,H"),
     mask: Path = typer.Option(None, help="default: <clip stem>_mask.png"),
+    overrides: list[str] = typer.Option([], "--set",
+                                        help="config 覆盖 key=value，可重复"),
 ):
     """Extract with explicit arguments (no case.toml needed)."""
+    video = _video_settings(overrides)
     ix, iy, iw, ih = (int(v) for v in inner.split(","))
     seg = Segment(id="seg_0", frame_start=start, frame_end=end,
                   viewport=Viewport(yaw_deg=yaw, pitch_deg=pitch,
@@ -354,7 +379,7 @@ def from_args(
             log.info("WARNING: could not seek; decoding from the start instead.")
         _stream_extract(cap, fps, seg, clip, sidecar,
                         mask or clip.with_name(clip.stem + "_mask.png"),
-                        (erp_w, erp_h), log)
+                        (erp_w, erp_h), log, video=video)
         cap.release()
         log.phase(f"log -> {log_path}")
     finally:

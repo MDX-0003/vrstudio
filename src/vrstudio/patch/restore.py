@@ -41,6 +41,7 @@ import numpy as np
 from .case import load_sidecar_single_segment
 from .framealign import index_map
 from ..media.ffmpeg import FfmpegSink
+from ..media.videoio import to_u16
 from .sidecar import load_sidecar
 
 #: container fps read back within this of the target counts as matching
@@ -155,12 +156,19 @@ def _decode_to_png_dir(video: str, out_dir: Path, log) -> int:
 
 
 def _encode_png_dir(in_dir: Path, n: int, fps: float, out_path: Path,
-                    size: tuple[int, int], crf: int, preset: str, log) -> None:
+                    size: tuple[int, int], crf: int | None, preset: str | None,
+                    log, video: dict | None = None) -> None:
     """Stream a PNG dir into ffmpeg at exactly n frames @ fps; short input
     repeats its last frame, overflow is trimmed (the count contract is not
     optional). Files are taken in sorted order — the rife exe emits 1-based
-    %08d.png names, our fakes 0-based; sorting is agnostic to both."""
-    sink = FfmpegSink(str(out_path), size, fps, crf, preset)
+    %08d.png names, our fakes 0-based; sorting is agnostic to both.
+
+    The PNGs are the external interpolator's handoff and are 8-bit by its
+    contract, so each one is lifted to 16-bit with ``to_u16`` before it reaches
+    the 16-bit sink; that is the single documented 8-bit step left in a
+    stretch restore.
+    """
+    sink = FfmpegSink(str(out_path), size, fps, crf, preset, video=video)
     files = sorted(in_dir.glob("*.png"))
     if not files:
         sink.close()
@@ -178,21 +186,26 @@ def _encode_png_dir(in_dir: Path, n: int, fps: float, out_path: Path,
         if last is None:
             sink.close()
             raise RuntimeError(f"undecodable frame in {in_dir}: {files[i]}")
-        sink.write(last)
+        sink.write(to_u16(last))
     sink.close()
     log.info(f"encoded {n} frames @ {fps:g}fps -> {out_path}")
 
 
 def _encode_selected(video: str, n: int, src_fps: float, dst_fps: float,
                      src_n: int, out_path: Path, size: tuple[int, int],
-                     crf: int, preset: str, log) -> None:
+                     crf: int | None, preset: str | None, log,
+                     video_cfg: dict | None = None) -> None:
     """select/identity path: nearest-frame pick through framealign.index_map
-    (the single resampling rule), streamed straight into ffmpeg — no PNGs."""
+    (the single resampling rule), streamed straight into ffmpeg — no PNGs.
+
+    cv2.VideoCapture (the AI clip probe path) hands back 8-bit frames; each one
+    is lifted with ``to_u16`` on its way into the 16-bit sink.
+    """
     cap = cv2.VideoCapture(video)
     if not cap.isOpened():
         raise FileNotFoundError(f"cannot open video: {video}")
     idx = index_map(n, src_fps, dst_fps, src_n)
-    sink = FfmpegSink(str(out_path), size, dst_fps, crf, preset)
+    sink = FfmpegSink(str(out_path), size, dst_fps, crf, preset, video=video_cfg)
     cur, last = -1, None
     for i in range(n):
         want = int(idx[i])
@@ -205,7 +218,7 @@ def _encode_selected(video: str, n: int, src_fps: float, dst_fps: float,
             cap.release()
             sink.close()
             raise RuntimeError(f"AI clip {video!r} yielded no decodable frames")
-        sink.write(last)
+        sink.write(to_u16(last))
     sink.close()
     cap.release()
     log.info(f"selected {n} of {src_n} frames "
@@ -215,10 +228,14 @@ def _encode_selected(video: str, n: int, src_fps: float, dst_fps: float,
 def restore_clip(ai_path: str | Path, out_path: str | Path,
                  target_frames: int, target_fps: float, *,
                  interpolator: Interpolator | None = None,
-                 crf: int = 14, preset: str = "slow",
+                 crf: int | None = None, preset: str | None = None,
+                 video: dict | None = None,
                  log=None) -> dict:
     """Write ``out_path``: the AI clip brought to exactly ``target_frames`` @
     ``target_fps`` (resolution untouched — merge owns resizing).
+
+    ``crf``/``preset`` default to ``[video]`` when omitted; ``video`` carries an
+    already-loaded table so a CLI ``--set video.crf`` reaches this sink too.
 
     Stretch runs ``interpolator`` (caller resolves the binary first and says
     so in the log); select/identity never needs one. Returns a report dict.
@@ -249,7 +266,8 @@ def restore_clip(ai_path: str | Path, out_path: str | Path,
             elif made > target_frames:
                 log.info(f"interpolator returned {made} frames; trimming to {target_frames}.")
             _encode_png_dir(out_dir, target_frames, target_fps, out_path,
-                            (info.width, info.height), crf, preset, log)
+                            (info.width, info.height), crf, preset, log,
+                            video=video)
         finally:
             shutil.rmtree(in_dir, ignore_errors=True)
             shutil.rmtree(out_dir, ignore_errors=True)
@@ -258,7 +276,7 @@ def restore_clip(ai_path: str | Path, out_path: str | Path,
         # playback rate on re-encode even when only the label was wrong
         _encode_selected(str(ai_path), target_frames, info.fps, target_fps,
                          info.frames, out_path, (info.width, info.height),
-                         crf, preset, log)
+                         crf, preset, log, video_cfg=video)
 
     got = probe_clip(out_path)
     if got.frames != target_frames or abs(got.fps - target_fps) > FPS_TOL:
@@ -274,7 +292,8 @@ def restore_clip(ai_path: str | Path, out_path: str | Path,
 
 def resolve_ai_clip(ai_path: str | Path, target_frames: int, target_fps: float,
                     *, no_restore: bool = False, log=None,
-                    interpolator_factory=None) -> tuple[str, dict | None]:
+                    interpolator_factory=None,
+                    video: dict | None = None) -> tuple[str, dict | None]:
     """The clip merge should actually read, given the raw AI clip.
 
     Frozen workflow decision: auto-restore runs here, not as a separate user
@@ -289,6 +308,7 @@ def resolve_ai_clip(ai_path: str | Path, target_frames: int, target_fps: float,
     - ``no_restore`` → raw path always (escape hatch for regression runs).
 
     ``interpolator_factory``: None→exe | RifeInterpolator; tests inject a fake.
+    ``video``: an already-loaded ``[video]`` table for the encode defaults.
     """
     log = log or _NullLog()
     if no_restore:
@@ -316,5 +336,5 @@ def resolve_ai_clip(ai_path: str | Path, target_frames: int, target_fps: float,
     interpolator = (interpolator_factory(find_rife())
                     if plan == "stretch" else None)
     report = restore_clip(ai_path, aligned, target_frames, target_fps,
-                          interpolator=interpolator, log=log)
+                          interpolator=interpolator, video=video, log=log)
     return str(aligned), report
