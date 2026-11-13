@@ -10,8 +10,8 @@ import { saveRelightRegions } from '@/api/relight'
 import { saveRelightDraft } from '@/api/case'
 import type { RelightPayload, RelightRegion, TimeRange } from '@/types/case-info'
 import type { LonLat, Pole } from '@/utils/erpMath'
-import { MAX_REGION_LAT, isPoleCapShape, regionShapeIssue } from '@/utils/erpMath'
-import type { RegionShapeIssue } from '@/utils/erpMath'
+import { MAX_REGION_LAT, isPoleCapShape, polygonIntersect, polygonSubtract, regionShapeIssue } from '@/utils/erpMath'
+import type { PolygonClipFailure, RegionShapeIssue } from '@/utils/erpMath'
 import { rangeSummary } from '@/utils/relightTime'
 
 /**
@@ -46,6 +46,8 @@ const viewer = ref<{ seek: (seconds: number) => void } | null>(null)
 const regions = ref<RelightRegion[]>(props.payload.regions?.regions.slice() ?? [])
 const selectedId = ref<string | null>(regions.value[0]?.id ?? null)
 const mode = ref<'orbit' | 'poly'>('orbit')
+/** 绘制种类（决策 100）：新选区照常建区域；减去 / 相交闭合时裁剪选中区域的几何。 */
+const drawKind = ref<'new' | 'subtract' | 'intersect'>('new')
 const draft = ref<LonLat[] | null>(null)
 const renamingId = ref<string | null>(null)
 /** 高亮选区：勾选时保持默认的醒目叠加，取消后只留轻量的几何参考。 */
@@ -206,6 +208,7 @@ function addRegion(points: LonLat[], pole: Pole | null): void {
   selectedId.value = region.id
   draft.value = null
   mode.value = 'orbit'
+  drawKind.value = 'new'
   scheduleRegionSave()
 }
 
@@ -229,13 +232,80 @@ function onCapClosed(): void {
   capPoints.value = null
 }
 
-function startDraw(): void {
-  if (regions.value.length >= MAX_REGIONS) {
+/** 布尔目标能否被裁剪：普通且合法的区域才能做减去 / 相交，盖帽一律拒绝。 */
+function booleanTargetIssue(): string | null {
+  const target = selected.value
+  if (!target) return '先选中一个要裁剪的目标区域'
+  if (regionInvalid(target)) return '目标区域的形状不合法（绕极点、跨度超限或自交），先修好它'
+  if (target.pole || isPoleCapShape(target.verts)) {
+    return '盖帽区域不参与布尔运算；画一个普通区域排在它上面即可盖住重叠处'
+  }
+  return null
+}
+
+function startDraw(kind: 'new' | 'subtract' | 'intersect' = 'new'): void {
+  if (kind !== 'new') {
+    const issue = booleanTargetIssue()
+    if (issue) {
+      ElMessage.warning(issue)
+      return
+    }
+  } else if (regions.value.length >= MAX_REGIONS) {
     ElMessage.warning(`区域最多 ${MAX_REGIONS} 个`)
     return
   }
+  drawKind.value = kind
   mode.value = 'poly'
   draft.value = []
+}
+
+/** 把布尔裁剪的失败原因翻成用户能据此改形的说明。 */
+function clipFailureMessage(kind: 'subtract' | 'intersect', failure: PolygonClipFailure): string {
+  const verb = kind === 'subtract' ? '减去' : '相交'
+  if (failure === 'empty') {
+    return kind === 'subtract'
+      ? '目标区域会被整个减掉；如果两个区域本就不重叠，形状不会变化'
+      : '两个区域不相交，没有交集可用'
+  }
+  if (failure === 'hole') return `这样${verb}会在中间挖出一个洞，单个多边形表示不了`
+  if (failure === 'multi') return `这样${verb}会把目标区域分裂成多块，请分几次小口裁剪`
+  return `两个形状的边贴得太近，${verb}算不出来；稍微挪一下再试`
+}
+
+/** 减去 / 相交闭合：把草稿当裁剪形状，直接改写选中区域的 verts。 */
+function applyDraftClip(points: LonLat[]): void {
+  const target = selected.value
+  if (!target) {
+    draft.value = null
+    mode.value = 'orbit'
+    return
+  }
+  if (isPoleCapShape(points) || regionShapeIssue(points)) {
+    ElMessage.error('裁剪形状绕极点转圈或自交，画一个普通形状再闭合')
+    return
+  }
+  const kind = drawKind.value
+  const result = kind === 'subtract'
+    ? polygonSubtract(target.verts, points)
+    : polygonIntersect(target.verts, points)
+  if (!result.ok) {
+    ElMessage.error(clipFailureMessage(kind === 'subtract' ? 'subtract' : 'intersect', result.kind))
+    return
+  }
+  if (result.verts.length > MAX_VERTICES) {
+    ElMessage.error(`裁剪后顶点有 ${result.verts.length} 个，超过上限 ${MAX_VERTICES}；请用更少的边裁剪`)
+    return
+  }
+  const issue = regionShapeIssue(result.verts, null)
+  if (issue) {
+    ElMessage.error(shapeIssueMessage(issue))
+    return
+  }
+  target.verts = result.verts
+  draft.value = null
+  mode.value = 'orbit'
+  scheduleRegionSave()
+  ElMessage.success(kind === 'subtract' ? '已从选中区域减去这块' : '选中区域已收窄为交集')
 }
 
 function addPoint(lon: number, lat: number): void {
@@ -262,6 +332,10 @@ function closeDraft(): void {
   if (points.length < 3) {
     draft.value = null
     mode.value = 'orbit'
+    return
+  }
+  if (drawKind.value !== 'new') {
+    applyDraftClip(points)
     return
   }
   // 绕极点恰好一圈的草稿先问清楚要哪一侧；其余装不下的形状直接拒绝。
@@ -305,6 +379,27 @@ function deleteRegion(id: string): void {
   regions.value = regions.value.filter((region) => region.id !== id)
   if (selectedId.value === id) selectedId.value = regions.value[0]?.id ?? null
   scheduleRegionSave()
+}
+
+/**
+ * 调整区域在列表里的位置：数组顺序就是引擎的合成顺序，靠后的区域在重叠处
+ * 覆盖靠前的区域（决策 100 的显式化排序入口）。
+ */
+function reorderRegion(id: string, to: number): void {
+  const index = regions.value.findIndex((region) => region.id === id)
+  if (index < 0) return
+  const target = regions.value[index]
+  const rest = regions.value.filter((region) => region.id !== id)
+  rest.splice(Math.max(0, Math.min(rest.length, to)), 0, target)
+  regions.value = rest
+  scheduleRegionSave()
+}
+
+/** 列表内的相对移动：offset 为正表示往上层（数组更靠后）挪。 */
+function nudgeRegion(id: string, offset: number): void {
+  const index = regions.value.findIndex((region) => region.id === id)
+  if (index < 0) return
+  reorderRegion(id, index + offset)
 }
 
 function startRename(id: string): void {
@@ -377,7 +472,23 @@ watch(() => props.payload.regions_error, (value) => {
 
 function onKey(event: KeyboardEvent): void {
   if (capVisible.value) return
-  if (mode.value !== 'poly') return
+  // 输入框里的按键不抢：改名、改参数时 Alt+ 组合留给输入法与系统。
+  const target = event.target as HTMLElement | null
+  if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return
+  if (mode.value !== 'poly') {
+    // PS 式绘制模式的快捷入口：Alt+N 新选区、Alt+D 减去、Alt+I 相交。
+    if (event.altKey && (event.key === 'n' || event.key === 'N')) {
+      event.preventDefault()
+      startDraw('new')
+    } else if (event.altKey && (event.key === 'd' || event.key === 'D')) {
+      event.preventDefault()
+      startDraw('subtract')
+    } else if (event.altKey && (event.key === 'i' || event.key === 'I')) {
+      event.preventDefault()
+      startDraw('intersect')
+    }
+    return
+  }
   if (event.key === 'Enter') {
     event.preventDefault()
     closeDraft()
@@ -417,17 +528,31 @@ onBeforeUnmount(() => {
         >选择</button>
         <button
           class="btn"
-          :class="{ on: mode === 'poly' }"
           type="button"
-          @click="startDraw"
+          :class="{ on: mode === 'poly' && drawKind === 'new' }"
+          title="画一个新区域（Alt+N）"
+          @click="startDraw('new')"
         >多边形</button>
-        <button class="btn" type="button" disabled>套索</button>
+        <button
+          class="btn"
+          type="button"
+          :class="{ on: mode === 'poly' && drawKind === 'subtract' }"
+          title="画一块形状，从选中区域里减去它（Alt+D）"
+          @click="startDraw('subtract')"
+        >减去</button>
+        <button
+          class="btn"
+          type="button"
+          :class="{ on: mode === 'poly' && drawKind === 'intersect' }"
+          title="画一块形状，选中区域收窄为与它的交集（Alt+I）"
+          @click="startDraw('intersect')"
+        >相交</button>
         <span class="spacer"></span>
         <label class="toggle">
           <input v-model="highlightSelection" type="checkbox" />
           高亮选区
         </label>
-        <span class="muted hint">绘制时拖动画面转向、单击加点 · 选中后拖顶点改形、边上单击加点、右键删点</span>
+        <span class="muted hint">绘制时拖动画面转向、单击加点 · 减去/相交先选中目标区域 · 选中后拖顶点改形、边上加点、右键删点</span>
       </div>
 
       <ErpRegionViewer
@@ -467,7 +592,7 @@ onBeforeUnmount(() => {
         <div class="panel-head">
           <h2>区域（{{ regions.length }}）</h2>
           <span class="spacer"></span>
-          <button class="btn" type="button" @click="startDraw">＋ 新建</button>
+          <button class="btn" type="button" @click="startDraw()">＋ 新建</button>
         </div>
         <div class="panel-body list">
           <div
@@ -490,6 +615,10 @@ onBeforeUnmount(() => {
             <span v-if="regionInvalid(region)" class="chip warn" title="这个区域绕极点转圈、经度跨度超过一整圈或边自交，单个闭合多边形表示不了">⚠</span>
             <span v-if="region.pole" class="chip small">{{ region.pole === 'north' ? '包含上方' : '包含下方' }}</span>
             <span class="chip small">{{ rangeSummary(region.ranges) }}</span>
+            <button class="icon" type="button" title="移到最上层：重叠处覆盖其他区域" @click.stop="reorderRegion(region.id, regions.length - 1)">⤒</button>
+            <button class="icon" type="button" title="上移一层" @click.stop="nudgeRegion(region.id, 1)">↑</button>
+            <button class="icon" type="button" title="下移一层" @click.stop="nudgeRegion(region.id, -1)">↓</button>
+            <button class="icon" type="button" title="移到最底层：重叠处被其他区域覆盖" @click.stop="reorderRegion(region.id, 0)">⤓</button>
             <button class="icon" type="button" :title="region.enabled ? '停用（不参与合成）' : '启用'" @click.stop="toggleEnabled(region.id)">
               {{ region.enabled ? '◉' : '○' }}
             </button>
@@ -500,6 +629,7 @@ onBeforeUnmount(() => {
           </p>
           <p class="muted tip">
             拖顶点改形，边上单击加点，右键删点；双击名称改名，点色块换色。
+            列表靠下的区域在重叠处覆盖靠上的区域，与引擎合成顺序一致。
           </p>
         </div>
       </section>
@@ -687,7 +817,7 @@ onBeforeUnmount(() => {
 
 .region-row {
   display: grid;
-  grid-template-columns: 10px 1fr auto auto auto auto auto;
+  grid-template-columns: 10px 1fr auto auto auto auto auto auto auto auto;
   align-items: center;
   gap: var(--space-2);
   padding: 6px 8px;

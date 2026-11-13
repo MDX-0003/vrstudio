@@ -66,6 +66,14 @@ const MASK_HEIGHT = 1024
 const maskCanvas = document.createElement('canvas')
 maskCanvas.width = MASK_WIDTH
 maskCanvas.height = MASK_HEIGHT
+/** 颜色层：按列表顺序不透明叠画，重叠处只剩最上层区域的颜色。 */
+const colorCanvas = document.createElement('canvas')
+colorCanvas.width = MASK_WIDTH
+colorCanvas.height = MASK_HEIGHT
+/** 透明度层：与颜色层同构，逐像素给出「最上层区域」的显示透明度。 */
+const alphaCanvas = document.createElement('canvas')
+alphaCanvas.width = MASK_WIDTH
+alphaCanvas.height = MASK_HEIGHT
 let uniforms: Record<string, WebGLUniformLocation | null> = {}
 let ready = false
 let lastFrameKey = ''
@@ -264,20 +272,34 @@ function paintEquirect(
  *
  * 之前用屏幕空间 Path2D 填充，要求所有顶点都在相机前方，环绕型区域永远不满足，
  * 高亮就看不见；掩码与相机无关，跨接缝、部分在背后都能正确显示。
+ *
+ * 颜色与透明度分两层画：颜色层按列表顺序不透明叠画（与引擎「后建的在上」
+ * 同构），重叠处只保留最上层的颜色，不再出现半透明混色变深；透明度层逐像素
+ * 取最上层区域的显示强度（选中 0.26、其余 0.14），最后用 destination-in 合成。
  */
 function renderMask(): void {
   const context = maskCanvas.getContext('2d')
-  if (!context) return
+  const colorContext = colorCanvas.getContext('2d')
+  const alphaContext = alphaCanvas.getContext('2d')
+  if (!context || !colorContext || !alphaContext) return
   context.clearRect(0, 0, MASK_WIDTH, MASK_HEIGHT)
+  colorContext.clearRect(0, 0, MASK_WIDTH, MASK_HEIGHT)
+  alphaContext.clearRect(0, 0, MASK_WIDTH, MASK_HEIGHT)
   if (props.highlight) {
     for (const region of props.regions) {
       if (!region.enabled) continue
-      context.fillStyle = rgba(
+      colorContext.fillStyle = region.color
+      paintEquirect(colorContext, region.verts, MASK_WIDTH, MASK_HEIGHT, true, false, region.pole)
+      alphaContext.fillStyle = rgba(
         region.color,
         region.id === props.selectedId ? 0.26 : 0.14,
       )
-      paintEquirect(context, region.verts, MASK_WIDTH, MASK_HEIGHT, true, false, region.pole)
+      paintEquirect(alphaContext, region.verts, MASK_WIDTH, MASK_HEIGHT, true, false, region.pole)
     }
+    context.drawImage(colorCanvas, 0, 0)
+    context.globalCompositeOperation = 'destination-in'
+    context.drawImage(alphaCanvas, 0, 0)
+    context.globalCompositeOperation = 'source-over'
   }
   maskDirty = false
 }

@@ -402,3 +402,279 @@ export function polygonSelfIntersects(verts: LonLat[], closed = true): boolean {
   }
   return false
 }
+
+/**
+ * 平面多边形布尔（Greiner–Hormann）：区域工作台「减去 / 相交」绘制模式的几何层。
+ *
+ * 输入是两个简单多边形（不自交，调用方先用 {@link regionShapeIssue} 保证），
+ * 输出必须仍是单个简单多边形——结果分裂成多块、被挖成环带或退化为空时拒绝，
+ * 因为 regions.json 只装得下一个顶点环。经度先 unwrap 并把裁剪多边形对齐到
+ * 目标多边形的经度连续域，跨接缝的区域因此能直接参与布尔。
+ *
+ * 退化情形（顶点恰好落在对方边上、共边重叠）由对裁剪多边形的微小平移
+ * （1e-6° 量级，远小于画面精度）打散；打散不了的按 ``degenerate`` 拒绝。
+ */
+export type PolygonClipFailure = 'empty' | 'multi' | 'hole' | 'degenerate'
+export type PolygonClipResult =
+  | { ok: true; verts: LonLat[] }
+  | { ok: false; kind: PolygonClipFailure }
+
+interface ClipNode {
+  x: number
+  y: number
+  inter: boolean
+  entry: boolean
+  visited: boolean
+  neighbor: ClipNode | null
+  prev: ClipNode
+  next: ClipNode
+}
+
+function buildRing(verts: LonLat[]): ClipNode {
+  const head: ClipNode = { x: verts[0][0], y: verts[0][1], inter: false, entry: false, visited: false, neighbor: null, prev: null!, next: null! }
+  head.prev = head
+  head.next = head
+  for (let index = 1; index < verts.length; index += 1) {
+    const node: ClipNode = { x: verts[index][0], y: verts[index][1], inter: false, entry: false, visited: false, neighbor: null, prev: head.prev, next: head }
+    head.prev.next = node
+    head.prev = node
+  }
+  return head
+}
+
+function ringNodes(head: ClipNode): ClipNode[] {
+  const nodes: ClipNode[] = [head]
+  let cursor = head.next
+  while (cursor !== head) {
+    nodes.push(cursor)
+    cursor = cursor.next
+  }
+  return nodes
+}
+
+function insertAfter(anchor: ClipNode, x: number, y: number): ClipNode {
+  const node: ClipNode = { x, y, inter: true, entry: false, visited: false, neighbor: null, prev: anchor, next: anchor.next }
+  anchor.next.prev = node
+  anchor.next = node
+  return node
+}
+
+/** unwrap 后把裁剪多边形平移 ``shift`` 度经度。 */
+function shiftClip(clip: LonLat[], shift: number): LonLat[] {
+  return clip.map(([lon, lat]) => [lon + shift, lat])
+}
+
+/**
+ * 裁剪多边形相对目标的候选经度平移量（整周的域对齐）。
+ *
+ * unwrap 后两个多边形可能一个落在 [-180,180]、一个落在跨缝的连续域里；
+ * 首选把中心差折算成最近的整周（360 的倍数），再附 ±360 备选，调用方逐个
+ * 尝试、取能求出交点的那一个。平移量始终是 360 的倍数，不改变球面位置。
+ */
+function clipShiftCandidates(subject: LonLat[], clip: LonLat[]): number[] {
+  const liftedSubject = unwrapLongitudes(subject)
+  const liftedClip = unwrapLongitudes(clip)
+  const center = (verts: LonLat[]): number => {
+    const lons = verts.map(([lon]) => lon)
+    return (Math.min(...lons) + Math.max(...lons)) / 2
+  }
+  const shift = 360 * Math.round((center(liftedSubject) - center(liftedClip)) / 360)
+  return [shift, shift + 360, shift - 360]
+}
+
+function clipPolygons(
+  subject: LonLat[],
+  clip: LonLat[],
+  /** true = 减去（A − B），false = 相交（A ∩ B）。 */
+  subtracting: boolean,
+): LonLat[][] {
+  // 顶点贴点、顶点贴边的退化交给微小平移打散；量级远小于画面可分辨精度。
+  const jitter = 1e-6
+  const subjectRing = buildRing(subject)
+  const clipRing = buildRing(clip.map(([lon, lat]) => [lon + jitter, lat + jitter * 0.5]))
+
+  // 第一阶段：逐边求交。交点先记进各自边的桶里按参数排序，再分别插进两个环，
+  // 最后统一配对——同一条边上有多个交点时，插入顺序必须与边的方向一致。
+  const subjectOriginals = ringNodes(subjectRing)
+  const clipOriginals = ringNodes(clipRing)
+  interface Hit {
+    t: number
+    u: number
+    subjectFrom: ClipNode
+    clipFrom: ClipNode
+    subjectNode: ClipNode | null
+    clipNode: ClipNode | null
+  }
+  const hits: Hit[] = []
+  for (const subjectNode of subjectOriginals) {
+    const x1 = subjectNode.x
+    const y1 = subjectNode.y
+    const x2 = subjectNode.next.x
+    const y2 = subjectNode.next.y
+    for (const clipNode of clipOriginals) {
+      const x3 = clipNode.x
+      const y3 = clipNode.y
+      const x4 = clipNode.next.x
+      const y4 = clipNode.next.y
+      const denominator = (x2 - x1) * (y4 - y3) - (y2 - y1) * (x4 - x3)
+      if (Math.abs(denominator) < 1e-12) continue
+      const t = ((x3 - x1) * (y4 - y3) - (y3 - y1) * (x4 - x3)) / denominator
+      const u = ((x3 - x1) * (y2 - y1) - (y3 - y1) * (x2 - x1)) / denominator
+      // 只收严格穿过两条边内部的交；端点命中已被平移打散成近似情形。
+      if (t > 1e-9 && t < 1 - 1e-9 && u > 1e-9 && u < 1 - 1e-9) {
+        hits.push({ t, u, subjectFrom: subjectNode, clipFrom: clipNode, subjectNode: null, clipNode: null })
+      }
+    }
+  }
+  if (!hits.length) return []
+  const bucketBy = (from: 'subjectFrom' | 'clipFrom', anchor: ClipNode): Hit[] =>
+    hits.filter((hit) => hit[from] === anchor)
+  const insertInto = (
+    from: 'subjectFrom' | 'clipFrom',
+    param: 't' | 'u',
+    into: 'subjectNode' | 'clipNode',
+    anchors: ClipNode[],
+  ): void => {
+    for (const anchor of anchors) {
+      const bucket = bucketBy(from, anchor).sort((a, b) => a[param] - b[param])
+      let cursor = anchor
+      for (const hit of bucket) {
+        const node = insertAfter(
+          cursor,
+          anchor.x + (anchor.next.x - anchor.x) * hit[param],
+          anchor.y + (anchor.next.y - anchor.y) * hit[param],
+        )
+        hit[into] = node
+        cursor = node
+      }
+    }
+  }
+  insertInto('subjectFrom', 't', 'subjectNode', subjectOriginals)
+  insertInto('clipFrom', 'u', 'clipNode', clipOriginals)
+  for (const hit of hits) {
+    hit.subjectNode!.neighbor = hit.clipNode!
+    hit.clipNode!.neighbor = hit.subjectNode!
+  }
+
+  // 第二阶段：沿环走交点，交替标记进入 / 离开结果区域。目标环的首个交点是
+  // 进入还是离开由运算与首顶点的包含关系决定；裁剪环两种运算都从目标内部进入。
+  const clipSubjectVerts = unwrapLongitudes(subject)
+  const markEntries = (ring: ClipNode, firstEntry: boolean): void => {
+    let entry = firstEntry
+    for (const node of ringNodes(ring)) {
+      if (!node.inter) continue
+      node.entry = entry
+      entry = !entry
+    }
+  }
+  const subjectHeadInside = pointInLiftedPolygon(subjectRing.x, subjectRing.y, unwrapLongitudes(clip))
+  markEntries(subjectRing, subtracting === subjectHeadInside)
+  // 裁剪环两种运算都在目标内部进入结果区域。
+  markEntries(clipRing, !pointInLiftedPolygon(clipRing.x, clipRing.y, clipSubjectVerts))
+
+  // 第三阶段：从没走到的交点出发，交替沿两个环收集结果边界。
+  const polygons: LonLat[][] = []
+  for (const start of ringNodes(subjectRing)) {
+    if (!start.inter || start.visited) continue
+    const points: LonLat[] = []
+    let current: ClipNode = start
+    let guard = 0
+    do {
+      if (guard++ > 100000) return polygons
+      current.visited = true
+      if (current.neighbor) current.neighbor.visited = true
+      points.push([current.x, current.y])
+      // 沿 entry 指示的方向走到下一个交点，路径上的普通顶点一并收进来。
+      let walker = current.entry ? current.next : current.prev
+      while (!walker.inter) {
+        points.push([walker.x, walker.y])
+        walker = current.entry ? walker.next : walker.prev
+      }
+      current = walker.neighbor!
+    } while (!current.visited)
+    polygons.push(points)
+  }
+  return polygons
+}
+
+/** 去掉相邻重复点并丢弃首尾重复；微小平移打散造成的碎片边一并合并。 */
+function tidyRing(points: LonLat[]): LonLat[] {
+  const out: LonLat[] = []
+  for (const point of points) {
+    const last = out[out.length - 1]
+    if (!last || Math.hypot(point[0] - last[0], point[1] - last[1]) > 1e-4) {
+      out.push(point)
+    }
+  }
+  while (out.length > 1) {
+    const first = out[0]
+    const last = out[out.length - 1]
+    if (Math.hypot(first[0] - last[0], first[1] - last[1]) > 1e-4) break
+    out.pop()
+  }
+  return out
+}
+
+function ringArea(verts: LonLat[]): number {
+  let sum = 0
+  for (let i = 0, j = verts.length - 1; i < verts.length; j = i, i += 1) {
+    sum += (verts[j][0] + verts[i][0]) * (verts[j][1] - verts[i][1])
+  }
+  return Math.abs(sum) / 2
+}
+
+/** 单目标多边形布尔：结果必须仍是单个简单多边形，否则按失败原因拒绝。 */
+function booleanClip(
+  subject: LonLat[],
+  clip: LonLat[],
+  /** true = 减去（A − B），false = 相交（A ∩ B）。 */
+  subtracting: boolean,
+): PolygonClipResult {
+  const liftedSubject = unwrapLongitudes(subject)
+  const liftedClip = unwrapLongitudes(clip)
+  const candidates = clipShiftCandidates(subject, clip)
+  let polygons: LonLat[][] = []
+  // 候选平移逐个试：对跖点附近首选可能与目标不重叠，能求出交点的平移才是对的；
+  // 全都无交点时，包含关系判断用首选平移（正常情形两者本就在同一域内）。
+  for (const shift of candidates) {
+    polygons = clipPolygons(liftedSubject, shiftClip(liftedClip, shift), subtracting)
+      .map(tidyRing)
+      .filter((ring) => ring.length >= 3 && ringArea(ring) > 1e-9)
+    if (polygons.length) break
+  }
+  const alignedClip = shiftClip(liftedClip, candidates[0])
+  if (polygons.length > 1) return { ok: false, kind: 'multi' }
+  if (polygons.length === 1) return { ok: true, verts: polygons[0] }
+  // 没有边界可走：按包含关系区分「空结果」「挖出环带」与「整体保留」。
+  const subjectInsideClip = pointInLiftedPolygon(
+    liftedSubject[0][0],
+    liftedSubject[0][1],
+    unwrapLongitudes(alignedClip),
+  )
+  const clipInsideSubject = pointInLiftedPolygon(
+    alignedClip[0][0],
+    alignedClip[0][1],
+    liftedSubject,
+  )
+  if (subtracting) {
+    // 减去：目标整个在裁剪多边形里 → 空；裁剪多边形整个在目标里 → 挖出环带；
+    // 完全不相交 → 目标原样保留。
+    if (subjectInsideClip) return { ok: false, kind: 'empty' }
+    if (clipInsideSubject) return { ok: false, kind: 'hole' }
+    return { ok: true, verts: liftedSubject }
+  }
+  // 相交：任一方包含另一方时仍有结果，否则不相交。
+  if (subjectInsideClip) return { ok: true, verts: liftedSubject }
+  if (clipInsideSubject) return { ok: true, verts: unwrapLongitudes(alignedClip) }
+  return { ok: false, kind: 'empty' }
+}
+
+/** 从目标多边形里减去裁剪多边形（A − B）；结果分裂或成环带时拒绝。 */
+export function polygonSubtract(subject: LonLat[], clip: LonLat[]): PolygonClipResult {
+  return booleanClip(subject, clip, true)
+}
+
+/** 目标多边形与裁剪多边形的交集（A ∩ B）；不相交时拒绝。 */
+export function polygonIntersect(subject: LonLat[], clip: LonLat[]): PolygonClipResult {
+  return booleanClip(subject, clip, false)
+}
