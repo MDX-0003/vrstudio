@@ -15,8 +15,12 @@ out_lin  = GT_lin × Ws × gY^(strength × w) × V^(local_shading × strength ×
 ``w`` 让比值只在 GT 有信号的亮度区间生效：夜戏里七成像素低于 1% 线性亮度，
 那里的 ``gain`` 是两个近黑量相除，直接乘上去会把量化噪声与编码块放大成可见的灰雾。
 
-``chroma_lowpass`` 在 8-bit 输出之后单独处理色度：只把 ``relit - GT`` 的色度差磨平，
+``chroma_lowpass`` 在 16-bit 输出之后单独处理色度：只把 ``relit - GT`` 的色度差磨平，
 亮度重打光保持不动（决策 85）。它按行带分线程，结果与整帧计算逐位相同。
+
+全部输入输出都是 16-bit BGR（0..65535，决策 99 WP4）：公式本身在线性光 0..1 上，
+位深只影响两端的量化，所以 ``/ 255``、``clip(0, 255)`` 与 ``uint8`` 只剩「满量程是
+65535」这一处差别；决策 84/85/86 的权重、低通与行带语义一字未改。
 """
 
 from __future__ import annotations
@@ -27,13 +31,26 @@ import cv2
 import numpy as np
 
 from .bands import run_bands
-from .fields import LightFields, linear_to_srgb8_inplace, shadow_weight, srgb_to_linear
+from .fields import (
+    FULL_SCALE,
+    LightFields,
+    linear_to_srgb16_inplace,
+    shadow_weight,
+    srgb_to_linear,
+)
 
 CHROMA_SIGMA = 2.0
 """色度差的低通 σ（输出分辨率的像素）。由 4:2:0 的色度采样率决定，不是创作参数。"""
 
 CHROMA_BAND_MARGIN = 8
 """行带外扩行数：必须大于 σ=2 对应高斯核的半径（6），否则带边界会与整帧不同。"""
+
+CLIP_THRESHOLD = 64250
+"""``clipped_fraction`` 的默认门限：任一通道达到满量程 98.04% 就算过曝。
+
+旧实现按 8-bit 的 250/255 定义，16-bit 下同一个比例是 0.98039 × 65535 ≈ 64250，
+所以过曝比例与改动前可比，报告里的数字不需要换口径。
+"""
 
 
 @dataclass(frozen=True)
@@ -53,17 +70,18 @@ class LightCompose:
     white_balance: np.ndarray # (1 - strength) I + strength W，3×3 float32
     strength_map: np.ndarray | None = None  # (H, W) float32；有区域时逐像素混合 I 与 W
 
-    def apply(self, gt8: np.ndarray, *, pool=None, workers: int = 1) -> np.ndarray:
-        """把光场乘到一帧上，返回同尺寸 8-bit BGR。
+    def apply(self, gt: np.ndarray, *, pool=None, workers: int = 1) -> np.ndarray:
+        """把光场乘到一帧上，返回同尺寸 16-bit BGR。
 
         ``pool`` 给出时按行带并行；每个行带只申请自己那一段的 float32 临时数组，
         输出数组在这里预分配、由各线程写互不重叠的行区间。切带不改变运算顺序，
-        结果与整帧计算逐位相同。
+        结果与整帧计算逐位相同。行带临时数组的 dtype 从 8-bit 变宽到 16-bit 只影响
+        输入输出两端的 uint16 行（每行 2 倍），中间的 float32 运算仍然是单份。
         """
-        out = np.empty(gt8.shape, dtype=gt8.dtype)
+        out = np.empty(gt.shape, dtype=gt.dtype)
 
         def band(y0: int, y1: int) -> None:
-            gt_linear = srgb_to_linear(gt8[y0:y1])
+            gt_linear = srgb_to_linear(gt[y0:y1])
             if self.strength_map is None:
                 out_linear = np.einsum("...k,ck->...c", gt_linear, self.white_balance)
             else:
@@ -73,9 +91,9 @@ class LightCompose:
                 out_linear = gt_linear + strength * (wb - gt_linear)
             np.multiply(out_linear, self.gain[y0:y1, :, None], out=out_linear)
             np.multiply(out_linear, self.visibility[y0:y1, :, None], out=out_linear)
-            out[y0:y1] = linear_to_srgb8_inplace(out_linear)
+            out[y0:y1] = linear_to_srgb16_inplace(out_linear)
 
-        run_bands(gt8.shape[0], band, pool, workers)
+        run_bands(gt.shape[0], band, pool, workers)
         return out
 
 
@@ -160,35 +178,38 @@ def light_compose(fields: LightFields, size: tuple[int, int],
     )
 
 
-def relight(gt8: np.ndarray, fields: LightFields,
+def relight(gt: np.ndarray, fields: LightFields,
             strength: float, local_shading: float) -> np.ndarray:
-    """把 ``fields`` 乘到 GT 上，返回与 GT 同尺寸的 8-bit BGR 图。"""
-    height, width = gt8.shape[:2]
-    return light_compose(fields, (width, height), strength, local_shading).apply(gt8)
+    """把 ``fields`` 乘到 GT 上，返回与 GT 同尺寸的 16-bit BGR 图。"""
+    height, width = gt.shape[:2]
+    return light_compose(fields, (width, height), strength, local_shading).apply(gt)
 
 
-def soft_clip(bgr8: np.ndarray, knee=0.72, max_out=0.98, *,
+def soft_clip(bgr: np.ndarray, knee=0.72, max_out=0.98, *,
               pool=None, workers: int = 1) -> np.ndarray:
     """高光软裁切：亮度过 ``knee`` 后按指数压向 ``max_out``，色相保持不变。
 
-    ``knee`` / ``max_out`` 可以是标量，也可以是与 ``bgr8`` 同尺寸的逐像素场（决策 88
+    ``knee`` / ``max_out`` 可以是标量，也可以是与 ``bgr`` 同尺寸的逐像素场（决策 88
     的区域裁切）；场里取 1.0 的像素永远不会过线，即不裁切。标量路径的表达式与运算
     顺序保持不变，逐位一致。
 
-    只有过曝像素需要浮点运算；其余像素在旧实现里经过 ``/255 * 1 * 255`` 的往返，对
-    0–255 每个值都精确回到原值，所以这里直接复制。亮度按通道计算，不物化整张
-    float32 BGR，省掉 8K 上约 400 MB 的临时数组。
+    ``knee`` / ``max_out`` 是 0..1 的相对亮度，与位深无关：亮度仍按 ``v / 65535``
+    归一化，所以这两个阈值一个数都不用改，裁切曲线因此与改动前是同一条。
+
+    只有过曝像素需要浮点运算；其余像素在旧实现里经过 ``/255 * 1 * 255``（现在是
+    ``/65535 * 1 * 65535``）的往返，对满量程内每个值都精确回到原值，所以这里直接
+    复制。亮度按通道计算，不物化整张 float32 BGR，省掉 8K 上约 400 MB 的临时数组。
 
     分带执行时每个行带只看自己的像素，输出写进预分配的数组；结果与整帧相同。
     """
-    out = np.empty(bgr8.shape, dtype=bgr8.dtype)
+    out = np.empty(bgr.shape, dtype=bgr.dtype)
     scalar = np.ndim(knee) == 0 and np.ndim(max_out) == 0
 
     def band(y0: int, y1: int) -> None:
-        sub = bgr8[y0:y1]
-        y = (0.0722 * (sub[..., 0].astype(np.float32) / 255.0)
-             + 0.7152 * (sub[..., 1].astype(np.float32) / 255.0)
-             + 0.2126 * (sub[..., 2].astype(np.float32) / 255.0))
+        sub = bgr[y0:y1]
+        y = (0.0722 * (sub[..., 0].astype(np.float32) / FULL_SCALE)
+             + 0.7152 * (sub[..., 1].astype(np.float32) / FULL_SCALE)
+             + 0.2126 * (sub[..., 2].astype(np.float32) / FULL_SCALE))
         out[y0:y1] = sub
         if scalar:
             over = y > knee
@@ -211,15 +232,17 @@ def soft_clip(bgr8: np.ndarray, knee=0.72, max_out=0.98, *,
             ratio = ((max_over - span_over * np.exp(-(y_over - k_over) / span_over))
                      / np.maximum(y_over, 1e-6))
         target = out[y0:y1]
-        target[over] = np.clip(
-            (sub[over].astype(np.float32) / 255.0) * ratio[:, None] * 255.0,
-            0, 255).astype(np.uint8)
+        # 量化用四舍五入：截断在 16-bit 上是 1/65535 的偏差，但同一份代码在 8-bit
+        # 基线里是 1/255，round 让「knee 以下不动、knee 以上连续」这条性质不依赖位深。
+        target[over] = np.rint(np.clip(
+            (sub[over].astype(np.float32) / FULL_SCALE) * ratio[:, None] * FULL_SCALE,
+            0, FULL_SCALE)).astype(bgr.dtype)
 
-    run_bands(bgr8.shape[0], band, pool, workers)
+    run_bands(bgr.shape[0], band, pool, workers)
     return out
 
 
-def chroma_lowpass(bgr8: np.ndarray, gt8: np.ndarray, *,
+def chroma_lowpass(bgr: np.ndarray, gt: np.ndarray, *,
                    sigma: float = CHROMA_SIGMA,
                    pool=None, workers: int = 1) -> np.ndarray:
     """保留重打光的亮度，只把"额外加上去的色度对比"磨平（决策 85）。
@@ -229,31 +252,34 @@ def chroma_lowpass(bgr8: np.ndarray, gt8: np.ndarray, *,
     改变的是色度差的高频部分——4:2:0 的色度只有半分辨率，抬亮的色度边界在成片里
     表现为彩色台阶，这一步把它们收回到 GT 的量级。
 
+    差值在 16-bit 刻度（0..65535）上算，σ 是像素单位的空间尺度，与位深无关，所以
+    低通强度不变；得到的结果再四舍五入回 uint16。
+
     按行带执行，带外扩 ``CHROMA_BAND_MARGIN`` 行，保证带内结果与整帧计算逐位相同。
     """
-    height = bgr8.shape[0]
-    out = np.empty(bgr8.shape, dtype=bgr8.dtype)
+    height = bgr.shape[0]
+    out = np.empty(bgr.shape, dtype=bgr.dtype)
 
     def band(y0: int, y1: int) -> None:
         e0 = max(0, y0 - CHROMA_BAND_MARGIN)
         e1 = min(height, y1 + CHROMA_BAND_MARGIN)
-        diff = bgr8[e0:e1].astype(np.float32)
-        diff -= gt8[e0:e1].astype(np.float32)
+        diff = bgr[e0:e1].astype(np.float32)
+        diff -= gt[e0:e1].astype(np.float32)
         y = (0.114 * diff[..., 0] + 0.587 * diff[..., 1]
              + 0.299 * diff[..., 2])
         diff -= y[..., None]                       # diff 变成色度向量
         smooth = cv2.GaussianBlur(diff, (0, 0), sigma)
         smooth -= diff
-        relit = bgr8[e0:e1].astype(np.float32)
+        relit = bgr[e0:e1].astype(np.float32)
         relit += smooth
-        np.clip(relit, 0, 255, out=relit)
+        np.clip(relit, 0, FULL_SCALE, out=relit)
         start = y0 - e0
-        out[y0:y1] = relit[start:start + (y1 - y0)].astype(np.uint8)
+        out[y0:y1] = np.rint(relit[start:start + (y1 - y0)]).astype(bgr.dtype)
 
     run_bands(height, band, pool, workers)
     return out
 
 
-def clipped_fraction(bgr8: np.ndarray, threshold: int = 250) -> float:
-    """任一通道达到 ``threshold`` 的像素比例——过曝的量度。"""
-    return float((bgr8.max(axis=2) >= threshold).mean())
+def clipped_fraction(bgr: np.ndarray, threshold: int = CLIP_THRESHOLD) -> float:
+    """任一通道达到 ``threshold`` 的像素比例——过曝的量度（16-bit 刻度）。"""
+    return float((bgr.max(axis=2) >= threshold).mean())

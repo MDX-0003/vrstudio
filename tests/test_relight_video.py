@@ -27,6 +27,7 @@ from vrstudio.cli import app
 from vrstudio.cli.relight import resolve_reference
 from vrstudio.media.binres import find_tool
 from vrstudio.media.imageio import write_png
+from vrstudio.media.videoio import to_u16
 from vrstudio.progress import Log
 from vrstudio.relight.align import warp_to_gt
 from vrstudio.relight.cache import CachedFixed
@@ -308,9 +309,18 @@ def _shifted_frames():
     return [video_erp_without_edges(shift=index * 8) for index in range(VN)]
 
 
+def _shifted_frames16():
+    """同样的画面，按帧泵的 dtype 升到 16-bit。
+
+    ``resolve_reference`` 的 ``open_frames`` 与 ``atmo`` 在 CLI 里都是 16-bit（视频帧
+    来自 FrameReader、静图在入口用 ``to_u16`` 升位），假的 opener 也得给同一种 dtype。
+    """
+    return [to_u16(frame) for frame in _shifted_frames()]
+
+
 def test_reference_scan_keeps_the_best_frame_in_one_pass():
     """自动选帧只开一次视频，光照场直接用扫描留下的原分辨率最佳帧。"""
-    frames = _shifted_frames()
+    frames = _shifted_frames16()
     atmo = frames[3]
     calls = []
     resolved = resolve_reference(
@@ -328,7 +338,7 @@ def test_reference_scan_keeps_the_best_frame_in_one_pass():
 
 def test_explicit_reference_frame_reads_only_that_frame():
     """显式参考帧按帧号 seek，不再从片头顺序解码。"""
-    frames = _shifted_frames()
+    frames = _shifted_frames16()
     calls = []
     resolved = resolve_reference(
         _open_frames(frames, calls), frames[3], VW, 3, Log(quiet=True))
@@ -341,7 +351,7 @@ def test_cached_reference_skips_the_scan_and_sift(monkeypatch):
     """缓存命中时不再选帧、不再做 SIFT，只取一帧重算光照场。"""
     import vrstudio.cli.relight as relight_cli
 
-    frames = _shifted_frames()
+    frames = _shifted_frames16()
     atmo = frames[3]
     cold = resolve_reference(
         _open_frames(frames, []), atmo, VW, None, Log(quiet=True)).fixed

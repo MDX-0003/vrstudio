@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable, Iterator
-from contextlib import closing, contextmanager, nullcontext
+from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -35,7 +35,14 @@ from .. import case as case_mod
 from .. import config as config_mod
 from ..case import CaseError, kind_of
 from ..media.imageio import ImageError, read_image, write_gray_png, write_png
-from ..media.videoio import FrameReader, FrameWriter, VideoIOError, probe, to_u8
+from ..media.videoio import (
+    FrameReader,
+    FrameWriter,
+    VideoIOError,
+    probe,
+    to_u8_round,
+    to_u16,
+)
 from ..progress import Log, RateMeter
 from ..relight import cache as relight_cache
 from ..relight import regions as regions_mod
@@ -48,6 +55,7 @@ from ..relight.align import (
     estimate_similarity,
     gray8,
     reference_small,
+    small_size,
     structure_correlation,
     structure_score,
     warp_to_gt,
@@ -76,19 +84,6 @@ from ..relight.report import (
 )
 
 app = typer.Typer(add_completion=False, help=__doc__)
-
-
-@contextmanager
-def _u8_reader(*args, **kwargs):
-    """Wrap ``FrameReader`` so the still-8-bit relight engine sees uint8 frames.
-
-    The engine's maths, LUTs and thresholds are calibrated on 0..255; migrating
-    them to 16-bit is WP4 in ``docs/plan/video-10bit-plan.md``. Keeping the
-    conversion at this single entry point means the rest of the pump is 16-bit
-    and the later migration deletes one function.
-    """
-    with FrameReader(*args, **kwargs) as reader:
-        yield (to_u8(frame) for frame in reader)
 
 SCENE_PRESETS = {"night": (1.0, 0.35), "day": (0.8, 0.2)}
 """场景预设只给默认值：夜戏 1.0/0.35，日光 0.8/0.2（实测 strength 1.0 过曝 8.9%）。"""
@@ -153,7 +148,11 @@ def check_inputs(gt, atmo) -> None:
 
 
 def dump_diagnostics(out: Path, gt_image, aligned, out_image, fields) -> dict:
-    """写 light / gain / visibility / 六联四份诊断图，返回要进报告的统计。"""
+    """写 light / gain / visibility / 六联四份诊断图，返回要进报告的统计。
+
+    三张对照图（GT、对齐后的氛围图、重打光结果）都是 16-bit 帧，而诊断图是给人看的
+    8-bit PNG：这里按 ``to_u8_round`` 统一下来，与交付帧的降位口径一致。
+    """
     height, width = gt_image.shape[:2]
     size = (width, height)
     light = light_image(fields, size)
@@ -164,12 +163,12 @@ def dump_diagnostics(out: Path, gt_image, aligned, out_image, fields) -> dict:
     write_gray_png(Path(f"{stem}_gain.png"), gain)
     write_gray_png(Path(f"{stem}_visibility.png"), visibility)
     write_png(Path(f"{stem}_light_cmp.png"), comparison_image(
-        ("GT", gt_image),
-        ("atmo (aligned)", aligned),
+        ("GT", to_u8_round(gt_image)),
+        ("atmo (aligned)", to_u8_round(aligned)),
         ("light = guided low(AI)", light),
         ("gain (128 = 1.0x)", gain),
         ("visibility (128 = 1.0)", visibility),
-        ("relit", out_image),
+        ("relit", to_u8_round(out_image)),
     ))
     return light_report(fields)
 
@@ -501,12 +500,12 @@ def _regions_report(region_list: list[regions_mod.Region],
 
 
 def _check_video(size: tuple[int, int]) -> None:
-    """GT 视频必须是 2:1 ERP，yuv420p 需要偶数宽高。"""
+    """GT 视频必须是 2:1 ERP；4:2:0 的色度子采样要求偶数宽高。"""
     width, height = size
     if width != 2 * height:
         _param_error(f"GT 视频必须是 2:1 的 ERP，收到 {width}x{height}")
     if width % 2 or height % 2:
-        _param_error(f"yuv420p 需要偶数宽高，收到 {width}x{height}")
+        _param_error(f"4:2:0 编码需要偶数宽高，收到 {width}x{height}")
 
 
 def _check_atmo_video(size: tuple[int, int]) -> None:
@@ -521,11 +520,11 @@ def _read_atmo_frame(info, conf, index: int) -> np.ndarray | None:
     if index < 0:
         return None
     if info.fps_float > 0:
-        with _u8_reader(info, conf, seek=index / info.fps_float, count=1) as reader:
+        with FrameReader(info, conf, seek=index / info.fps_float, count=1) as reader:
             for frame in reader:
                 return np.array(frame, copy=True)
         return None
-    with _u8_reader(info, conf) as reader:
+    with FrameReader(info, conf) as reader:
         for current, frame in enumerate(reader):
             if current == index:
                 return np.array(frame, copy=True)
@@ -604,9 +603,14 @@ def _resolve_pair_reference(open_gt: Callable[..., Iterator[np.ndarray]],
                 if atmo_small is None:
                     break
                 gt_small = work_frame(frame, work)
-                gray = gray8(gt_small)
+                # 灰度直接从整帧降位再缩放（``gray8`` 的 size 参数），与位深迁移前的
+                # 8-bit 输入逐位一致；``gt_small`` 是给 ``estimate_fields`` 的 16-bit
+                # 色彩小图，两者各取所需，互不将就。
+                gray = gray8(frame, work)
                 if float(gray.std()) < MIN_REFERENCE_STRUCTURE:
                     continue
+                # 氛围帧只留 2K 小图（决策 64：不为比较留一帧原分辨率），所以这里的
+                # 降位发生在缩放之后；它只参与选帧打分，不参与矩阵估计。
                 score = structure_score(gray, gray8(atmo_small))
                 if score > best.score:
                     best = _BestPair(score, index, gt_small, atmo_small)
@@ -636,7 +640,7 @@ def _resolve_pair_reference(open_gt: Callable[..., Iterator[np.ndarray]],
         gt_small = work_frame(reference, work)
         atmo_small = work_frame(atmo_frame, work)
         ref_index = ref_frame
-        score = structure_score(gray8(gt_small), gray8(atmo_small))
+        score = structure_score(gray8(reference, work), gray8(atmo_frame, work))
         log.info(f"reference: frame {ref_index} -> atmo {atmo_target}, "
                  f"structure {score:.3f}")
         scan = 0.0
@@ -713,7 +717,7 @@ def resolve_reference(open_frames: Callable[..., Iterator[np.ndarray]], atmo,
         log.warn(f"缓存的参考帧 {cached.ref_frame} 在视频里取不到；重新选帧。")
 
     setup_start = time.perf_counter()
-    atmo_gray = gray8(reference_small(atmo, width)).astype(np.float32)
+    atmo_gray = gray8(atmo, small_size(width, atmo.shape[0])).astype(np.float32)
     read = 0.0
     if ref_frame is None:
         # 扫描在 90 帧就 break，生成器不会被消费到底；不显式 close 的话它停在
@@ -724,7 +728,7 @@ def resolve_reference(open_frames: Callable[..., Iterator[np.ndarray]], atmo,
             for index, frame in enumerate(frames):
                 scanned += 1
                 small = reference_small(frame, width)
-                gray = gray8(small)
+                gray = gray8(frame, small_size(width, frame.shape[0]))
                 if float(gray.std()) < MIN_REFERENCE_STRUCTURE:
                     continue                      # 黑场/空镜：几乎没有结构可选
                 score = structure_score(gray, atmo_gray)
@@ -749,7 +753,8 @@ def resolve_reference(open_frames: Callable[..., Iterator[np.ndarray]], atmo,
             _param_error(f"--ref-frame {ref_frame} 超出视频帧数")
         ref_index = ref_frame
         ref_small = reference_small(reference, width)
-        score = structure_score(gray8(ref_small), atmo_gray)
+        score = structure_score(
+            gray8(reference, small_size(width, reference.shape[0])), atmo_gray)
         log.info(f"reference: frame {ref_index}, structure {score:.3f}")
     scan = max(0.0, time.perf_counter() - setup_start - read)
     if score < MIN_STRUCTURE_CORRELATION:
@@ -838,10 +843,15 @@ def _relight_image(gt: Path, atmo: Path, out: Path, params: Params, *,
                    dump_light: bool, report: Path | None, started: float,
                    region_list: list[regions_mod.Region] | None = None,
                    regions_source: Path | None = None) -> None:
-    """单帧路径：读两张图、估一次变换与光照场、乘一次光场、写一张图。"""
+    """单帧路径：读两张图、估一次变换与光照场、乘一次光场、写一张图。
+
+    静图输入输出仍是 8-bit（决策 99 §2.4：图片流程的 PNG 位深不改），所以边界上
+    各转一次：读进来按 ``to_u16`` 升位进 16-bit 引擎，写出去按 ``to_u8_round`` 降回
+    8-bit PNG。两个转换都是显式的，引擎内部只有一种 dtype。
+    """
     try:
-        gt_image = read_image(gt)
-        atmo_image = read_image(atmo)
+        gt_image = to_u16(read_image(gt))
+        atmo_image = to_u16(read_image(atmo))
     except ImageError as exc:
         _runtime_error(str(exc))
     check_inputs(gt_image, atmo_image)
@@ -894,7 +904,8 @@ def _relight_image(gt: Path, atmo: Path, out: Path, params: Params, *,
     out_image = chroma_lowpass(out_image, gt_image)
 
     try:
-        write_png(out, out_image)
+        # 静图交付仍是 8-bit PNG（决策 99 §2.4），这里把 16-bit 结果降回去。
+        write_png(out, to_u8_round(out_image))
     except (ImageError, OSError) as exc:
         _runtime_error(f"写图失败：{exc}")
 
@@ -954,7 +965,7 @@ def _write_samples(out_dir: Path, info, conf, renderer: _SegmentRenderer,
         for index in indices:
             seek = index / info.fps_float if info.fps_float > 0 else 0.0
             decode_start = time.perf_counter()
-            with _u8_reader(info, conf, seek=seek, count=1) as reader:
+            with FrameReader(info, conf, seek=seek, count=1) as reader:
                 frame = next(iter(reader), None)
             decode += time.perf_counter() - decode_start
             if frame is None:
@@ -968,7 +979,9 @@ def _write_samples(out_dir: Path, info, conf, renderer: _SegmentRenderer,
             compose += time.perf_counter() - compose_start
             path = out_dir / f"sample_{index:06d}.png"
             write_start = time.perf_counter()
-            write_png(path, relit)
+            # 小样是给 web 预览看的静态图（交付帧本身是 16-bit 视频），按 to_u8_round
+            # 降到 8-bit PNG，与静图输出同一口径。
+            write_png(path, to_u8_round(relit))
             write += time.perf_counter() - write_start
             written.append(path)
             log.info(f"sample: frame {index} -> {path.name}")
@@ -979,15 +992,15 @@ def _frame_opener(info, conf) -> Callable[..., Iterator[np.ndarray]]:
     """打开视频；传 ``index`` 时按帧号定位，只取一帧。"""
     def open_frames(index: int | None = None) -> Iterator[np.ndarray]:
         if index is None:
-            with _u8_reader(info, conf) as reader:
+            with FrameReader(info, conf) as reader:
                 yield from reader
             return
         if info.fps_float > 0:
-            with _u8_reader(info, conf, seek=index / info.fps_float,
+            with FrameReader(info, conf, seek=index / info.fps_float,
                              count=1) as reader:
                 yield from reader
             return
-        with _u8_reader(info, conf) as reader:
+        with FrameReader(info, conf) as reader:
             for current, frame in enumerate(reader):
                 if current == index:
                     yield frame
@@ -1006,7 +1019,8 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
     """整段路径：对齐与光照场只估一次，整段逐帧复用；``--sample`` 时只写采样帧。"""
     video_cfg = dict(conf.video, **({"crf": crf} if crf is not None else {}))
     try:
-        atmo_image = read_image(inputs.atmo)
+        # 氛围图是静图，PNG 是 8-bit：入口显式升位，引擎内部只有 16-bit 一种 dtype。
+        atmo_image = to_u16(read_image(inputs.atmo))
     except ImageError as exc:
         _runtime_error(str(exc))
     try:
@@ -1138,7 +1152,7 @@ def _relight_video(inputs: RelightInputs, params: Params, conf,
     try:
         with FrameWriter(inputs.out, info.size, info.fps, video_cfg,
                          audio_from=inputs.gt, config=conf) as writer:
-            with _u8_reader(info, conf) as reader:
+            with FrameReader(info, conf) as reader:
                 reader_iter = iter(reader)
                 while True:
                     decode_start = time.perf_counter()
@@ -1257,6 +1271,8 @@ def _compose_pair(gt_frame: np.ndarray, atmo_small: np.ndarray,
     """
     gt_small = work_frame(gt_frame, work)
     aligned = warp_with_matrix(atmo_small, alignment.matrix, work)
+    # 逐帧结构相关只是报告里的匹配度，不参与任何几何估计；两张小图都在工作尺度上，
+    # 所以这里的降位发生在缩放之后。
     match = structure_correlation(gray8(gt_small), gray8(aligned))
     if params.strength == 0.0 and (maps is None or not maps.strength.any()):
         return np.ascontiguousarray(gt_frame), match
@@ -1307,7 +1323,8 @@ def _write_samples_pair(out_dir: Path, gt_info, atmo_info, conf,
             matches.append(match)
             path = out_dir / f"sample_{index:06d}.png"
             write_start = time.perf_counter()
-            write_png(path, relit)
+            # 同图版氛围路径：小样落到 8-bit PNG 供 web 预览，交付帧仍是 16-bit 视频。
+            write_png(path, to_u8_round(relit))
             write += time.perf_counter() - write_start
             written.append(path)
             log.info(f"sample: frame {index} -> atmo {mapping.index_for(index)} "
@@ -1338,8 +1355,8 @@ def _render_pair(inputs: RelightInputs, gt_info, atmo_info,
     try:
         with FrameWriter(inputs.out, gt_info.size, gt_info.fps, video_cfg,
                          audio_from=inputs.gt, config=conf) as writer:
-            with _u8_reader(gt_info, conf) as gt_reader, \
-                    _u8_reader(atmo_info, conf) as atmo_reader:
+            with FrameReader(gt_info, conf) as gt_reader, \
+                    FrameReader(atmo_info, conf) as atmo_reader:
                 gt_iter = iter(gt_reader)
                 atmo_iter = iter(atmo_reader)
                 index = -1

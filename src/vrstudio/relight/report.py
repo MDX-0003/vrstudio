@@ -5,7 +5,8 @@
 而不是缺键。报告只用于人工核对与回归，不是跨仓库契约（决策 48）。
 
 诊断图与六联对比全部用 opencv 生成：``media`` 之外不引入 Pillow，标签是英文
-（Hershey 字体没有中文字形）。
+（Hershey 字体没有中文字形）。诊断图是给人看的，一律 8-bit：光场先按 16-bit 的
+sRGB 曲线量化，再降到 8-bit（``to_u8_round``），与交付帧的降位口径相同。
 """
 
 from __future__ import annotations
@@ -13,8 +14,9 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+from ..media.videoio import to_u8_round
 from .align import AlignResult, matrix_at_full_size
-from .fields import LightFields, linear_to_srgb8
+from .fields import LightFields, linear_to_srgb16
 
 PANEL_SIZE = (1024, 512)
 LABEL_HEIGHT = 28
@@ -73,14 +75,18 @@ def build_report(*, gt: str, atmo: str, size: tuple[int, int], params: dict,
 
 
 def light_image(fields: LightFields, size: tuple[int, int]) -> np.ndarray:
-    """以 GT 为引导的 AI 低频，按 sRGB 显示。"""
+    """以 GT 为引导的 AI 低频，按 sRGB 显示（8-bit）。"""
     width, height = size
-    small = linear_to_srgb8(np.clip(fields.light, 0.0, 1.0))
+    small = to_u8_round(linear_to_srgb16(np.clip(fields.light, 0.0, 1.0)))
     return cv2.resize(small, (width, height), interpolation=cv2.INTER_LINEAR)
 
 
 def _scaled_field(field: np.ndarray, size: tuple[int, int]) -> np.ndarray:
-    """单通道场按 128 = 1.0 显示成灰度图。"""
+    """单通道场按 128 = 1.0 显示成灰度图。
+
+    这是无量纲的增益/可见度可视化，与帧的位深无关（128 = 1.0 是 8-bit 图纸上的
+    记号），所以 16-bit 迁移不改这里。
+    """
     width, height = size
     small = np.clip(field * 127.5, 0, 255).astype(np.uint8)
     return cv2.resize(small, (width, height), interpolation=cv2.INTER_LINEAR)

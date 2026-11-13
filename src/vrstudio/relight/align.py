@@ -25,6 +25,8 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from ..media.videoio import to_u8_round
+
 WORK_WIDTH = 2048
 """估计尺度：宽固定 2048，高按输入比例算（2:1 输入即 2048×1024）。"""
 
@@ -82,6 +84,12 @@ def work_size(width: int, height: int) -> tuple[int, int]:
     return WORK_WIDTH, max(1, round(WORK_WIDTH * height / width))
 
 
+def small_size(width: int, height: int) -> tuple[int, int]:
+    """``reference_small`` 的缩放目标：宽不超过 ``WORK_WIDTH``，保持比例。"""
+    work_w = min(width, WORK_WIDTH)
+    return work_w, max(1, round(work_w * height / width))
+
+
 def band_pass(gray: np.ndarray) -> np.ndarray:
     """只留 2–6 像素尺度的粗结构：整体明暗与细纹理都被减掉。"""
     fine = cv2.GaussianBlur(gray, (0, 0), BAND_SIGMA_FINE)
@@ -99,9 +107,24 @@ def structure_correlation(gray_a: np.ndarray, gray_b: np.ndarray) -> float:
     return float((a * b).sum() / denom)
 
 
-def gray8(bgr8: np.ndarray) -> np.ndarray:
-    """uint8 灰度：SIFT 与相位相关都要求 CV_8U 或浮点，这里统一从 8-bit 起算。"""
-    return cv2.cvtColor(bgr8, cv2.COLOR_BGR2GRAY)
+def gray8(frame: np.ndarray, size: tuple[int, int] | None = None) -> np.ndarray:
+    """整帧 → 8-bit 灰度，配准只在这个口径上做。
+
+    SIFT 与相位相关要求 CV_8U 或浮点，而 16-bit 灰度交不出 CV_8U，所以 uint16 输入
+    先按 ``media.videoio.to_u8_round`` 降到 8-bit。顺序固定为「先降位、再缩放」：
+    8-bit 素材升位后每个像素都是 257 的倍数，``to_u8_round`` 原样还原成原图，缩放
+    与灰度换算于是看到与位深迁移前完全相同的输入——SIFT 特征、相位相关平移与
+    对齐缓存（决策 64/65）里的矩阵因此逐位不变。反过来先在 16-bit 上缩放，
+    INTER_AREA 在 16-bit 上的取整会把 1 级差带进灰度（真实 8K 素材实测为 0，合成
+    噪声在非整数缩放比下有 0.002% 的像素差 1 级），矩阵就可能跟着动。
+
+    ``size`` 省略时只降位不缩放（输入已经在工作尺度上）。灰度值仍是 0..255，
+    所以 ``MIN_REFERENCE_STRUCTURE`` 这类按 8-bit 刻度写的门限不需要换数。
+    """
+    gray = to_u8_round(frame) if frame.dtype != np.uint8 else frame
+    if size is not None:
+        gray = cv2.resize(gray, size, interpolation=cv2.INTER_AREA)
+    return cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
 
 
 def reference_small(frame: np.ndarray, width: int) -> np.ndarray:
@@ -109,10 +132,12 @@ def reference_small(frame: np.ndarray, width: int) -> np.ndarray:
 
     ``cv2.resize`` 在尺寸不变时直接返回同一个数组对象（返回 FrameReader 复用的缓冲区），
     调用方留着它当下一次比较的基准，所以这里必须拷贝。
+
+    这是**色彩**小图（16-bit，供 ``estimate_fields`` 用）；配准要的灰度小图由
+    ``gray8(frame, small_size(...))`` 另外给，那条路径先降位再缩放。
     """
     height = frame.shape[0]
-    work_w = min(width, WORK_WIDTH)
-    return cv2.resize(frame, (work_w, max(1, round(work_w * height / width))),
+    return cv2.resize(frame, small_size(width, height),
                       interpolation=cv2.INTER_AREA).copy()
 
 
@@ -124,8 +149,7 @@ def reference_score(frame: np.ndarray, width: int,
     用来排除黑场、淡入与空镜——它们和氛围图的相关接近 0，SIFT 也几乎提不出特征。
     不给时钟：缩小后灰度的标准差，也就是画面本身有多少结构可供 SIFT 匹配。
     """
-    small = gray8(reference_small(frame, width))
-    return structure_score(small, atmo_gray)
+    return structure_score(gray8(frame, small_size(width, frame.shape[0])), atmo_gray)
 
 
 def structure_score(gray_small: np.ndarray, atmo_gray: np.ndarray | None = None) -> float:
@@ -168,6 +192,9 @@ def track_search_matrix(previous: np.ndarray, current: np.ndarray) -> np.ndarray
 def estimate_similarity(gt: np.ndarray, atmo: np.ndarray) -> AlignResult:
     """估计把氛围图变到 GT 坐标的相似变换（缩放、旋转、平移）。
 
+    ``gt`` / ``atmo`` 是 16-bit BGR（0..65535）；灰度与缩放都由 ``gray8`` 在一个
+    函数里完成，所以 8-bit 素材升位后得到的特征与变换与位深迁移前逐位相同。
+
     匹配数或内点少于 ``MIN_INLIERS`` 时退回相位相关只求平移，``fallback`` 记
     ``"phase_correlation"``。两条路都返回结果，是否可信由 ``AlignResult.trusted``
     判定——调用方负责在不可信时中断。
@@ -175,11 +202,8 @@ def estimate_similarity(gt: np.ndarray, atmo: np.ndarray) -> AlignResult:
     cv2.setRNGSeed(RANSAC_SEED)
     height, width = gt.shape[:2]
     work_w, work_h = work_size(width, height)
-    gt_small = cv2.resize(gt, (work_w, work_h),
-                          interpolation=cv2.INTER_AREA)
-    atmo_small = cv2.resize(atmo, (work_w, work_h), interpolation=cv2.INTER_AREA)
-    gt_gray8 = gray8(gt_small)
-    atmo_gray8 = gray8(atmo_small)
+    gt_gray8 = gray8(gt, (work_w, work_h))
+    atmo_gray8 = gray8(atmo, (work_w, work_h))
     gt_gray = gt_gray8.astype(np.float32)
     atmo_gray = atmo_gray8.astype(np.float32)
     correlation_before = structure_correlation(gt_gray, atmo_gray)
@@ -248,6 +272,8 @@ def warp_with_matrix(atmo: np.ndarray, matrix: np.ndarray,
     """按一张已定好的原尺寸变换 warp 到 ``size``，水平环绕。
 
     ``relight-video`` 每帧复用同一个变换就只调这一个函数：变换的构造仍只住本模块。
+    ``INTER_LINEAR`` 对 uint16 输入可用（OpenCV 的 16U 支持面里，resize / warpAffine /
+    GaussianBlur / LUT 都在），输出 dtype 与输入一致，所以 16-bit 帧直接过。
     """
     return cv2.warpAffine(atmo, matrix, size,
                           flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_WRAP)

@@ -70,6 +70,9 @@ def mapping_for(gt_frames: int, gt_fps: float,
 def work_frame(frame: np.ndarray, size: tuple[int, int]) -> np.ndarray:
     """把一帧降到 2K 工作尺度；尺寸已相同也返回副本，调用方可以安全留存。
 
+    dtype 原样保留（16-bit 帧进、16-bit 出），缩放只是像素位置的重采样，不涉及
+    亮度刻度，所以位深迁移不改这个函数的语义。
+
     ``cv2.resize`` 在尺寸不变时返回同一个数组对象，而 ``FrameReader`` 的缓冲区分帧
     独立，留存原对象本身没有危险；这里仍复制一份，避免调用方把「当前帧」误当成
     「上一帧」的别名。

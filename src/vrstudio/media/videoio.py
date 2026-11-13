@@ -40,17 +40,48 @@ FRAME_MAX = 65535
 _BYTES_PER_PIXEL = 3
 _BYTES_PER_SAMPLE = 2
 
+#: ``to_u8_round`` 的 32-bit 临时数组上限（元素数，约 16 MB）：8K 整帧一次算要
+#: 400 MB，分块后临时内存与帧高无关。
+_ROUND_CHUNK_ELEMENTS = 1 << 22
+
 
 def to_u8(frame: np.ndarray) -> np.ndarray:
-    """16-bit BGR frame -> 8-bit BGR, for the code that still runs at 8-bit.
+    """16-bit BGR frame -> 8-bit BGR by keeping the high byte.
 
-    The relight engine and the patch flows (OpenCV video I/O, RIFE PNGs) are
-    still 8-bit internally; they call this at their entry so the frame pump can
-    stay 16-bit everywhere else. Delete the call sites when those flows migrate.
+    Used where a 16-bit value has to be flattened for a downstream stage that is
+    still 8-bit; ``>> 8`` maps the 257 × v values that came from an 8-bit source
+    back onto exactly v, so a 16-bit round trip of 8-bit content stays lossless.
     """
     if frame.dtype == np.uint8:
         return frame
     return (frame >> 8).astype(np.uint8)
+
+
+def to_u8_round(frame: np.ndarray) -> np.ndarray:
+    """16-bit BGR -> 8-bit BGR by rounding ``v / 257`` to the nearest level.
+
+    The display quantizer: 65535 -> 255, 0 -> 0, and every 257 × v comes back as
+    exactly v, i.e. this is the nearest 8-bit value whose :func:`to_u16` is
+    closest to the input. :func:`to_u8` truncates instead (its high byte), which
+    loses up to one 8-bit level of brightness; that is fine where the content
+    *came from* 8 bits, but it biases genuinely 16-bit output (a relit frame, a
+    registration gray chart) darker by up to one level, so display and
+    registration paths use this one instead.
+
+    Row-chunked: the 32-bit scratch array needed for the division is bounded
+    (~16 MB) instead of one 8K-frame-sized copy (400 MB) per call.
+    """
+    if frame.dtype == np.uint8:
+        return frame
+    out = np.empty(frame.shape, dtype=np.uint8)
+    columns = frame.shape[1] * (frame.shape[2] if frame.ndim == 3 else 1)
+    rows = max(1, _ROUND_CHUNK_ELEMENTS // max(1, columns))
+    for y0 in range(0, frame.shape[0], rows):
+        chunk = frame[y0:y0 + rows].astype(np.uint32)
+        chunk += 128
+        chunk //= 257
+        out[y0:y0 + rows] = chunk
+    return out
 
 
 def to_u16(frame: np.ndarray) -> np.ndarray:

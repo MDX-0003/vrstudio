@@ -2,7 +2,8 @@
 
 全部在线性光下计算，且在 2K 工作尺度上算（与 ``align`` 同一个 ``WORK_WIDTH``），
 再交给 ``compose`` 放大到原尺寸。这是重打光 v2 引擎的「表示」部分，只读不写、
-不含 I/O——输入是两张 8-bit BGR 图，输出是一组 float32 场。
+不含 I/O——输入是两张 16-bit BGR 图（每通道 0..65535，决策 99 WP4），输出是一组
+float32 场。
 
 三项各挡一类已实测的失败（决策 48）：
 
@@ -23,8 +24,16 @@ import numpy as np
 from .align import work_size
 from .bands import run_tasks
 
+FULL_SCALE = 65535.0
+"""16-bit 每通道满量程。量化、裁剪与 LUT 长度都以它为准（旧实现是 255）。"""
+
 GUIDED_RADIUS_2K = 12
 GUIDED_EPS = 300.0
+"""引导滤波的正则项，域是线性光 0..1（与位深无关，所以 16-bit 不改值）。
+
+它远大于典型方差（实测约 1e-3），``a = cov / (var + eps)`` 因此接近 0，滤波实际
+退化成盒式平滑（实测与纯 boxFilter 的最大差 0.05，输出标准差 0.0084 对比原图
+0.29）。这是 WP4 之前一直成立的行为，改了画面就会变，所以本次只记录不动它。"""
 
 SHADOW_PIVOT = 0.01
 """暗部置信权重的半效点：线性亮度，约等于 sRGB 28/255。
@@ -32,23 +41,46 @@ SHADOW_PIVOT = 0.01
 ``gain = low(atmo)/low(GT)`` 在两个小量相除时没有物理意义：8-bit 夜戏里 71% 的像素
 低于 0.01，实测这一段 gain 的 p95 是 12–13、最大值 149。低于这个量级时 GT 只剩
 量化与编码噪声，乘算不该进入；0.01 是 8-bit 素材还能承载反射率的下界。
+
+这是线性光的归一化值（0..1），与位深无关：16-bit 下同一个 0.01 对应 7196/65535，
+换算不进任何常量。位深迁移没有改动它，行为随之一字不变。
 """
 
-_IDX = np.arange(256, dtype=np.float64) / 255.0
+_SRGB_GRID = np.arange(65536, dtype=np.float64) / FULL_SCALE
+"""正向表（sRGB → 线性）的自变量：0..1 上的 65536 个等距点，一个码值一格。
+
+65535 = 257 × 255，所以旧 8-bit 表在 v 处的自变量 v/255 与这里的 257v/65535 是
+同一个实数，两次除法都是同一次正确舍入——256 项表里的每个 float32 值都原样出现在
+65536 项表的 257v 位置上。这就是「8-bit 输入下 srgb_to_linear 与旧实现逐位一致」
+的来源，也是像素等价验收的锚点。
+"""
+
 LUT_SRGB_TO_LINEAR = np.where(
-    _IDX <= 0.04045,
-    _IDX / 12.92,
-    ((_IDX + 0.055) / 1.055) ** 2.4,
+    _SRGB_GRID <= 0.04045,
+    _SRGB_GRID / 12.92,
+    ((_SRGB_GRID + 0.055) / 1.055) ** 2.4,
 ).astype(np.float32)
 
-_STEPS = np.arange(65536, dtype=np.float64) / 65535.0
-LUT_LINEAR_TO_SRGB8 = np.clip(np.round(
+LINEAR_LUT_SIZE = 1 << 20
+"""反向表（线性 → sRGB）的网格数：比 16-bit 输出细 16 倍。
+
+65536 格的线性网格对 16-bit 输出来说不够细：sRGB 曲线在暗部斜率是 12.92，一个
+16-bit 输出级只对应 0.077 个 65536 格，暗部十几个码值会塌到同一格上——``strength=0``
+就不会再逐位还原 GT（实测 18817 个码值出错，最暗处差十几级）。换成 2^20 格后整表
+往返 0 个错值，任意线性值的量化误差 ≤1 级；2 MB 常驻、建表约 12 ms。
+"""
+
+_LINEAR_GRID = (np.arange(LINEAR_LUT_SIZE + 1, dtype=np.float32)
+                / np.float32(LINEAR_LUT_SIZE))
+LUT_LINEAR_TO_SRGB16 = np.clip(np.round(
     np.where(
-        _STEPS <= 0.0031308,
-        _STEPS * 12.92,
-        1.055 * np.power(_STEPS, 1 / 2.4) - 0.055,
-    ) * 255.0,
-), 0, 255).astype(np.uint8)
+        _LINEAR_GRID <= 0.0031308,
+        _LINEAR_GRID * np.float32(12.92),
+        np.float32(1.055) * np.power(_LINEAR_GRID, np.float32(1 / 2.4))
+        - np.float32(0.055),
+    ) * np.float32(FULL_SCALE),
+), 0, FULL_SCALE).astype(np.uint16)
+
 
 RGB_TO_LMS = np.array([
     [0.31399022, 0.63951294, 0.04649755],
@@ -69,29 +101,43 @@ class LightFields:
     white_balance: np.ndarray # 全局白点矩阵 W，3×3 float32，保亮度
 
 
-def srgb_to_linear(bgr8: np.ndarray) -> np.ndarray:
-    # For the uint8 input the old clip+astype pair was an identity copy; skip it
-    # so a contiguous frame goes straight into the LUT.
-    if bgr8.dtype == np.uint8:
-        src = bgr8 if bgr8.flags.c_contiguous else np.ascontiguousarray(bgr8)
-        return cv2.LUT(src, LUT_SRGB_TO_LINEAR)
-    return cv2.LUT(np.clip(bgr8, 0, 255).astype(np.uint8), LUT_SRGB_TO_LINEAR)
+def srgb_to_linear(bgr: np.ndarray) -> np.ndarray:
+    """16-bit BGR（0..65535）→ 线性光 float32（0..1），按 65536 项 LUT 查表。
 
-
-def linear_to_srgb8(linear: np.ndarray) -> np.ndarray:
-    return LUT_LINEAR_TO_SRGB8[np.clip(linear * 65535.0, 0, 65535).astype(np.uint16)]
-
-
-def linear_to_srgb8_inplace(linear: np.ndarray) -> np.ndarray:
-    """``linear_to_srgb8`` for an array the caller owns, reusing its memory.
-
-    Same arithmetic and same LUT: multiply by 65535, clip, cast to uint16, index.
-    The separate ``clip(..., 0, 1)`` is unnecessary because the 65535 clip covers
-    both ends. ``linear`` must be writable and disposable.
+    只接受 uint16：8-bit 素材（PNG 底版、测试里的合成图）必须在入口用
+    ``media.videoio.to_u16`` 显式升位。那条路径上每个像素都是 257 × v，索引正好
+    命中旧 8-bit 表在 v 处的同一个 float32 值，见 ``_SRGB_GRID``。
     """
-    np.multiply(linear, 65535.0, out=linear)
-    np.clip(linear, 0, 65535, out=linear)
-    return LUT_LINEAR_TO_SRGB8[linear.astype(np.uint16)]
+    if bgr.dtype != np.uint16:
+        raise ValueError(
+            f"expected uint16 BGR (lift 8-bit sources with media.videoio.to_u16), "
+            f"got {bgr.dtype}")
+    src = bgr if bgr.flags.c_contiguous else np.ascontiguousarray(bgr)
+    return cv2.LUT(src, LUT_SRGB_TO_LINEAR)
+
+
+def linear_to_srgb16(linear: np.ndarray) -> np.ndarray:
+    """线性光 → 16-bit BGR（0..65535），量化用四舍五入（见 ``LINEAR_LUT_SIZE``）。"""
+    scaled = np.clip(linear * np.float32(LINEAR_LUT_SIZE),
+                     0, LINEAR_LUT_SIZE)
+    return LUT_LINEAR_TO_SRGB16[np.rint(scaled).astype(np.uint32)]
+
+
+def linear_to_srgb16_inplace(linear: np.ndarray) -> np.ndarray:
+    """``linear_to_srgb16`` for an array the caller owns, reusing its memory.
+
+    Same arithmetic and same LUT: multiply by ``LINEAR_LUT_SIZE``, clip, round,
+    cast to uint32, index. ``np.rint`` (nearest) rather than truncation matters:
+    the old 8-bit path truncated, which biased the output half a level dark, and
+    rounding is what makes ``strength = 0`` land back on the input code exactly.
+    The index array is uint32 (2^20 grid), so a row band costs twice the index
+    memory of a 16-bit scheme; the float32 band itself is still a single copy.
+    ``linear`` must be writable and disposable.
+    """
+    np.multiply(linear, np.float32(LINEAR_LUT_SIZE), out=linear)
+    np.clip(linear, 0, LINEAR_LUT_SIZE, out=linear)
+    np.rint(linear, out=linear)
+    return LUT_LINEAR_TO_SRGB16[linear.astype(np.uint32)]
 
 
 def luma(linear_bgr: np.ndarray) -> np.ndarray:
@@ -148,19 +194,25 @@ def white_balance_matrix(light: np.ndarray, gt_light: np.ndarray) -> np.ndarray:
     return (rgb / max(y, 1e-6)).astype(np.float32)
 
 
-def estimate_fields(gt8: np.ndarray, atmo8: np.ndarray, *,
+def estimate_fields(gt_bgr: np.ndarray, atmo_bgr: np.ndarray, *,
                     pool=None) -> LightFields:
-    """在 2K 上估计照明表示；输入是同尺寸 8-bit BGR 图（氛围图已对齐）。
+    """在 2K 上估计照明表示；输入是同尺寸 16-bit BGR 图（氛围图已对齐）。
+
+    缩放在 16-bit 上做，这是拿到 10-bit 细节的前提，也带来一处与 8-bit 实现的已知
+    差别：``cv2.resize`` 的 INTER_AREA 在 16U 上的取整与 8U 不同（8K → 2K 实测最多
+    差 128/65535，即半级 8-bit，出现在 53% 的 2K 像素上）。光场把这点差低通掉，
+    gain 的相对差约 5e-5、visibility 约 5e-4；输出上表现为每个通道最多 1 级 8-bit
+    的偏移。实测 8K 抽帧与改动前 PSNR 52.3–52.9 dB，光场统计与对齐结果一致。
 
     ``pool`` 给出时 6 次引导滤波并行（3 个 GT 通道 + 3 个氛围通道）。每次调用
     仍然完整计算自己的引导统计量，不共享中间量；并行只改变执行顺序的等待方式，
     不改变任何一次滤波的输入与输出。
     """
-    height, width = gt8.shape[:2]
+    height, width = gt_bgr.shape[:2]
     work_w, work_h = work_size(width, height)
-    gt_lin = srgb_to_linear(cv2.resize(gt8, (work_w, work_h),
+    gt_lin = srgb_to_linear(cv2.resize(gt_bgr, (work_w, work_h),
                                       interpolation=cv2.INTER_AREA)).astype(np.float32)
-    atmo_lin = srgb_to_linear(cv2.resize(atmo8, (work_w, work_h),
+    atmo_lin = srgb_to_linear(cv2.resize(atmo_bgr, (work_w, work_h),
                                         interpolation=cv2.INTER_AREA)).astype(np.float32)
 
     guide = luma(gt_lin)

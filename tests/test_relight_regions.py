@@ -18,7 +18,7 @@ from vrstudio import config as config_mod
 from vrstudio.cli import app
 from vrstudio.media.binres import find_tool
 from vrstudio.media.imageio import write_png
-from vrstudio.media.videoio import u8_reader, FrameWriter, probe
+from vrstudio.media.videoio import u8_reader, FrameWriter, probe, to_u16
 from vrstudio.relight.align import work_size
 from vrstudio.relight.compose import light_compose, soft_clip
 from vrstudio.relight.fields import estimate_fields
@@ -348,8 +348,9 @@ def test_later_region_wins_on_overlap():
 
 
 def _fields_for(width: int = 480) -> tuple[np.ndarray, object]:
-    gt = textured_erp(width, width // 2, seed=21)
-    atmo = np.clip(gt.astype(np.float32) * 0.6, 0, 255).astype(np.uint8)
+    gt = to_u16(textured_erp(width, width // 2, seed=21))
+    atmo = to_u16(np.clip(textured_erp(width, width // 2, seed=21).astype(np.float32) * 0.6,
+                          0, 255).astype(np.uint8))
     return gt, estimate_fields(gt, atmo)
 
 
@@ -371,7 +372,7 @@ def test_region_zero_strength_matches_gt_inside_and_plain_outside():
 
 
 def test_regional_clip_only_touches_its_pixels():
-    bright = np.full((180, 360, 3), 250, dtype=np.uint8)
+    bright = np.full((180, 360, 3), 250 * 257, dtype=np.uint16)
     regions = parse_regions(region_doc(
         [[-30, -20], [30, -20], [30, 20], [-30, 20]], clip=(0.5, 0.9)))
     maps = build_maps(regions, (360, 180), strength=1.0, local_shading=0.35,
@@ -380,13 +381,13 @@ def test_regional_clip_only_touches_its_pixels():
     clip_full = upscale_clip(maps, (360, 180))
     assert clip_full is not None
     out = soft_clip(bright, clip_full[0], clip_full[1])
-    assert out[90, 180, 0] < 245           # 区域中心被压暗
+    assert out[90, 180, 0] < 245 * 257     # 区域中心被压暗
     assert np.array_equal(out[90, 10], bright[90, 10])   # 区域外原样
 
 
 def test_scalar_soft_clip_is_unchanged_by_the_map_path():
     rng = np.random.default_rng(5)
-    frame = rng.integers(0, 256, (64, 96, 3), dtype=np.uint8)
+    frame = to_u16(rng.integers(0, 256, (64, 96, 3), dtype=np.uint8))
     knee = np.full((64, 96), 0.72, dtype=np.float32)
     max_out = np.full((64, 96), 0.98, dtype=np.float32)
     scalar = soft_clip(frame, 0.72, 0.98)
