@@ -19,6 +19,35 @@ DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_LOG_KEEP_DAYS = 14
 
 
+def _port_busy(host: str, port: int) -> bool:
+    """端口是否已被别的进程监听。
+
+    Windows 允许在 ``0.0.0.0`` 已被占用时再绑 ``127.0.0.1`` 的同一端口，只靠 bind 探测
+    会漏掉“另一个实例正在跑”的情况，所以优先用 psutil 看监听表，拿不到时再退回 bind。
+    """
+    try:
+        import psutil
+    except ImportError:
+        psutil = None
+    if psutil is not None:
+        try:
+            for conn in psutil.net_connections(kind="tcp"):
+                if (conn.status == psutil.CONN_LISTEN and conn.laddr
+                        and conn.laddr.port == port):
+                    return True
+            return False
+        except (psutil.Error, OSError):
+            pass
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind((host if host not in ("0.0.0.0", "::") else "0.0.0.0", port))
+        except OSError:
+            return True
+    return False
+
+
 def serve(
     host: str = typer.Option(DEFAULT_HOST, "--host",
                              help="监听地址；开放局域网用 0.0.0.0（决策 17）。"),
@@ -60,6 +89,14 @@ def serve(
     uvicorn_level = str(log_level).lower()
     if uvicorn_level not in ("critical", "error", "warning", "info", "debug", "trace"):
         uvicorn_level = "info"
+    # 先接管本项目自己的旧实例，再判断端口是否仍被别人占着；占用就直说，别先打一堆横幅。
+    reclaim_port(port)
+    if _port_busy(host, port):
+        typer.echo(
+            f"端口 {port} 已被占用，控制台没有启动。"
+            f"换一个端口重试（例如 --port {port + 1}），或先结束占用该端口的程序。",
+            err=True)
+        raise typer.Exit(1)
     print(f"vrstudio serve: http://{host}:{port}/")
     print(f"  sources/: {sources_dir()}   cases/: {cases_dir or '仓库 cases/'}")
     print(f"  logs/: {log_path}  (service-*.jsonl / client-*.jsonl)")
@@ -72,6 +109,5 @@ def serve(
         print(f"  浏览器将打开 {target}")
     # 队列历史在内存里，重启就空；日志索引落盘，启动时回填最近若干条。
     QUEUE.restore_history()
-    reclaim_port(port)
     uvicorn.run(build_app(cases_dir), host=host, port=port,
                 log_level=uvicorn_level, log_config=None, access_log=False)

@@ -56,6 +56,20 @@ def test_start_console_passes_plain_values(monkeypatch):
     assert isinstance(captured["log_dir"], type(serve_cli.DEFAULT_LOG_DIR))
 
 
+def test_port_busy_detects_listening_socket():
+    import socket
+
+    from vrstudio.cli import serve as serve_cli
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        port = sock.getsockname()[1]
+        assert serve_cli._port_busy("127.0.0.1", port) is True
+
+    assert serve_cli._port_busy("127.0.0.1", port) is False
+
+
 def test_version_option_exits_without_starting_console(monkeypatch, capsys):
     calls = []
     monkeypatch.setattr(cli_mod, "_start_console",
