@@ -38,6 +38,8 @@ from typing import Callable
 import cv2
 import numpy as np
 
+from ..media.imageio import ImageError, read_image, write_png
+
 from .case import load_sidecar_single_segment
 from .framealign import index_map
 from ..media.ffmpeg import FfmpegSink
@@ -137,8 +139,13 @@ def png_name(i: int) -> str:
 
 
 def _decode_to_png_dir(video: str, out_dir: Path, log) -> int:
-    """Decode every frame to out_dir/%08d.png (lossless handoff to the exe);
-    returns the number actually decoded (CAP_PROP counts can lie)."""
+    """Decode every frame to out_dir/%08d.png (lossless handoff to the exe).
+
+    Paths go through :mod:`vrstudio.media.imageio` because ``cv2.imwrite``
+    silently fails on non-ASCII paths — a case whose asset is named
+    ``v2_大臣们.mp4`` would otherwise hand rife an empty directory and the
+    binary dies with an access violation instead of a readable error.
+    """
     cap = cv2.VideoCapture(video)
     if not cap.isOpened():
         raise FileNotFoundError(f"cannot open video: {video}")
@@ -148,9 +155,15 @@ def _decode_to_png_dir(video: str, out_dir: Path, log) -> int:
         ok, frame = cap.read()
         if not ok:
             break
-        cv2.imwrite(str(out_dir / png_name(written)), frame)
+        try:
+            write_png(out_dir / png_name(written), frame)
+        except ImageError as exc:
+            cap.release()
+            raise RuntimeError(f"cannot write frame {written} to {out_dir}: {exc}") from exc
         written += 1
     cap.release()
+    if written == 0:
+        raise RuntimeError(f"no frames decoded from {video}")
     log.info(f"decoded {written} frames -> {out_dir}")
     return written
 
@@ -180,12 +193,12 @@ def _encode_png_dir(in_dir: Path, n: int, fps: float, out_path: Path,
         log.info(f"interpolator returned {len(files)} frames; trimming to {n}.")
     last = None
     for i in range(n):
-        img = cv2.imread(str(files[i] if i < len(files) else files[-1]))
-        if img is not None:
-            last = img
-        if last is None:
+        try:
+            img = read_image(files[i] if i < len(files) else files[-1])
+        except ImageError as exc:
             sink.close()
-            raise RuntimeError(f"undecodable frame in {in_dir}: {files[i]}")
+            raise RuntimeError(f"undecodable frame in {in_dir}: {exc}") from exc
+        last = img
         sink.write(to_u16(last))
     sink.close()
     log.info(f"encoded {n} frames @ {fps:g}fps -> {out_path}")

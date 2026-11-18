@@ -352,3 +352,32 @@ def test_resolve_no_restore_flag_bypasses_everything(clip: Path):
     assert path == str(clip)
     assert rep is None
     assert not aligned_path_for(clip).exists()
+
+
+def test_decode_to_png_dir_supports_non_ascii_path(tmp_path):
+    """素材名带中文时 cv2.imwrite 会静默失败；解码必须走 imageio 的字节通道。"""
+    from vrstudio.patch import restore as restore_mod
+
+    clip = tmp_path / "clip.mp4"
+    make_clip(clip, n=4)
+    out_dir = tmp_path / "中文目录" / "frames_in"
+
+    written = restore_mod._decode_to_png_dir(str(clip), out_dir, Rec())
+
+    assert written == 4
+    files = sorted(out_dir.glob("*.png"))
+    assert len(files) == 4
+    from vrstudio.media.imageio import read_image
+    assert read_image(files[0]).ndim == 3
+
+
+def test_rife_rejects_empty_input_dir(tmp_path):
+    """空输入目录会让 rife 以访问冲突崩溃，包装层要先给出可读错误。"""
+    from vrstudio.patch.rife import RifeInterpolator
+
+    in_dir = tmp_path / "空的输入"
+    in_dir.mkdir()
+    interp = RifeInterpolator("no-such-rife.exe")
+
+    with pytest.raises(RuntimeError, match="没有可插帧"):
+        interp(in_dir, 10, tmp_path / "out")

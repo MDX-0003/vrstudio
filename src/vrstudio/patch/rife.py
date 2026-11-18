@@ -73,6 +73,11 @@ class RifeInterpolator:
         # single-image mode and reject the path's extension
         in_dir.mkdir(parents=True, exist_ok=True)
         out_dir.mkdir(parents=True, exist_ok=True)
+        # 空目录会让 rife 以 0xC0000005 崩掉，先在这里给出能读懂的失败。
+        if not any(in_dir.glob("*.png")):
+            raise RuntimeError(
+                f"rife-ncnn-vulkan 没有可插帧的输入：{in_dir} 里没有 PNG。"
+                f"上游解码或写入失败时会出现这种情况。")
         cmd = [self.exe, "-i", str(in_dir), "-o", str(out_dir),
                "-n", str(target_n), "-m", self.model,
                "-f", "%08d.png"]

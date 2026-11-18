@@ -56,6 +56,7 @@ def test_interpolator_precreates_output_dir(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(rife_mod.subprocess, "run", fake_run)
     ind, outd = tmp_path / "in", tmp_path / "out.not-an-image-ext"
     ind.mkdir()
+    (ind / "00000001.png").write_bytes(b"stub")   # 空目录会被包装层提前拒绝
     rife_mod.RifeInterpolator("exe")(ind, 10, outd)
     assert outd.is_dir()  # created BEFORE the call, not after
     assert str(outd) in seen["cmd"]
