@@ -114,11 +114,15 @@ def serve(
             f"换一个端口重试（例如 --port {port + 1}），或先结束占用该端口的程序。",
             err=True)
         raise typer.Exit(1)
+    from .. import paths
+
+    root = paths.data_root()
     print(f"vrstudio serve: http://{host}:{port}/")
     if host in ("0.0.0.0", "::"):
         for url in _lan_urls(port):
             print(f"  局域网访问: {url}（需要放行防火墙端口 {port}）")
-    print(f"  sources/: {sources_dir()}   cases/: {cases_dir or '仓库 cases/'}")
+    print(f"  数据根: {root}")
+    print(f"  cases/: {cases_dir or root / 'cases'}   sources/: {sources_dir()}")
     print(f"  logs/: {log_path}  (service-*.jsonl / client-*.jsonl)")
     if open_browser:
         # 监听 0.0.0.0 时浏览器要打 127.0.0.1；延迟一点等端口就绪，避免打开空页。

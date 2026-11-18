@@ -60,3 +60,22 @@ def test_rejects_unknown_key_and_bad_port(user_dir):
         config_cmd.set_value("web.port", "70000")
     with pytest.raises(ValueError):
         config_cmd.set_value("web.port", "abc")
+
+def test_set_data_root_is_quoted(user_dir):
+    config_cmd.set_value("paths.data_root", r"E:\VRAIGC-TEST\vrstudio-data")
+    text = (user_dir / "default.toml").read_text(encoding="utf-8")
+    assert "[paths]" in text
+    assert 'data_root = "E:\\VRAIGC-TEST\\vrstudio-data"' in text
+
+
+def test_set_data_root_replaces_existing_value(user_dir):
+    user_dir.mkdir(parents=True)
+    (user_dir / "default.toml").write_text(
+        '[paths]\ndata_root = "D:/old"\n\n[web]\nport = 8760\n', encoding="utf-8")
+
+    config_cmd.set_value("paths.data_root", "D:/new")
+
+    text = (user_dir / "default.toml").read_text(encoding="utf-8")
+    assert 'data_root = "D:/new"' in text
+    assert "D:/old" not in text
+    assert "port = 8760" in text

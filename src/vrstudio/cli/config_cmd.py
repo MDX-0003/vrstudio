@@ -1,6 +1,6 @@
 """``vrstudio config`` —— 查看与修改本机配置里的少数开关。
 
-只处理安装版日常要改的两项：``web.host`` 与 ``web.port``。写的是
+支持 ``paths.data_root``、``web.host``、``web.port``。写的是
 ``%APPDATA%\\vrstudio\\default.toml``（用户级配置，安装器也会写这个文件），
 只改命中那一行，不动其它段与注释。
 """
@@ -20,6 +20,7 @@ app = typer.Typer(add_completion=False, no_args_is_help=True,
 
 #: 允许改的键 → (段名, 键名)
 _KEYS = {
+    "paths.data_root": ("paths", "data_root"),
     "web.host": ("web", "host"),
     "web.port": ("web", "port"),
 }
@@ -40,7 +41,7 @@ def _format_value(key: str, raw: str) -> str:
         return str(port)
     value = raw.strip()
     if not value:
-        raise ValueError("web.host 不能为空")
+        raise ValueError(f"{key} 不能为空")
     return f'"{value}"'
 
 
@@ -75,8 +76,9 @@ def set_value(key: str, raw: str) -> Path:
 
 @app.command("show")
 def show() -> None:
-    """打印生效的监听地址、端口与配置文件位置。"""
+    """打印生效的数据根、监听地址、端口与配置文件位置。"""
     conf = config_mod.activate()
+    typer.echo(f"data_root = {paths.data_root()}")
     typer.echo(f"host = {conf.get('web.host')}")
     typer.echo(f"port = {conf.get('web.port')}")
     typer.echo(f"config = {user_config_path()}")
@@ -84,8 +86,8 @@ def show() -> None:
 
 @app.command("set")
 def set_command(
-    key: str = typer.Argument(..., help="web.host 或 web.port"),
-    value: str = typer.Argument(..., help="新值；端口写整数。"),
+    key: str = typer.Argument(..., help="paths.data_root / web.host / web.port"),
+    value: str = typer.Argument(..., help="新值；端口写整数，路径直接写。"),
 ) -> None:
     """写入本机配置；下一次启动生效。"""
     try:
