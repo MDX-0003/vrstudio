@@ -21,6 +21,7 @@ from .. import __version__
 from . import assemble as assemble_cli
 from . import calib as calib_cli
 from . import case as case_cli
+from . import config_cmd as config_cli
 from . import extract as extract_cli
 from . import generate as generate_cli
 from . import merge as merge_cli
@@ -40,11 +41,12 @@ app = typer.Typer(
 )
 
 
-def _start_console(host: str, port: int, open_browser: bool) -> None:
+def _start_console(host: str | None, port: int | None, open_browser: bool) -> None:
     """不带子命令时直接启动控制台（双击 exe 的默认行为）。
 
     直接调用 ``serve`` 必须把每个参数都传齐：函数签名里的默认值是 ``typer.Option``
-    对象，只有 Click 解析命令行时才会换成真实值。
+    对象，只有 Click 解析命令行时才会换成真实值。``host``/``port`` 传 None 表示
+    "用配置里的 web.host / web.port"。
     """
     from . import serve as serve_cli
 
@@ -63,10 +65,10 @@ def _start_console(host: str, port: int, open_browser: bool) -> None:
 def _root(
     ctx: typer.Context,
     version: bool = typer.Option(False, "--version", help="打印版本并退出。"),
-    host: str = typer.Option("127.0.0.1", "--host",
-                             help="不带子命令启动控制台时的监听地址。"),
-    port: int = typer.Option(8760, "--port",
-                             help="不带子命令启动控制台时的端口。"),
+    host: str = typer.Option(None, "--host",
+                             help="不带子命令启动控制台时的监听地址；缺省取配置 web.host。"),
+    port: int = typer.Option(None, "--port",
+                             help="不带子命令启动控制台时的端口；缺省取配置 web.port。"),
     lan: bool = typer.Option(False, "--lan",
                              help="不带子命令启动时监听 0.0.0.0（局域网 host 模式）。"),
     open_browser: bool = typer.Option(True, "--open/--no-open",
@@ -99,6 +101,7 @@ app.command(name="restore", help=restore_cli.restore.__doc__)(restore_cli.restor
 app.command(name="relight", help=relight_cli.relight.__doc__)(relight_cli.relight)
 app.add_typer(case_cli.app, name="case", help=case_cli.app.info.help)
 app.add_typer(generate_cli.app, name="generate", help=generate_cli.app.info.help)
+app.add_typer(config_cli.app, name="config", help=config_cli.app.info.help)
 app.command(name="serve", help=serve_cli.serve.__doc__)(serve_cli.serve)
 
 

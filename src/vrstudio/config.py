@@ -92,6 +92,8 @@ _FALLBACK: dict = {
     },
     "web": {
         "proxy_max_w": 4096,         # 预览代理宽度上限（选区全景 + 对比页两路）
+        "host": "127.0.0.1",         # 双击启动时的监听地址；安装版可改成 0.0.0.0
+        "port": 8760,                # 双击启动时的端口；用 vrstudio config set web.port 改
     },
     # [aigc] 段不迁 vrstudio：平台参数归 vrgen 仓库（E:\VRAIGC\vrgen），
     # 见 docs/architecture.md §2。
@@ -400,4 +402,11 @@ def _validate(data: dict) -> None:
     if not isinstance(max_w, int) or isinstance(max_w, bool) or not 256 <= max_w <= 8192:
         raise ConfigError(
             f"web.proxy_max_w must be an int in [256, 8192], got {max_w!r}")
+
+    host = _value(web, "host", "web.host")
+    if not isinstance(host, str) or not host.strip():
+        raise ConfigError(f"web.host must be a non-empty string, got {host!r}")
+    port = _value(web, "port", "web.port")
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        raise ConfigError(f"web.port must be an int in [1, 65535], got {port!r}")
 

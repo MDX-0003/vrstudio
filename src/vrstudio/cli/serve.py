@@ -60,9 +60,10 @@ def _port_busy(host: str, port: int) -> bool:
 
 
 def serve(
-    host: str = typer.Option(DEFAULT_HOST, "--host",
-                             help="监听地址；开放局域网用 0.0.0.0（决策 17）。"),
-    port: int = typer.Option(DEFAULT_PORT, "--port"),
+    host: str = typer.Option(None, "--host",
+                             help="监听地址；开放局域网用 0.0.0.0（决策 17）。"
+                                  "缺省取配置 web.host。"),
+    port: int = typer.Option(None, "--port"),
     cases_dir: Path = typer.Option(None, "--cases-dir"),
     log_dir: Path = typer.Option(DEFAULT_LOG_DIR, "--log-dir",
                                  help="结构化日志目录（默认仓库 logs/serve）。"),
@@ -92,6 +93,11 @@ def serve(
             "config.error", extra={"data": {"event": "config.error", "error": str(exc)}})
         typer.echo(f"配置有问题（{exc}），serve 没有启动。", err=True)
         raise typer.Exit(2) from exc
+    # 没显式给 --host/--port 时取配置里的值（安装版用它记住端口与监听地址）。
+    if host is None:
+        host = str(config_mod.active().get("web.host", DEFAULT_HOST))
+    if port is None:
+        port = int(config_mod.active().get("web.port", DEFAULT_PORT))
     logging.getLogger("vrstudio.serve").info("serve.start", extra={"data": {
         "event": "serve.start", "host": host, "port": port,
         "cases_dir": str(cases_dir or "仓库 cases/"),
