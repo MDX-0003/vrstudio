@@ -15,6 +15,7 @@ import typer
 
 from .. import case as case_mod
 from .. import config as config_mod
+from .. import paths
 from ..case import CaseError
 from ..media.imageio import ImageError, read_image
 from ..media.videoio import VideoIOError, probe
@@ -38,7 +39,7 @@ def _vrgen_exe(conf) -> str:
 
 def _workdir(conf) -> Path:
     raw = Path(str(conf.get("generate.workdir", "vrgen_runs")))
-    return raw if raw.is_absolute() else config_mod.REPO_ROOT / raw
+    return raw if raw.is_absolute() else paths.data_root() / raw
 
 
 def save_mode(name: str, mode: str) -> None:

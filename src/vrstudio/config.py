@@ -26,12 +26,17 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULTS_FILE = REPO_ROOT / "config" / "default.toml"
+from . import paths
+
+REPO_ROOT = paths.app_dir()
+DEFAULTS_FILE = paths.resource_dir() / "config" / "default.toml"
 
 #: Safety net for installs without the repo tree; kept in sync by a test.
 _FALLBACK: dict = {
     "schema": 1,
+    # 可写数据根：cases/sources/vrgen_runs/logs 都在它下面；空表示跟随程序目录。
+    # 安装版由安装器写成非系统盘绝对路径（决策 102）。
+    "paths": {"data_root": ""},
     "pad": {
         "target_aspect": "21:9",
         "pre_roll": "auto",
@@ -197,8 +202,8 @@ def _set_path(data: dict, key: str, value: object) -> None:
 
 def builtin_defaults() -> dict:
     if DEFAULTS_FILE.is_file():
-        with open(DEFAULTS_FILE, "rb") as fh:
-            return tomllib.load(fh)
+        # utf-8-sig：手工用记事本另存时可能带 BOM，tomllib 不接受 BOM。
+        return tomllib.loads(DEFAULTS_FILE.read_text(encoding="utf-8-sig"))
     return _FALLBACK
 
 
@@ -212,16 +217,20 @@ def load(
     cwd = Path(cwd) if cwd else Path.cwd()
     home = Path(home) if home else Path(os.path.expanduser("~"))
 
-    for candidate in (home / ".config" / "vrstudio" / "default.toml", cwd / "vrstudio.toml"):
+    for candidate in (
+            home / ".config" / "vrstudio" / "default.toml",
+            paths.user_config_dir() / "default.toml",
+            paths.app_dir() / "vrstudio.toml",
+            cwd / "vrstudio.toml"):
         if candidate.is_file():
-            with open(candidate, "rb") as fh:
-                data = _deep_merge(data, tomllib.load(fh), str(candidate))
+            data = _deep_merge(data, tomllib.loads(candidate.read_text(encoding="utf-8-sig")),
+                               str(candidate))
     if config_path:
         path = Path(config_path)
         if not path.is_file():
             raise ConfigError(f"config file not found: {path}")
-        with open(path, "rb") as fh:
-            data = _deep_merge(data, tomllib.load(fh), str(path))
+        data = _deep_merge(data, tomllib.loads(path.read_text(encoding="utf-8-sig")),
+                           str(path))
     else:
         path = None
 
@@ -297,6 +306,11 @@ def _validate(data: dict) -> None:
     video = _table(data, "video")
     generate = _table(data, "generate")
     web = _table(data, "web")
+    paths_table = _table(data, "paths")
+
+    data_root = _value(paths_table, "data_root", "paths.data_root")
+    if not isinstance(data_root, str):
+        raise ConfigError(f"paths.data_root must be a string, got {data_root!r}")
 
     names = _value(_table(pad, "pipeline"), "transforms", "pad.pipeline.transforms")
     if not isinstance(names, list) or not names:

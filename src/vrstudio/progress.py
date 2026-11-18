@@ -12,6 +12,8 @@ import sys
 import time
 from pathlib import Path
 
+from . import paths
+
 
 class Log:
     """Level-prefixed console log, optionally teed into a file.
@@ -109,14 +111,12 @@ class RateMeter:
 # vrpatch 的 cli 通过 `from ..progress import PhaseLog as Log` 使用它们，行为零变化。
 
 def logs_dir() -> Path:
-    """<project root>/logs — the repo root in a source checkout, cwd/logs as a
-    fallback for exotic installs. ``VRSTUDIO_LOGS_DIR`` overrides it for tests."""
+    """<数据根>/logs — 源码检出时就是仓库根下的 logs。``VRSTUDIO_LOGS_DIR`` 覆盖它（测试用）。"""
     override = os.environ.get("VRSTUDIO_LOGS_DIR")
     if override:
         d = Path(override)
     else:
-        root = Path(__file__).resolve().parents[2]
-        d = root / "logs" if (root / "pyproject.toml").exists() else Path.cwd() / "logs"
+        d = paths.data_root() / "logs"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

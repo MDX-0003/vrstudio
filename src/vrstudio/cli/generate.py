@@ -29,8 +29,8 @@ import cv2
 import typer
 
 from .. import case as case_mod
+from .. import paths
 from ..case import CaseError
-from ..config import REPO_ROOT
 from ..config import load as load_config
 from ..media.imageio import read_image, write_gray_png, write_png
 from ..media.videoio import VideoIOError, probe
@@ -525,7 +525,7 @@ def _vrgen_exe(conf) -> str:
 
 def _workdir(conf) -> Path:
     raw = Path(str(conf.get("generate.workdir", "vrgen_runs")))
-    return raw if raw.is_absolute() else REPO_ROOT / raw
+    return raw if raw.is_absolute() else paths.data_root() / raw
 
 
 def _stream(argv: list[str]) -> int:

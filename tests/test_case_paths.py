@@ -1,18 +1,19 @@
-"""case 路径锚点：``[source] path`` 按仓库根存相对路径（决策 101）。"""
+"""case 路径锚点：``[source] path`` 按数据根存相对路径（决策 101、102）。"""
 
 from __future__ import annotations
 
 import tomllib
 
 from vrstudio import case as case_mod
+from vrstudio import paths as paths_mod
 from vrstudio.migrate import migrate_source_paths
 
 
 def _repo(tmp_path, monkeypatch):
-    """把一个临时目录当成仓库根：``sources/`` 与 case 都挂在这下面。"""
+    """把一个临时目录当成数据根：``sources/`` 与 case 都挂在这下面。"""
     repo = tmp_path / "repo"
     (repo / "sources").mkdir(parents=True)
-    monkeypatch.setattr(case_mod, "REPO_ROOT", repo)
+    monkeypatch.setattr(paths_mod, "data_root", lambda: repo)
     return repo
 
 

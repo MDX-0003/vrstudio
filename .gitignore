@@ -47,5 +47,9 @@ ship01_old.json
 pytest-of-*/
 /vrgen-*.json
 
+# PyInstaller 构建产物（build-installer.ps1 默认写到工作区根，这里兜底）
+/build/
+/dist/
+
 # 系统
 Thumbs.db

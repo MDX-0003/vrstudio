@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-from .config import REPO_ROOT
+from . import paths
 from .media.imageio import read_image
 from .roles import RESERVED_ROLES, ROLES, check_kinds
 
@@ -81,7 +81,7 @@ class CaseError(ValueError):
 
 
 def cases_root(root: str | Path | None = None) -> Path:
-    return Path(root) if root else REPO_ROOT / "cases"
+    return Path(root) if root else paths.data_root() / "cases"
 
 
 def case_dir(name: str, root: str | Path | None = None) -> Path:
@@ -1459,29 +1459,29 @@ def set_extract_current(name: str, version: str, root: str | Path | None = None)
 
 
 def _stored_path(raw: str) -> Path:
-    """解析 case.toml 里的路径：相对路径按仓库根解析，绝对路径原样返回。
+    """解析 case.toml 里的路径：相对路径按数据根解析，绝对路径原样返回。
 
-    相对写法只可能是仓库根相对（见 :func:`stored_path`）；仓库外的源文件存绝对
-    路径，这里不做任何猜测。
+    相对写法只可能是数据根相对（见 :func:`stored_path`）；数据根外的源文件存绝对
+    路径，这里不做任何猜测。源码检出时数据根就是仓库根（决策 101、102）。
     """
     p = Path(raw)
     if p.is_absolute():
         return p
-    anchored = REPO_ROOT / p
+    anchored = paths.data_root() / p
     if anchored.is_file() or not p.is_file():
         return anchored
     return p
 
 
 def stored_path(path: str | Path) -> str:
-    """把源文件路径归一成 case.toml 里的写法：仓库内写仓库根相对，仓库外保留绝对。
+    """把源文件路径归一成 case.toml 里的写法：数据根内写相对，数据根外保留绝对。
 
-    仓库根相对是整个数据库的锚点（决策 101）：换盘符或换父目录后依然能解析，
-    绝对路径只在源文件确实落在仓库外时才写入。
+    数据根相对是整个数据库的锚点（决策 101、102）：换盘符、换父目录或安装版换数据
+    目录后依然能解析，绝对路径只在源文件确实落在数据根外时才写入。
     """
     p = Path(path).resolve()
     try:
-        return p.relative_to(REPO_ROOT).as_posix()
+        return p.relative_to(paths.data_root()).as_posix()
     except ValueError:
         return str(p)
 

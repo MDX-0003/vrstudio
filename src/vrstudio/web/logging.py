@@ -21,7 +21,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from ..config import REPO_ROOT
+from .. import paths
 
 ACCESS_LOGGER = "vrstudio.web.access"
 PREVIEW_LOGGER = "vrstudio.web.preview"
@@ -221,7 +221,7 @@ def setup_logging(log_dir: str | Path = "logs/serve",
     """
     directory = Path(log_dir)
     if not directory.is_absolute():
-        directory = REPO_ROOT / directory
+        directory = paths.data_root() / directory
 
     service = DailyJsonlHandler(directory, "service", keep_days)
     service.setFormatter(JsonFormatter())

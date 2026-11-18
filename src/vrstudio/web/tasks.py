@@ -22,6 +22,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from .. import paths
 from ..config import REPO_ROOT
 from ..procenv import decode_text, utf8_env
 from ..progress import logs_dir
@@ -395,5 +396,7 @@ QUEUE = TaskQueue()
 
 
 def vrstudio_argv(*args: str) -> list[str]:
-    """与控制台同一条执行路径：当前解释器 ``-m vrstudio <子命令>``。"""
+    """与控制台同一条执行路径：源码走 ``-m vrstudio``，冻结后由 exe 自己再跑一次子命令。"""
+    if paths.is_frozen():
+        return [sys.executable, *args]
     return [sys.executable, "-m", "vrstudio", *args]

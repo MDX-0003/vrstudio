@@ -2,10 +2,18 @@
 # 平台参数归 vrgen 仓库）。
 #
 # 分层加载，优先级从高到低：
-#   CLI --set key=value  >  --config FILE  >  ./vrstudio.toml  >  ~/.config/vrstudio/default.toml  >  本文件（内置默认）
+#   CLI --set key=value  >  --config FILE  >  ./vrstudio.toml  >  <程序目录>\vrstudio.toml
+#   >  %APPDATA%\vrstudio\default.toml  >  ~/.config/vrstudio/default.toml  >  本文件（内置默认）
 # --set 支持点号路径覆盖任意键，便于参数扫描。
 
 schema = 1
+
+# ── 路径 ───────────────────────────────────────────────────────────────
+[paths]
+# 可写数据根：cases / sources / vrgen_runs / logs 都在它下面。空 = 跟随程序目录
+# （源码检出时就是仓库根）。安装版由安装器写成非系统盘绝对路径（决策 102）。
+# 相对路径按程序目录解析。
+data_root = ""
 
 # ── pad ────────────────────────────────────────────────────────────────
 [pad]

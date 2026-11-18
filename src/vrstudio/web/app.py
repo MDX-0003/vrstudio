@@ -45,6 +45,7 @@ from starlette.staticfiles import StaticFiles
 from .. import case as case_mod
 from .. import config as config_mod
 from .. import keyframe as keyframe_mod
+from .. import paths
 from .. import roles as roles_mod
 from ..case import CaseError
 from ..cli.generate import (
@@ -126,8 +127,8 @@ def _locks() -> FileCaseLockStore:
 
 
 def sources_dir() -> Path:
-    d = config_mod.REPO_ROOT / "sources"
-    d.mkdir(exist_ok=True)
+    d = paths.data_root() / "sources"
+    d.mkdir(parents=True, exist_ok=True)
     return d
 
 
@@ -591,7 +592,7 @@ def _vrgen_exe() -> str:
 def _workdir() -> Path:
     conf = config_mod.active()
     raw = Path(str(conf.get("generate.workdir", "vrgen_runs")))
-    return raw if raw.is_absolute() else config_mod.REPO_ROOT / raw
+    return raw if raw.is_absolute() else paths.data_root() / raw
 
 
 _ROUND_LINE = re.compile(
@@ -1119,12 +1120,12 @@ def _is_whole_extract(case: case_mod.Case, version: str) -> bool:
 def _file_info(path: Path) -> dict:
     """文件的名词/位置/修改时间/大小；不存在也是可展示的事实，不是错误。
 
-    ``rel`` 是相对仓库根（E:\\VRAIGC\\vrstudio）的路径，页面优先显示它；
-    仓库外的文件（例如外部源视频）为 None，页面改显示绝对路径。
+    ``rel`` 是相对数据根的路径（源码检出时等于仓库根），页面优先显示它；
+    数据根外的文件（例如外部源视频）为 None，页面改显示绝对路径。
     """
     p = Path(path)
     try:
-        rel = os.path.relpath(p, config_mod.REPO_ROOT)
+        rel = os.path.relpath(p, paths.data_root())
         if rel.startswith(".."):
             rel = None
     except ValueError:                     # 不同盘符
@@ -4521,7 +4522,7 @@ async def api_sources(request):
 
 async def api_browse(request):
     """本地文件浏览器（register 的返回件 / gen 素材多选；单人本地工具，不设限）。"""
-    d = Path(request.query_params.get("path", str(config_mod.REPO_ROOT)))
+    d = Path(request.query_params.get("path", str(paths.data_root())))
     if not d.is_dir():
         return JSONResponse({"error": "not a directory"}, status_code=400)
     dirs = sorted(p for p in d.iterdir() if p.is_dir() and not p.name.startswith("."))
