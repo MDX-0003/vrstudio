@@ -46,7 +46,15 @@ def user_config_dir() -> Path:
 
 
 def data_root() -> Path:
-    """可写数据根；相对路径按程序目录解析，空值表示跟随程序目录。"""
+    """可写数据根；相对路径按程序目录解析，空值表示跟随程序目录。
+
+    ``VRSTUDIO_DATA_ROOT`` 是运维/验收用的临时覆盖（打包前试跑、CI），优先级最高；
+    正式运行时走配置 ``[paths] data_root``。
+    """
+    override = os.environ.get("VRSTUDIO_DATA_ROOT")
+    if override:
+        target = Path(os.path.expandvars(os.path.expanduser(override.strip())))
+        return target if target.is_absolute() else app_dir() / target
     from . import config as config_mod  # 延迟导入：config 自己要用 resource_dir()
 
     raw = str(config_mod.active().get("paths.data_root", "") or "").strip()

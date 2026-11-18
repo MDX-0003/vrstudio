@@ -67,6 +67,8 @@ def _root(
                              help="不带子命令启动控制台时的监听地址。"),
     port: int = typer.Option(8760, "--port",
                              help="不带子命令启动控制台时的端口。"),
+    lan: bool = typer.Option(False, "--lan",
+                             help="不带子命令启动时监听 0.0.0.0（局域网 host 模式）。"),
     open_browser: bool = typer.Option(True, "--open/--no-open",
                                       help="不带子命令启动时是否自动打开浏览器。"),
 ) -> None:
@@ -74,7 +76,7 @@ def _root(
         typer.echo(f"vrstudio {__version__}")
         raise typer.Exit()
     if ctx.invoked_subcommand is None:
-        _start_console(host, port, open_browser)
+        _start_console("0.0.0.0" if lan else host, port, open_browser)
 
 
 # ── ← vrpad 迁入（fullredraw）──────────────────────────────────────────

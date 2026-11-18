@@ -19,6 +19,17 @@ DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_LOG_KEEP_DAYS = 14
 
 
+def _lan_urls(port: int) -> list[str]:
+    """本机对局域网可用的访问地址；拿不到网卡信息时返回空列表。"""
+    import socket
+
+    try:
+        names = socket.gethostbyname_ex(socket.gethostname())[2]
+    except OSError:
+        return []
+    return [f"http://{addr}:{port}/" for addr in sorted(names) if not addr.startswith("127.")]
+
+
 def _port_busy(host: str, port: int) -> bool:
     """端口是否已被别的进程监听。
 
@@ -98,6 +109,9 @@ def serve(
             err=True)
         raise typer.Exit(1)
     print(f"vrstudio serve: http://{host}:{port}/")
+    if host in ("0.0.0.0", "::"):
+        for url in _lan_urls(port):
+            print(f"  局域网访问: {url}（需要放行防火墙端口 {port}）")
     print(f"  sources/: {sources_dir()}   cases/: {cases_dir or '仓库 cases/'}")
     print(f"  logs/: {log_path}  (service-*.jsonl / client-*.jsonl)")
     if open_browser:

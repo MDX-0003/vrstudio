@@ -71,6 +71,15 @@ def test_data_root_relative_value_resolves_against_app_dir(tmp_path, monkeypatch
     assert paths_mod.data_root() == app / "data"
 
 
+def test_data_root_env_override(tmp_path, monkeypatch):
+    _frozen(tmp_path, monkeypatch)
+    target = tmp_path / "ops-data"
+    monkeypatch.setenv("VRSTUDIO_DATA_ROOT", str(target))
+    monkeypatch.setattr(config_mod, "active", lambda: _Conf("D:/from-config"))
+
+    assert paths_mod.data_root() == target
+
+
 def test_user_config_dir_uses_appdata(tmp_path, monkeypatch):
     monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
 

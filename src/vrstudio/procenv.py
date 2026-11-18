@@ -11,25 +11,34 @@ from __future__ import annotations
 
 import locale
 import os
+from pathlib import Path
 
 from . import paths
+
+
+def _mglc_candidates() -> list[Path]:
+    r"""mglc 的固定搜索位置：安装目录的 tools\ 与按用户安装的默认位置。"""
+    local = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "mglc" / "bin" / "mglc.exe"
+    return [paths.app_dir() / "tools" / "mglc.exe", local]
 
 
 def utf8_env() -> dict[str, str]:
     """在当前环境上钉死 UTF-8 输出，返回可直接传给 subprocess 的 env。
 
-    安装版把 mglc 放在 ``<程序目录>\\tools\\mglc.exe``、ffmpeg 放在
-    ``<程序目录>\\bin``，这里补 ``VRGEN_MGLC_BIN`` 与 ``VRGEN_BIN_DIR``，
-    vrgen 的 ``[mglc] mglc_bin`` 留空时就靠它们找外部工具；已有同名环境变量时
-    不覆盖（用户可以自己指定另一个版本）。
+    安装版把 mglc 放在 ``<程序目录>\\tools\\mglc.exe`` 或用户目录的
+    ``%LOCALAPPDATA%\\Programs\\mglc\\bin``，ffmpeg 放在 ``<程序目录>\\bin``。
+    这里按固定位置补 ``VRGEN_MGLC_BIN`` 与 ``VRGEN_BIN_DIR``，vrgen 的
+    ``[mglc] mglc_bin`` 留空时靠它们找外部工具；已有同名环境变量时不覆盖
+    （用户可以自己指定另一个版本），也不依赖 PATH。
     """
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     if not env.get("VRGEN_MGLC_BIN"):
-        bundled = paths.app_dir() / "tools" / "mglc.exe"
-        if bundled.is_file():
-            env["VRGEN_MGLC_BIN"] = str(bundled)
+        for candidate in _mglc_candidates():
+            if candidate.is_file():
+                env["VRGEN_MGLC_BIN"] = str(candidate)
+                break
     if not env.get("VRGEN_BIN_DIR"):
         bin_dir = paths.app_dir() / "bin"
         if bin_dir.is_dir():

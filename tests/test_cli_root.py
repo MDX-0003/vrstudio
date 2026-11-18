@@ -80,3 +80,21 @@ def test_version_option_exits_without_starting_console(monkeypatch, capsys):
 
     assert calls == []
     assert "vrstudio " in capsys.readouterr().out
+
+def test_lan_switch_listens_on_all_interfaces(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli_mod, "_start_console",
+                        lambda host, port, open_browser: calls.append((host, port, open_browser)))
+
+    cli_mod._root(_Ctx(None), version=False, host="127.0.0.1", port=8760,
+                  lan=True, open_browser=False)
+
+    assert calls == [("0.0.0.0", 8760, False)]
+
+
+def test_lan_urls_hide_loopback():
+    from vrstudio.cli import serve as serve_cli
+
+    urls = serve_cli._lan_urls(8760)
+    assert all(url.startswith("http://") and url.endswith(":8760/") for url in urls)
+    assert not any("127.0.0.1" in url for url in urls)
