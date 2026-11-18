@@ -1571,8 +1571,8 @@ def test_merge_follow_up_skips_whole_extract(client, patch_case, tmp_path, monke
     assert "assemble" in follow[0][2] and "--case" in follow[0][2]
 
 
-def test_file_info_uses_repo_relative_path():
-    p = config_mod.REPO_ROOT / "cases" / "_rel_test" / "x.mp4"
+def test_file_info_uses_data_root_relative_path():
+    p = paths_mod.data_root() / "cases" / "_rel_test" / "x.mp4"
     info = web_app._file_info(p)
     assert info["exists"] is False
     assert info["rel"] == os.path.join("cases", "_rel_test", "x.mp4")

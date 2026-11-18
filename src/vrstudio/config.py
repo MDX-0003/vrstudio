@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import paths
+from .procenv import decode_text
 
 REPO_ROOT = paths.app_dir()
 DEFAULTS_FILE = paths.resource_dir() / "config" / "default.toml"
@@ -200,10 +201,23 @@ def _set_path(data: dict, key: str, value: object) -> None:
     node[parts[-1]] = value
 
 
+def _read_text(path: Path) -> str:
+    """读配置文件：优先 UTF-8（含 BOM），失败再按本机代码页。
+
+    安装器与记事本都可能写出非 UTF-8 的文件（决策 102 的安装器早期版本就是 ANSI），
+    这里宽进严出：解码尽量兼容，TOML 本身是否合法仍由 tomllib 判定。
+    """
+    data = path.read_bytes()
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return decode_text(data)
+
+
 def builtin_defaults() -> dict:
     if DEFAULTS_FILE.is_file():
         # utf-8-sig：手工用记事本另存时可能带 BOM，tomllib 不接受 BOM。
-        return tomllib.loads(DEFAULTS_FILE.read_text(encoding="utf-8-sig"))
+        return tomllib.loads(_read_text(DEFAULTS_FILE))
     return _FALLBACK
 
 
@@ -223,14 +237,12 @@ def load(
             paths.app_dir() / "vrstudio.toml",
             cwd / "vrstudio.toml"):
         if candidate.is_file():
-            data = _deep_merge(data, tomllib.loads(candidate.read_text(encoding="utf-8-sig")),
-                               str(candidate))
+            data = _deep_merge(data, tomllib.loads(_read_text(candidate)), str(candidate))
     if config_path:
         path = Path(config_path)
         if not path.is_file():
             raise ConfigError(f"config file not found: {path}")
-        data = _deep_merge(data, tomllib.loads(path.read_text(encoding="utf-8-sig")),
-                           str(path))
+        data = _deep_merge(data, tomllib.loads(_read_text(path)), str(path))
     else:
         path = None
 

@@ -108,6 +108,17 @@ def test_config_accepts_utf8_bom(tmp_path, monkeypatch):
     assert conf.get("paths.data_root") == "D:/bom"
 
 
+def test_config_accepts_ansi_encoded_file(tmp_path):
+    """安装器早期版本用 ANSI 写配置；解码要兼容，TOML 合法就照常读。"""
+    cfg = tmp_path / "vrstudio.toml"
+    cfg.write_bytes(
+        "# 安装器写入\n[paths]\ndata_root = \"D:/ansi\"\n".encode("gbk"))
+
+    conf = config_mod.load(cwd=tmp_path, home=tmp_path / "home")
+
+    assert conf.get("paths.data_root") == "D:/ansi"
+
+
 def test_config_rejects_non_string_data_root(tmp_path):
     with pytest.raises(ConfigError):
         config_mod.load(cwd=tmp_path, home=tmp_path, overrides=["paths.data_root=1"])

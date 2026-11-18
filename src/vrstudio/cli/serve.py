@@ -10,18 +10,28 @@ from pathlib import Path
 
 import typer
 
+#: 默认值集中在这里：``_start_console`` 直接调用 ``serve`` 时必须把每个参数都传齐，
+#: 否则形参拿到的是 ``typer.Option`` 对象而不是值。
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8760
+DEFAULT_LOG_DIR = Path("logs/serve")
+DEFAULT_LOG_LEVEL = "INFO"
+DEFAULT_LOG_KEEP_DAYS = 14
+
 
 def serve(
-    host: str = typer.Option("127.0.0.1", "--host",
+    host: str = typer.Option(DEFAULT_HOST, "--host",
                              help="监听地址；开放局域网用 0.0.0.0（决策 17）。"),
-    port: int = typer.Option(8760, "--port"),
+    port: int = typer.Option(DEFAULT_PORT, "--port"),
     cases_dir: Path = typer.Option(None, "--cases-dir"),
-    log_dir: Path = typer.Option(Path("logs/serve"), "--log-dir",
+    log_dir: Path = typer.Option(DEFAULT_LOG_DIR, "--log-dir",
                                  help="结构化日志目录（默认仓库 logs/serve）。"),
-    log_level: str = typer.Option("INFO", "--log-level",
+    log_level: str = typer.Option(DEFAULT_LOG_LEVEL, "--log-level",
                                   help="DEBUG / INFO / WARNING / ERROR。"),
-    log_keep_days: int = typer.Option(14, "--log-keep-days",
+    log_keep_days: int = typer.Option(DEFAULT_LOG_KEEP_DAYS, "--log-keep-days",
                                       help="按天 JSONL 日志保留天数。"),
+    open_browser: bool = typer.Option(False, "--open/--no-open",
+                                      help="启动后自动打开浏览器（双击启动时默认打开）。"),
 ) -> None:
     """启动 web 控制台（总入口；case 列表 → 向导）。"""
     import uvicorn
@@ -53,6 +63,13 @@ def serve(
     print(f"vrstudio serve: http://{host}:{port}/")
     print(f"  sources/: {sources_dir()}   cases/: {cases_dir or '仓库 cases/'}")
     print(f"  logs/: {log_path}  (service-*.jsonl / client-*.jsonl)")
+    if open_browser:
+        # 监听 0.0.0.0 时浏览器要打 127.0.0.1；延迟一点等端口就绪，避免打开空页。
+        target = f"http://127.0.0.1:{port}/" if host in ("0.0.0.0", "::") else f"http://{host}:{port}/"
+        import threading
+        import webbrowser
+        threading.Timer(1.5, lambda: webbrowser.open(target)).start()
+        print(f"  浏览器将打开 {target}")
     # 队列历史在内存里，重启就空；日志索引落盘，启动时回填最近若干条。
     QUEUE.restore_history()
     reclaim_port(port)

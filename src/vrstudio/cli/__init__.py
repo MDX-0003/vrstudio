@@ -35,19 +35,46 @@ from . import verify as verify_cli
 
 app = typer.Typer(
     add_completion=False,
-    no_args_is_help=True,
     invoke_without_command=True,
     help="360° 视频流程仓库：patch（局部重绘）/ fullredraw（全景重绘）。",
 )
 
 
+def _start_console(host: str, port: int, open_browser: bool) -> None:
+    """不带子命令时直接启动控制台（双击 exe 的默认行为）。
+
+    直接调用 ``serve`` 必须把每个参数都传齐：函数签名里的默认值是 ``typer.Option``
+    对象，只有 Click 解析命令行时才会换成真实值。
+    """
+    from . import serve as serve_cli
+
+    serve_cli.serve(
+        host=host,
+        port=port,
+        cases_dir=None,
+        log_dir=serve_cli.DEFAULT_LOG_DIR,
+        log_level=serve_cli.DEFAULT_LOG_LEVEL,
+        log_keep_days=serve_cli.DEFAULT_LOG_KEEP_DAYS,
+        open_browser=open_browser,
+    )
+
+
 @app.callback()
 def _root(
+    ctx: typer.Context,
     version: bool = typer.Option(False, "--version", help="打印版本并退出。"),
+    host: str = typer.Option("127.0.0.1", "--host",
+                             help="不带子命令启动控制台时的监听地址。"),
+    port: int = typer.Option(8760, "--port",
+                             help="不带子命令启动控制台时的端口。"),
+    open_browser: bool = typer.Option(True, "--open/--no-open",
+                                      help="不带子命令启动时是否自动打开浏览器。"),
 ) -> None:
     if version:
         typer.echo(f"vrstudio {__version__}")
         raise typer.Exit()
+    if ctx.invoked_subcommand is None:
+        _start_console(host, port, open_browser)
 
 
 # ── ← vrpad 迁入（fullredraw）──────────────────────────────────────────
