@@ -93,10 +93,10 @@ class PreviewStore:
         if self.is_image:
             # 图片流程的源是单张 2:1 ERP：只解一次，解码结果直接当第 0 帧的
             # 工作副本，之后所有视口预览都从这份 medium 重投影。
-            self.proxy_file = Path(self.case.source_path)
+            self.proxy_file = case_mod.source_abs(self.case)
             self.source_kind = "image"
             self.source_key = "image"
-            frame = read_image(Path(self.case.source_path))
+            frame = read_image(case_mod.source_abs(self.case))
             self.source_size = (int(frame.shape[1]), int(frame.shape[0]))
             self.frame_count = 1
             self.fps = 0.0
@@ -113,7 +113,7 @@ class PreviewStore:
                 self.source_kind = "source"
                 self.source_key = "source"
             # 元数据以源片为准：代理与源片帧数/帧率必须一致，滑块的帧号才不漂。
-            cap = cv2.VideoCapture(str(Path(self.case.source_path)))
+            cap = cv2.VideoCapture(str(case_mod.source_abs(self.case)))
             self.frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             self.fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
             self.source_size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
@@ -355,7 +355,7 @@ class PreviewStore:
     def _video(self) -> str:
         if self.source_kind == "proxy" and self.proxy_file.is_file():
             return str(self.proxy_file)
-        return str(Path(self.case.source_path))
+        return str(case_mod.source_abs(self.case))
 
     def _reproject(self, med: np.ndarray) -> np.ndarray:
         vp = self._vp()

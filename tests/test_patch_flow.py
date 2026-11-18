@@ -92,7 +92,7 @@ def test_merge_resolve_full_chain(patch_case):
     got = merge_cli.resolve_case_inputs("p1", root)
     assert got["ai"] == d / "result.mp4"
     assert got["sidecar"] == d / "clip.json"
-    assert got["input"] == Path(case.source_path)
+    assert got["input"] == case_mod.source_abs(case)
     assert got["output"].parent.name == "out"
     assert got["output"].stem == "20261016T000000_space"   # 空间合并只写中段
 

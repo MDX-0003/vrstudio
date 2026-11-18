@@ -25,7 +25,7 @@ def test_create_patch_pins_sha256(tmp_path, src_video):
     text = case_mod.case_toml("ship", tmp_path).read_text(encoding="utf-8")
     assert 'flow = "patch"' in text and "[source]" in text
     back = case_mod.load("ship", tmp_path)
-    assert back.source_path == str(src_video) and back.sha256 == case.sha256
+    assert case_mod.source_abs(back) == src_video and back.sha256 == case.sha256
     assert back.viewport is None          # 新 case 草稿未定，合法
 
 

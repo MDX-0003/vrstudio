@@ -469,8 +469,8 @@ async def video_source(request):
             return JSONResponse({"error": "relight 没有视频底版"}, status_code=404)
         p = gt.resolved(case, _ctx["cases_root"])
     else:
-        p = Path(case.source_path)
-    if not p.is_file():
+        p = case_mod.source_file(case)
+    if p is None or not p.is_file():
         return JSONResponse({"error": "source video missing"}, status_code=404)
     return FileResponse(str(p), media_type="video/mp4")
 
@@ -1107,7 +1107,7 @@ def _is_whole_extract(case: case_mod.Case, version: str) -> bool:
         return False
     if not case.source_path:
         return False
-    frames = _video_frames(Path(case.source_path))
+    frames = _video_frames(case_mod.source_file(case))
     if frames is None:
         return False
     return seg.frame_start <= 0 and seg.frame_end >= frames - 1
@@ -1498,7 +1498,7 @@ def _fullredraw_step_files(case: case_mod.Case, cdir: Path) -> dict:
                 padded = cdir / man.padded
             if man.mask.path:
                 mask = cdir / Path(man.mask.path).name
-    source = Path(case.source_path)
+    source = case_mod.source_abs(case)
     result = cdir / "result.mp4"
     # 裁回输入按 ``[merge] input`` 解析：指针优先，缺省是 adopt 落点 result.mp4。
     recompose_input = case.merge_input_file(_ctx["cases_root"]) or result
@@ -1534,7 +1534,7 @@ def _fullredraw_step_files(case: case_mod.Case, cdir: Path) -> dict:
 def _patch_step_files(case: case_mod.Case, cdir: Path) -> dict:
     """patch：源 → 选区片段 → 采用结果 → 贴回成片。没有 extract 指针时
     只显示已知的源，不猜版本目录。"""
-    source = Path(case.source_path)
+    source = case_mod.source_abs(case)
     steps = {
         "extract": {"inputs": [file_entry(source)], "outputs": []},
         "generate": {"inputs": [], "outputs": []},
@@ -1570,7 +1570,7 @@ def _patch_step_files(case: case_mod.Case, cdir: Path) -> dict:
 
 def _patchimg_step_files(case: case_mod.Case, cdir: Path) -> dict:
     """patchimg：源图 → 视口裁剪 → 采用结果 → 贴回成片（单帧，没有时间轴）。"""
-    source = [file_entry(Path(case.source_path))] if case.source_path else []
+    source = [file_entry(case_mod.source_abs(case))] if case.source_path else []
     steps = {
         "extract": {"inputs": source, "outputs": []},
         "generate": {"inputs": [], "outputs": []},
@@ -1599,7 +1599,7 @@ def _patchimg_step_files(case: case_mod.Case, cdir: Path) -> dict:
 
 def _fullredraw_img_step_files(case: case_mod.Case, cdir: Path) -> dict:
     """fullRedrawImg：源图 → 21:9 画布与 mask → 采用结果 → stitch 还原 2:1。"""
-    source = [file_entry(Path(case.source_path))] if case.source_path else []
+    source = [file_entry(case_mod.source_abs(case))] if case.source_path else []
     steps = {
         "extract": {"inputs": source, "outputs": []},
         "generate": {"inputs": [], "outputs": []},
@@ -2022,7 +2022,7 @@ def _derived(case: case_mod.Case) -> list[dict]:
             "kind": "image" if image_flow else "video", "role": "source",
             "label": "源图" if image_flow else "源视频",
             "editable": False, "submit": "流程输入，不作为生成候选",
-            **_file_info(Path(case.source_path)),
+            **_file_info(case_mod.source_abs(case)),
         })
     if case.flow == "patch" and case.extract_current:
         d = cdir / "extracts" / case.extract_current
@@ -2173,8 +2173,8 @@ def _case_info(name: str) -> dict | None:
         "name": case.name,
         "flow": case.flow,
         "source_url": f"/video/source/{case.name}",
-        "source_path": case.source_path,
-        "source_file": (file_entry(Path(case.source_path))
+        "source_path": str(case_mod.source_abs(case)) if case.source_path else None,
+        "source_file": (file_entry(case_mod.source_abs(case))
                         if case.source_path else None),
         "viewport": case.viewport, "inner": case.inner, "frames": case.frames,
         "pick": pick,
@@ -4164,7 +4164,7 @@ def _op_argv(name: str, op: str, body: dict) -> list[str]:
             argv += ["--preset", str(body["preset"])]
         return argv
     if op == "pad":
-        return vrstudio_argv("pad", "--in", case.source_path,
+        return vrstudio_argv("pad", "--in", str(case_mod.source_abs(case)),
                              "--out", str(cdir / "seedance_input.mp4"),
                              "--quiet")
     if op == "register":

@@ -14,11 +14,19 @@
 ``extracts/<版本>/still.json -> image.json``、``still_pad.json -> image_pad.json``、
 ``out/<版本>_still.png -> <版本>_image.png``，``derived/`` 里的副本同样处理。
 只处理 flow=patchimg/fullRedrawImg 的 case；目标已存在时跳过，不做双读。
+
+3. 把 ``case.toml`` 的 ``[source] path`` 从绝对路径改成仓库根相对写法（决策 101）。
+
+写法由 :func:`vrstudio.case.stored_path` 决定：落在仓库内的绝对路径改成
+``sources/xxx.mp4`` 这种正斜杠相对路径，落在仓库外的保留绝对路径并列为待人工
+处理。只改 ``[source]`` 段的 ``path`` 一行，不动其他字段；已经是相对写法的文件
+跳过，重复执行为 0 个。
 """
 
 from __future__ import annotations
 
 import json
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -168,4 +176,65 @@ def migrate_image_names(cases_root: str | Path | None = None,
                         problems.append(f"{source}: 改名失败：{exc}")
                         continue
                 done.append(Rename(name, source, target))
+    return done, problems
+
+
+@dataclass(frozen=True)
+class PathRewrite:
+    case: str
+    toml: Path
+    old: str
+    new: str
+
+
+def _rewrite_source_line(text: str, new: str) -> str:
+    """把 ``[source]`` 段里的 ``path = "…"`` 一行换成新值，其余行原样保留。"""
+    lines = text.splitlines(keepends=True)
+    in_source = False
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_source = stripped == "[source]"
+            continue
+        if in_source and "=" in stripped and stripped.split("=", 1)[0].strip() == "path":
+            ending = "\n" if line.endswith("\n") else ""
+            lines[index] = f"path = {json.dumps(new, ensure_ascii=False)}{ending}"
+            return "".join(lines)
+    return text
+
+
+def migrate_source_paths(cases_root: str | Path | None = None,
+                         *, apply: bool = False) -> tuple[list[PathRewrite], list[str]]:
+    """``[source] path`` 绝对 → 仓库根相对；返回 (计划/已执行的改写, 跳过说明)。"""
+    root = case_mod.cases_root(cases_root)
+    if not root.is_dir():
+        return [], [f"cases 目录不存在：{root}"]
+
+    done: list[PathRewrite] = []
+    problems: list[str] = []
+    for toml in sorted(root.glob("*/case.toml")):
+        name = toml.parent.name
+        try:
+            text = toml.read_text(encoding="utf-8")
+            raw = tomllib.loads(text)
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            problems.append(f"{name}: 跳过，case.toml 读取失败：{exc}")
+            continue
+        source = raw.get("source")
+        if not isinstance(source, dict):
+            continue
+        old = str(source.get("path") or "").strip()
+        if not old or not Path(old).is_absolute():
+            continue
+        new = case_mod.stored_path(old)
+        if new == old:
+            problems.append(f"{name}: 源文件在仓库外，保留绝对路径 {old}")
+            continue
+        if apply:
+            try:
+                toml.write_text(_rewrite_source_line(text, new), encoding="utf-8")
+            except OSError as exc:
+                problems.append(f"{name}: 写回失败：{exc}")
+                continue
+        done.append(PathRewrite(name, toml, old, new))
     return done, problems

@@ -428,6 +428,9 @@ def test_file_route_rejects_symlink_escape(client, tmp_path, monkeypatch):
 def test_step_file_entries_open_url_does_not_depend_on_repo_rel(
         client, patch_case, tmp_path, monkeypatch):
     """临时 cases 根在仓库外：rel 为 None，open_url 仍按 cases 根生成。"""
+    outside = tmp_path.parent / "outside-repo"
+    outside.mkdir(exist_ok=True)
+    monkeypatch.setattr(config_mod, "REPO_ROOT", outside)
     _file_roots(tmp_path, monkeypatch)
     d = _mk_extract("p1", tmp_path, "v1")
     (d / "clip.mp4").write_bytes(b"clip")
@@ -503,7 +506,10 @@ def test_keyframe_pick_and_refs_carry_open_url(
     assert info["keyframe"]["role_help"]["detail_ref"].startswith("细节参考")
 
 
-def test_external_source_has_path_but_no_open_url(client, tmp_path):
+def test_external_source_has_path_but_no_open_url(client, tmp_path, monkeypatch):
+    outside = tmp_path.parent / "outside-repo"
+    outside.mkdir(exist_ok=True)
+    monkeypatch.setattr(config_mod, "REPO_ROOT", outside)
     src = tmp_path.parent / "external_source.mp4"
     src.write_bytes(b"external")
     case_mod.create("f9", "fullredraw", src, root=tmp_path)

@@ -43,5 +43,9 @@ ship01_old.json
 # 前端排布原型（定稿即弃，不进 git）
 /.tmp_prototype/
 
+# 测试运行的临时产物：TEMP 不可用时 tempfile 回退到仓库根，pytest 与 e2e 都写在这里
+pytest-of-*/
+/vrgen-*.json
+
 # 系统
 Thumbs.db

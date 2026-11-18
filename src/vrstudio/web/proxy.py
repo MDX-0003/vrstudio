@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import config as config_mod
-from ..case import Case
+from ..case import Case, source_abs, source_file
 from ..config import REPO_ROOT
 from ..media.ffmpeg import ffmpeg_path
 from ..media.videoio import VideoIOError, probe
@@ -417,19 +417,22 @@ def ensure_proxy(case: Case, root=None, on_done=None) -> str:
     """返回 ready/disabled/building/failed；缺代理时启动一次后台生成。"""
     if not case.source_path:
         return "failed"
+    src = source_file(case)
+    if src is None:
+        return "failed"
     if proxy_ready(case, root):
         return "ready"
     if proxy_disabled(case, root):
         return "disabled"
     try:
-        info = probe(case.source_path)
+        info = probe(src)
     except (VideoIOError, OSError) as exc:
         log.error("proxy.probe_failed", extra={"data": {
             "event": "proxy.probe_failed", "case": case.name, "error": str(exc),
         }})
         return "failed"
 
-    if _browser_safe(info, case.source_path, proxy_max_w()):
+    if _browser_safe(info, src, proxy_max_w()):
         _write_sidecar(case, root, {
             "version": PROXY_VERSION, "max_w": proxy_max_w(),
             "source_sha256": case.sha256,
@@ -471,11 +474,11 @@ def _build(case: Case, root, build: Build, info, target, on_done) -> None:
     tmp = proxy_dir(case, root) / "proxy.tmp.mp4"
     log.info("proxy.start", extra={"data": {
         "event": "proxy.start", "case": case.name,
-        "source": case.source_path, "target": f"{target[0]}x{target[1]}",
+        "source": str(source_abs(case)), "target": f"{target[0]}x{target[1]}",
         "log": str(build.log_path),
     }})
     try:
-        _encode_proxy(Path(case.source_path), info, target, tmp, build.log_path)
+        _encode_proxy(source_abs(case), info, target, tmp, build.log_path)
         os.replace(tmp, final)
         made = probe(final)
         _write_sidecar(case, root, _finish_sidecar({

@@ -321,7 +321,7 @@ def create(name: str, flow: str, source: str | Path | None = None,
     # 创建时就把身份钉死；fullredraw 在 pad 之后源不再被读（manifest 已含源身份），哈希可选。
     sha = file_sha256(src) if (compute_hash and flow in
                                ("patch", "patchimg", "fullRedrawImg")) else None
-    case = Case(name=name, flow=flow, source_path=str(src), sha256=sha)
+    case = Case(name=name, flow=flow, source_path=stored_path(src), sha256=sha)
     return save(case, root)
 
 
@@ -360,6 +360,14 @@ def source_file(case: Case) -> Path | None:
     if not case.source_path:
         return None
     return _stored_path(case.source_path)
+
+
+def source_abs(case: Case) -> Path:
+    """case 的源文件真实路径；调用方已确认有源时用它，缺源按 CaseError 报。"""
+    src = source_file(case)
+    if src is None:
+        raise CaseError(f"case {case.name} 没有源文件")
+    return src
 
 
 def delete(name: str, root: str | Path | None = None) -> Path:
@@ -1451,13 +1459,31 @@ def set_extract_current(name: str, version: str, root: str | Path | None = None)
 
 
 def _stored_path(raw: str) -> Path:
-    """解析 case.toml 里的路径；旧文件的相对路径相对仓库根（当前工作目录）解析。"""
+    """解析 case.toml 里的路径：相对路径按仓库根解析，绝对路径原样返回。
+
+    相对写法只可能是仓库根相对（见 :func:`stored_path`）；仓库外的源文件存绝对
+    路径，这里不做任何猜测。
+    """
     p = Path(raw)
-    if not p.is_absolute() and not p.is_file():
-        alt = REPO_ROOT / p
-        if alt.is_file():
-            return alt
+    if p.is_absolute():
+        return p
+    anchored = REPO_ROOT / p
+    if anchored.is_file() or not p.is_file():
+        return anchored
     return p
+
+
+def stored_path(path: str | Path) -> str:
+    """把源文件路径归一成 case.toml 里的写法：仓库内写仓库根相对，仓库外保留绝对。
+
+    仓库根相对是整个数据库的锚点（决策 101）：换盘符或换父目录后依然能解析，
+    绝对路径只在源文件确实落在仓库外时才写入。
+    """
+    p = Path(path).resolve()
+    try:
+        return p.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return str(p)
 
 
 def check_source(case: Case, root: str | Path | None = None) -> Path:
@@ -1466,7 +1492,11 @@ def check_source(case: Case, root: str | Path | None = None) -> Path:
         raise CaseError(f"case {case.name} 没有源文件")
     src = _stored_path(case.source_path)
     if not src.is_file():
-        raise CaseError(f"源文件不在了：{src}（case.toml 记录的路径）")
+        raise CaseError(
+            f"源文件不在了：{src}（case.toml 记录的路径）"
+            f"；路径是绝对的且本机没有这个盘/目录时，先跑 "
+            f"scripts/migrate_source_paths.py 把仓库内的路径改成仓库根相对写法"
+        )
     if case.sha256 and file_sha256(src) != case.sha256:
         raise CaseError(
             f"源文件内容与 case 创建时不同（sha256 不匹配）：{src}。"
