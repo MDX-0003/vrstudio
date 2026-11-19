@@ -10,6 +10,9 @@
 - :func:`data_root`：可写数据根，读 ``[paths] data_root``；空表示跟随
   :func:`app_dir`。``cases``、``sources``、``vrgen_runs``、``logs`` 都挂在它下面。
 - :func:`user_config_dir`：``%APPDATA%\\vrstudio``，安装版写本机配置的位置。
+- :func:`config_scope` / :func:`config_file`：配置作用域与写入口。安装版读写
+  ``%APPDATA%\\vrstudio\\default.toml``，源码检出只读写自己仓库根的 ``vrstudio.toml``，
+  两边不互相读取（同一台机器上源码与安装版并存时互不污染）。
 """
 
 from __future__ import annotations
@@ -43,6 +46,23 @@ def user_config_dir() -> Path:
     if base:
         return Path(base) / "vrstudio"
     return Path.home() / ".config" / "vrstudio"
+
+
+def config_scope() -> str:
+    """配置作用域：``installed``（冻结的安装版）或 ``source``（源码检出）。"""
+    return "installed" if is_frozen() else "source"
+
+
+def config_file() -> Path:
+    """本机配置写入口：安装版是用户配置，源码是仓库根的 ``vrstudio.toml``。
+
+    读入侧见 :func:`vrstudio.config.load`：安装版读用户配置，源码只读程序目录与
+    当前目录的 ``vrstudio.toml``。写入侧必须用同一个判断，否则会写到一个读不到的
+    文件里。
+    """
+    if is_frozen():
+        return user_config_dir() / "default.toml"
+    return app_dir() / "vrstudio.toml"
 
 
 def data_root() -> Path:

@@ -1,7 +1,8 @@
 """``vrstudio config`` —— 查看与修改本机配置里的少数开关。
 
-支持 ``paths.data_root``、``web.host``、``web.port``。写的是
-``%APPDATA%\\vrstudio\\default.toml``（用户级配置，安装器也会写这个文件），
+支持 ``paths.data_root``、``web.host``、``web.port``。写入口按运行形态区分：
+安装版写 ``%APPDATA%\\vrstudio\\default.toml``（安装器也会写这个文件），源码检出写
+仓库根的 ``vrstudio.toml``；两者互不读取，同一台机器并存时不会互相污染。
 只改命中那一行，不动其它段与注释。
 """
 
@@ -27,7 +28,7 @@ _KEYS = {
 
 
 def user_config_path() -> Path:
-    return paths.user_config_dir() / "default.toml"
+    return paths.config_file()
 
 
 def _format_value(key: str, raw: str) -> str:
@@ -76,11 +77,12 @@ def set_value(key: str, raw: str) -> Path:
 
 @app.command("show")
 def show() -> None:
-    """打印生效的数据根、监听地址、端口与配置文件位置。"""
+    """打印生效的数据根、监听地址、端口、配置作用域与写入口。"""
     conf = config_mod.activate()
     typer.echo(f"data_root = {paths.data_root()}")
     typer.echo(f"host = {conf.get('web.host')}")
     typer.echo(f"port = {conf.get('web.port')}")
+    typer.echo(f"scope = {paths.config_scope()}")
     typer.echo(f"config = {user_config_path()}")
 
 

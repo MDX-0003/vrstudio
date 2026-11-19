@@ -3,7 +3,10 @@
 #
 # 分层加载，优先级从高到低：
 #   CLI --set key=value  >  --config FILE  >  ./vrstudio.toml  >  <程序目录>\vrstudio.toml
-#   >  %APPDATA%\vrstudio\default.toml  >  ~/.config/vrstudio/default.toml  >  本文件（内置默认）
+#   >  安装版的用户级配置（%APPDATA%\vrstudio\default.toml 与 ~/.config/vrstudio/default.toml）
+#   >  本文件（内置默认）
+# 用户级配置只在安装版（PyInstaller 冻结运行）读取；源码检出只读程序目录与当前目录的
+# vrstudio.toml，同一台机器上的安装版不会污染开发环境（决策 103）。
 # --set 支持点号路径覆盖任意键，便于参数扫描。
 
 schema = 1

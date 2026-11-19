@@ -86,16 +86,33 @@ def test_user_config_dir_uses_appdata(tmp_path, monkeypatch):
     assert paths_mod.user_config_dir() == tmp_path / "Roaming" / "vrstudio"
 
 
-def test_config_load_reads_app_dir_and_appdata(tmp_path, monkeypatch):
+def test_config_file_scope_source(tmp_path, monkeypatch):
     app = tmp_path / "VRAIGC"
     app.mkdir()
+    monkeypatch.setattr(paths_mod, "app_dir", lambda: app)
+    monkeypatch.setattr(paths_mod, "is_frozen", lambda: False)
+
+    assert paths_mod.config_scope() == "source"
+    assert paths_mod.config_file() == app / "vrstudio.toml"
+
+
+def test_config_file_scope_installed(tmp_path, monkeypatch):
+    _frozen(tmp_path, monkeypatch)
+    appdata = tmp_path / "Roaming"
+    monkeypatch.setattr(paths_mod, "user_config_dir", lambda: appdata / "vrstudio")
+
+    assert paths_mod.config_scope() == "installed"
+    assert paths_mod.config_file() == appdata / "vrstudio" / "default.toml"
+
+
+def test_config_load_frozen_reads_app_dir_and_appdata(tmp_path, monkeypatch):
+    app, _ = _frozen(tmp_path, monkeypatch)
     (app / "vrstudio.toml").write_text('[paths]\ndata_root = "D:/from-app"\n', encoding="utf-8")
     appdata = tmp_path / "Roaming"
     (appdata / "vrstudio").mkdir(parents=True)
     (appdata / "vrstudio" / "default.toml").write_text(
         '[paths]\ndata_root = "D:/from-appdata"\n', encoding="utf-8")
 
-    monkeypatch.setattr(paths_mod, "app_dir", lambda: app)
     monkeypatch.setattr(paths_mod, "user_config_dir", lambda: appdata / "vrstudio")
 
     # 程序目录的 vrstudio.toml 优先级更高
@@ -105,6 +122,31 @@ def test_config_load_reads_app_dir_and_appdata(tmp_path, monkeypatch):
     (app / "vrstudio.toml").unlink()
     conf = config_mod.load(cwd=tmp_path / "empty", home=tmp_path / "home")
     assert conf.get("paths.data_root") == "D:/from-appdata"
+
+
+def test_config_load_source_ignores_user_config(tmp_path, monkeypatch):
+    """源码形态只读仓库根与当前目录，安装器写的用户级配置不能漏进来。"""
+    app = tmp_path / "repo"
+    app.mkdir()
+    (app / "vrstudio.toml").write_text('[paths]\ndata_root = "D:/from-app"\n', encoding="utf-8")
+    appdata = tmp_path / "Roaming"
+    (appdata / "vrstudio").mkdir(parents=True)
+    (appdata / "vrstudio" / "default.toml").write_text(
+        '[paths]\ndata_root = "D:/from-installer"\n[bin]\ndir = "D:/from-installer/bin"\n',
+        encoding="utf-8")
+
+    monkeypatch.setattr(paths_mod, "is_frozen", lambda: False)
+    monkeypatch.setattr(paths_mod, "app_dir", lambda: app)
+    monkeypatch.setattr(paths_mod, "user_config_dir", lambda: appdata / "vrstudio")
+
+    conf = config_mod.load(cwd=tmp_path / "empty", home=tmp_path / "home")
+    assert conf.get("paths.data_root") == "D:/from-app"
+
+    (app / "vrstudio.toml").unlink()
+    conf = config_mod.load(cwd=tmp_path / "empty", home=tmp_path / "home")
+    # 没有本地覆盖时回落到内置默认值，而不是安装器写的 D:/from-installer
+    assert conf.get("paths.data_root") == ""
+    assert conf.get("bin.dir") == "bin"
 
 
 def test_config_accepts_utf8_bom(tmp_path, monkeypatch):

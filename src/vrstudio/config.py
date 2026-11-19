@@ -2,7 +2,13 @@
 
 Precedence, highest first::
 
-    --set key=value  >  --config FILE  >  ./vrstudio.toml  >  ~/.config/vrpad/default.toml  >  built-in
+    --set key=value  >  --config FILE  >  ./vrstudio.toml  >  <程序目录>/vrstudio.toml
+    >  <安装版的用户级配置>
+
+用户级配置（``%APPDATA%\\vrstudio\\default.toml`` 与旧的
+``~/.config/vrstudio/default.toml``）只在安装版（冻结运行）读取；源码检出只读
+程序目录与当前目录的 ``vrstudio.toml``，同一台机器上的安装版不会污染开发环境。
+写入侧的判断见 :func:`vrstudio.paths.config_file`。
 
 The built-in defaults are the repo's ``config/default.toml`` — one human-readable
 file rather than a Python dict that can drift from it. ``_FALLBACK`` exists only
@@ -233,11 +239,20 @@ def load(
     cwd = Path(cwd) if cwd else Path.cwd()
     home = Path(home) if home else Path(os.path.expanduser("~"))
 
-    for candidate in (
+    # 配置按运行形态分域（决策 102 的补充）：安装版读用户级配置，源码检出只读自己
+    # 仓库根与当前目录的 vrstudio.toml。同一台机器同时装源码与安装版时，安装器写下
+    # 的 data_root、bin.dir 不会漏进开发环境。
+    candidates: list[Path] = []
+    if paths.is_frozen():
+        candidates += [
             home / ".config" / "vrstudio" / "default.toml",
             paths.user_config_dir() / "default.toml",
-            paths.app_dir() / "vrstudio.toml",
-            cwd / "vrstudio.toml"):
+        ]
+    candidates += [
+        paths.app_dir() / "vrstudio.toml",
+        cwd / "vrstudio.toml",
+    ]
+    for candidate in candidates:
         if candidate.is_file():
             data = _deep_merge(data, tomllib.loads(_read_text(candidate)), str(candidate))
     if config_path:
